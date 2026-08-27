@@ -408,6 +408,11 @@ def t16_agent_link_degrade_and_recover():
         ]
         assert r.get(a_call.echo.remote("pre"), timeout=15) == ("echo", 0, "pre")
         run_ref = a_run.block_forever.remote()
+        # Let the proxy relay the call before cutting: cut() discards bytes
+        # its pipe threads have not pumped yet, and a run call eaten by the
+        # proxy is correctly declared lost at reconnect -- a different path
+        # than the quiet-blip one this test pins.
+        time.sleep(0.3)
 
         proxy.pause()
         proxy.cut()
