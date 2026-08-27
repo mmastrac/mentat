@@ -4,9 +4,10 @@ mentat replaces Ray for vLLM multi-node serving: a Rust daemon for placement,
 liveness and reaping, a Rust router for HTTP, and a pure-Python package holding
 the `ray` import name.
 
-No object store, no memory monitor, no dashboard. Registration retries forever.
-Each lifecycle decision is one log line, and an actor's death reason reaches the
-driver.
+mentat has no object store, no memory monitor and no dashboard. Registration
+retries forever, so containers can start in any order. Each lifecycle decision
+is one log line. The driver's exception carries a dead actor's exit code and
+signal.
 
 ## Components
 
