@@ -6,6 +6,12 @@
 name = "mentatd-serve"
 version = "0.1.0"
 edition = "2021"
+description = "OpenAI-compatible router and merged MCP for a mentat cluster"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mmastrac/mentat"
+readme = "README.md"
+keywords = ["vllm", "inference", "router", "openai", "mcp"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
@@ -13,6 +19,8 @@ hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 serde_json = "1"
+hmac = "0.12"
+sha2 = "0.10"
 
 [profile.release]
 strip = true

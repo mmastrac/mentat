@@ -106,6 +106,10 @@ before any hung request does.
 address it claims. The default covers the local subnets, loopback and the
 docker bridge ranges, since a bridge-networked client keeps a `172.x` source.
 
+`MENTAT_SECRET` must match the daemons'. `MENTAT_UNIVERSE` (default
+`default`) separates clusters sharing a broadcast domain, dropping foreign
+announcements without logging them.
+
 `MENTAT_DAEMONS` distinguishes unset from set-and-empty. Unset seeds the local
 daemon, empty means UDP only. Compose cannot express empty, since
 `${VAR:-default}` reads it as unset.
@@ -118,10 +122,9 @@ of the route table.
 
 ## Limits
 
-- Announcements are unsigned. They only add an address to watch, and every
-  claim is re-read over TCP and probed before it affects routing, but the
-  control port itself has no authentication. `MENTAT_SECRET` is reserved for
-  signing them once the control plane gets authentication.
+- `MENTAT_SECRET` signs announcements, and a keyed router refuses unsigned
+  ones. The control port still has no authentication, so every claim is
+  re-read over TCP before it affects routing.
 - The router must reach both every daemon's HTTP port and every announced
   endpoint. On a cluster whose models live on a private subnet, it has to run
   on a box attached to that subnet.

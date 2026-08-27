@@ -20,6 +20,7 @@
 mod logfmt;
 mod mcp;
 mod proxy;
+mod secret;
 mod ws;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -100,9 +101,8 @@ impl Config {
                 "PROBE_FRESH_S",
                 (probe_interval * 3 + probe_timeout).as_secs_f64(),
             ),
-            // Sized for generation: a 198K prefill took 144.7s to first byte
-            // on this cluster, and a non-streaming answer arrives only when
-            // generation ends.
+            // A non-streaming answer arrives only when generation ends, so
+            // this is sized for generation rather than for a hung request.
             serving_timeout: env_secs("SERVING_TIMEOUT_S", 1800.0),
             // latency_percentiles legitimately blocks for its whole window
             // (up to 120s), so the MCP forward allows more than that.
@@ -397,18 +397,105 @@ async fn udp_listener(shared: Arc<Shared>) {
             return;
         }
     };
-    log("announce_listen", &[("port", port.to_string())]);
+    let key = secret::load();
+    log(
+        "announce_listen",
+        &[
+            ("port", port.to_string()),
+            (
+                "verify",
+                match key {
+                    Some(_) => "required".to_string(),
+                    None => "off (no MENTAT_SECRET)".to_string(),
+                },
+            ),
+        ],
+    );
+    // node_id -> (boot_id, last accepted seq). Bounds replay within a boot.
+    let mut seen: HashMap<String, (String, u64)> = HashMap::new();
+    // Sources already complained about, so a 5s broadcast cannot flood the
+    // log with the same misconfiguration.
+    let mut warned: HashSet<String> = HashSet::new();
+    let universe = secret::universe();
     let mut buf = [0u8; 2048];
     loop {
         let Ok((n, src)) = sock.recv_from(&mut buf).await else {
             continue;
         };
-        let Ok(v) = serde_json::from_slice::<Value>(&buf[..n]) else {
-            continue;
-        };
-        if v["mentat_announce"].as_u64() != Some(1) {
-            continue;
+        // Another cluster on this broadcast domain is not a misconfiguration,
+        // so it is dropped before the key is consulted and before anything is
+        // logged. An announcement with no universe predates the field.
+        match secret::peek_universe(&buf[..n]) {
+            Some(u) if u != universe => continue,
+            _ => {}
         }
+        // A key makes signatures mandatory, so a stripped signature or a
+        // replayed version-1 datagram cannot downgrade this listener.
+        let v = match &key {
+            Some(k) => {
+                let Some(p) = secret::verify(&buf[..n], k) else {
+                    // A wrong key and a stripped signature look the same from
+                    // here, and both mean the sender cannot be trusted.
+                    if warned.insert(src.ip().to_string()) {
+                        log(
+                            "announce_rejected",
+                            &[
+                                ("src", src.ip().to_string()),
+                                ("why", "bad signature or unsigned".to_string()),
+                            ],
+                        );
+                    }
+                    continue;
+                };
+                if p["mentat_announce"].as_u64() != Some(secret::SIGNED_VERSION) {
+                    continue;
+                }
+                let Some(t) = p["t"].as_f64() else { continue };
+                if !secret::fresh(t, secret::now_s()) {
+                    continue;
+                }
+                let node = p["node_id"].as_str().unwrap_or_default().to_string();
+                let boot = p["boot_id"].as_str().unwrap_or_default().to_string();
+                let seq = p["seq"].as_u64().unwrap_or(0);
+                if node.is_empty() || boot.is_empty() {
+                    continue;
+                }
+                // A restart resets seq, which the new boot_id distinguishes
+                // from a replay. One announcement per interface repeats a
+                // seq; dropping the repeat costs nothing, since the address
+                // it carries is the same one.
+                match seen.get(&node) {
+                    Some((b, last)) if *b == boot && seq <= *last => continue,
+                    _ => seen.insert(node, (boot, seq)),
+                };
+                p
+            }
+            None => {
+                let Ok(p) = serde_json::from_slice::<Value>(&buf[..n]) else {
+                    continue;
+                };
+                if p["mentat_announce"].as_u64() != Some(1) {
+                    // A signed announcement to a listener with no key. Left
+                    // unverified it would be a downgrade, so it is dropped --
+                    // and said out loud, since the cause is one missing
+                    // variable and the symptom is an empty route table.
+                    if p.get("sig").is_some() && warned.insert(src.ip().to_string()) {
+                        log(
+                            "announce_unverifiable",
+                            &[
+                                ("src", src.ip().to_string()),
+                                (
+                                    "why",
+                                    "signed announcement, no MENTAT_SECRET here".to_string(),
+                                ),
+                            ],
+                        );
+                    }
+                    continue;
+                }
+                p
+            }
+        };
         let Some(http) = v["http"].as_str() else {
             continue;
         };

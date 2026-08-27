@@ -16,6 +16,7 @@ mod http;
 mod logfmt;
 mod mesh;
 mod proto;
+mod secret;
 mod state;
 mod status;
 

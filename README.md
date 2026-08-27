@@ -270,7 +270,9 @@ Set on each actor process: `MENTAT_ACTOR_ID`, `MENTAT_NODE_ID`,
 | `MENTAT_ANNOUNCE_PORT` | 6382 | UDP listen port; 0 disables |
 | `ALLOWED_SOURCES` | `10.100.0.,192.168.1.,127.0.0.1,::1,172.` | Address prefixes accepted for announcements |
 | `SERVING_TIMEOUT_S` | 1800 | Upstream request timeout |
-| `MENTAT_SECRET` | unimplemented | Reserved: announcement signing |
+| `MENTAT_SECRET` | unset | HMAC key for announcements |
+| `MENTAT_SECRET_FILE` | unset | Key from a file, wins over `MENTAT_SECRET` |
+| `MENTAT_UNIVERSE` | `default` | Cluster name. Foreign universes are dropped silently |
 
 Unset, `MENTAT_DAEMONS` seeds the local daemon. Set empty, UDP is the only
 path. Compose cannot express empty, since `${VAR:-default}` reads it as unset.
@@ -278,9 +280,14 @@ path. Compose cannot express empty, since `${VAR:-default}` reads it as unset.
 `ALLOWED_SOURCES` applies to both the datagram's source and the address it
 claims. `172.` covers bridge-networked clients, which keep a `172.x` source.
 
+Set `MENTAT_SECRET` on the daemons and here alike. A keyed router takes signed
+announcements only, so a half-applied rollout stops discovery until the seed
+list finds the daemons instead. `MENTAT_UNIVERSE` separates clusters sharing a
+broadcast domain: a foreign universe is dropped before the key is checked, so
+it never logs.
+
 `SERVING_TIMEOUT_S` caps one upstream request, and a non-streaming answer
-arrives when generation ends. A 198K prefill took 144.7s to first byte, so
-1800s leaves headroom. Lower it and long generations get cut first.
+arrives when generation ends. Lower it and long generations get cut first.
 
 `mentatd-serve` also reads `POLL_INTERVAL_S`, `PROBE_INTERVAL_S`,
 `PROBE_TIMEOUT_S`, `PROBE_FRESH_S`, `MCP_TIMEOUT_S`, `TOOLS_TTL_S` and
@@ -303,7 +310,7 @@ Unparsable `*_MS` values log `bad_env_ms` and use the default. Defaults live on
 - Actors are serial: a call issued after `run()` queues forever.
 - Agent link EOF: calls held, drained on reconnect; degrade at 30s, give up at 60s.
 - mentatd-serve discovers daemons by UDP announcement, the `MENTAT_DAEMONS` seed, and mesh membership. Each watched daemon is polled on `/status` with `/events` held open.
-- Announcements are unsigned. Both datagram source and claimed address must match `ALLOWED_SOURCES`, and everything claimed is re-read over TCP and probed.
+- Announcements are signed when `MENTAT_SECRET` is set. Source and claimed address must match `ALLOWED_SOURCES`, and everything claimed is re-read over TCP either way.
 - `/v1` routing gate: group has a running actor and its announced endpoint answers `/v1/models`, which is also the source of served model names. `/mcp` merge is ungated.
 - Engines are admitted as soon as their API answers, which can be during a model's self-test.
 - Shim covers only vLLM's audited surface. Anything else raises `AttributeError` naming the attribute.
@@ -321,10 +328,10 @@ Serial actors match real Ray. `run()` never returns for a vLLM worker, so any
 call after it queues forever. `call_pending_long` in the log means that
 happened.
 
-Announcements are unsigned because the control port already accepts
-unauthenticated connections from the same network, so signing datagrams adds no
-boundary. Every claim is re-read over TCP anyway. `MENTAT_SECRET` changes that
-when the control plane gets authentication.
+`MENTAT_SECRET` signs announcements, with a timestamp and per-boot sequence
+bounding replay. A keyed listener refuses unsigned ones, so the signature
+cannot be stripped. The control port still has no authentication, so claims are
+re-read over TCP regardless.
 
 ## Tests
 

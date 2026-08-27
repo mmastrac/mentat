@@ -49,3 +49,10 @@ services:
       # unicast targets for a listener outside every broadcast domain.
       - MENTAT_ANNOUNCE_PORT=${MENTAT_ANNOUNCE_PORT:-}
       - MENTAT_ANNOUNCE_ADDR=${MENTAT_ANNOUNCE_ADDR:-}
+      # HMAC key for announcements, matching spark-agent's mesh discovery.
+      # Unset leaves them unsigned. A file keeps the key out of the
+      # environment.
+      - MENTAT_SECRET=${MENTAT_SECRET:-}
+      - MENTAT_SECRET_FILE=${MENTAT_SECRET_FILE:-}
+      # Cluster name. Foreign universes are dropped without a log line.
+      - MENTAT_UNIVERSE=${MENTAT_UNIVERSE:-}

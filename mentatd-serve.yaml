@@ -42,6 +42,12 @@ services:
       # docker bridge ranges (a bridge-networked client like OpenWebUI
       # reaching this host keeps its 172.x source).
       - ALLOWED_SOURCES=${ALLOWED_SOURCES:-}
-      # Empty = 1800s, sized for generation -- a 198K prefill took 144.7s to
-      # first byte on this cluster.
+      # HMAC key for announcements. Set it here and on every daemon, or on
+      # neither: a router holding a key accepts signed announcements only.
+      - MENTAT_SECRET=${MENTAT_SECRET:-}
+      - MENTAT_SECRET_FILE=${MENTAT_SECRET_FILE:-}
+      # Cluster name. Foreign universes are dropped without a log line.
+      - MENTAT_UNIVERSE=${MENTAT_UNIVERSE:-}
+      # Empty = 1800s. A non-streaming answer arrives only when generation
+      # ends, so this is sized for generation rather than for a hung request.
       - SERVING_TIMEOUT_S=${SERVING_TIMEOUT_S:-}

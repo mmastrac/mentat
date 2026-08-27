@@ -1,16 +1,23 @@
 //! Zero-config discovery: mentatd announces its addresses over UDP so
-//! mentatd-serve needs no daemon list. Unsigned today because the control
-//! port accepts unauthenticated connections from the same network, so a
-//! signature here alone would add no boundary. Consumers treat an
-//! announcement as a hint -- an address to watch -- and verify everything
-//! it claims over TCP. A future MENTAT_SECRET that authenticates the
-//! control plane must sign these datagrams too; the mentat_announce field
-//! is the format version to bump when it does.
+//! mentatd-serve needs no daemon list.
+//!
+//! With MENTAT_SECRET set, datagrams are HMAC-SHA256 signed and carry a
+//! timestamp and per-boot sequence number, matching spark-agent's mesh
+//! discovery so one key serves both. Without it they go out unsigned, as
+//! version 1, and a listener holding a key refuses them on version alone.
+//!
+//! Signing raises the floor rather than closing the hole. The control port
+//! still accepts unauthenticated connections from the same network, so a
+//! listener keeps treating an announcement as a hint -- an address to watch
+//! -- and verifies everything it claims over TCP.
 
 use std::net::UdpSocket;
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::logfmt::log;
+use crate::secret;
 use crate::state::SharedRef;
 
 pub const DEFAULT_PORT: u16 = 6382;
@@ -48,10 +55,21 @@ pub fn start(shared: SharedRef) {
             }
         })
         .collect();
-    std::thread::spawn(move || run(shared, port, interval, extra));
+    let key = secret::load();
+    log(
+        "announce_signing",
+        &[(
+            "state",
+            match key {
+                Some(_) => "on".to_string(),
+                None => "off (no MENTAT_SECRET)".to_string(),
+            },
+        )],
+    );
+    std::thread::spawn(move || run(shared, port, interval, extra, key));
 }
 
-fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>) {
+fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key: Option<Vec<u8>>) {
     let sock = match UdpSocket::bind(("0.0.0.0", 0)) {
         Ok(s) => s,
         Err(e) => {
@@ -68,16 +86,32 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>) {
             ("extra", extra.join(",")),
         ],
     );
+    let boot_id = secret::boot_id();
+    let universe = secret::universe();
+    let seq = AtomicU64::new(0);
     loop {
         let payload = {
             let st = shared.st.lock().unwrap();
-            serde_json::json!({
+            let mut v = serde_json::json!({
                 "mentat_announce": 1,
                 "node_id": st.node_id,
                 "control": st.gcs_address,
                 "http": format!("{}:{}", st.node_ip, st.http_port),
-            })
-            .to_string()
+                "universe": universe,
+            });
+            if key.is_some() {
+                // Version 2 carries what bounds replay: t against the
+                // listener's clock, seq against the last one it accepted
+                // from this boot.
+                v["mentat_announce"] = secret::SIGNED_VERSION.into();
+                v["boot_id"] = boot_id.clone().into();
+                v["seq"] = seq.fetch_add(1, Ordering::Relaxed).into();
+                v["t"] = secret::now_s().into();
+            }
+            match &key {
+                Some(k) => secret::sign(&v, k),
+                None => v.to_string(),
+            }
         };
         // Re-read the broadcast targets each round: interfaces come and go
         // (the QSFP link on the pair drops with the cable).
