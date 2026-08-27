@@ -84,6 +84,7 @@ pub fn run(opts: AgentOpts) -> ! {
         .unwrap_or(1);
     let sock_dir = std::env::var("MENTAT_SOCK_DIR").unwrap_or_else(|_| "/tmp/mentat".into());
     let _ = std::fs::create_dir_all(&sock_dir);
+    let services = announced_services();
 
     log(
         "agent_start",
@@ -93,6 +94,7 @@ pub fn run(opts: AgentOpts) -> ! {
             ("daemon", opts.daemon_addr.clone()),
             ("node_ip", node_ip.clone()),
             ("gpus", format!("{gpus:?}")),
+            ("services", format!("{services:?}")),
         ],
     );
 
@@ -106,7 +108,9 @@ pub fn run(opts: AgentOpts) -> ! {
     let mut attempt: u64 = 0;
     loop {
         attempt += 1;
-        match serve_once(&shared, &opts, &agent_id, &container, &node_ip, &gpus, cpus) {
+        match serve_once(
+            &shared, &opts, &agent_id, &container, &node_ip, &gpus, cpus, &services,
+        ) {
             Ok(()) => log("agent_daemon_link_closed", &[("agent", agent_id.clone())]),
             Err(e) => {
                 if attempt % 10 == 1 {
@@ -127,6 +131,22 @@ pub fn run(opts: AgentOpts) -> ! {
     }
 }
 
+/// Service endpoints this container announces, read once at agent start.
+/// The entrypoints export these right before `ray start`. An agent without
+/// them registers exactly as before.
+fn announced_services() -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (var, key) in [("MENTAT_OPENAI_API", "openai"), ("MENTAT_MCP_API", "mcp")] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() {
+                out.insert(key.to_string(), v);
+            }
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn serve_once(
     shared: &Arc<AgentShared>,
     opts: &AgentOpts,
@@ -135,6 +155,7 @@ fn serve_once(
     node_ip: &str,
     gpus: &[u32],
     cpus: u32,
+    services: &BTreeMap<String, String>,
 ) -> std::io::Result<()> {
     let stream = TcpStream::connect(&opts.daemon_addr)?;
     set_keepalive(&stream);
@@ -178,6 +199,7 @@ fn serve_once(
             cpus,
             container: container.to_string(),
             pid: std::process::id(),
+            services: services.clone(),
             resume,
             unacked_refs,
         },
@@ -354,6 +376,7 @@ fn spawn_actor(
                     actor_id,
                     ok: false,
                     error: format!("bind {sock_path}: {e}"),
+                    pid: 0,
                 },
                 0,
                 &[],
@@ -382,6 +405,7 @@ fn spawn_actor(
                     actor_id,
                     ok: false,
                     error: format!("spawn {python}: {e}"),
+                    pid: 0,
                 },
                 0,
                 &[],
@@ -546,6 +570,7 @@ fn spawn_actor(
                         actor_id: actor_id.clone(),
                         ok: true,
                         error: String::new(),
+                        pid,
                     },
                     &[],
                 );
@@ -561,6 +586,7 @@ fn spawn_actor(
                         actor_id: actor_id.clone(),
                         ok: false,
                         error: format!("constructor raised: {error}"),
+                        pid,
                     },
                     &[],
                 );

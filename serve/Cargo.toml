@@ -1,0 +1,18 @@
+# mentat-serve is its own crate on purpose: the daemon crate stays
+# std+serde+clap so it builds on any stable toolchain, and the async stack
+# (tokio + hyper) the router needs for streaming proxying stays here where
+# only this binary pays for it.
+[package]
+name = "mentat-serve"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+serde_json = "1"
+
+[profile.release]
+strip = true

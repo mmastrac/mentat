@@ -146,6 +146,13 @@ pub enum Msg {
         cpus: u32,
         container: String,
         pid: u32,
+        /// Service endpoints this container announces (e.g. "openai" -> the
+        /// vLLM API URL, "mcp" -> the status-server's MCP URL), read from
+        /// MENTAT_*_API env vars. Consumed by mentat-serve. The daemon only
+        /// stores and republishes them, and the serde default keeps an old
+        /// agent and a new daemon (or the reverse) interoperating.
+        #[serde(default)]
+        services: BTreeMap<String, String>,
         /// Actors still alive from before a reconnect, so the daemon can
         /// rebuild instead of orphaning them.
         resume: Vec<ResumeActor>,
@@ -172,6 +179,10 @@ pub enum Msg {
         ok: bool,
         #[serde(default)]
         error: String,
+        /// The actor process pid, which only the agent knows. 0 when the
+        /// failure happened before the fork.
+        #[serde(default)]
+        pid: u32,
     },
     CallActor {
         actor_id: String,

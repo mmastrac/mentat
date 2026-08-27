@@ -46,6 +46,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                     "gpu_vendor": a.gpu_vendor,
                     "cpus": a.cpus,
                     "pid": a.pid,
+                    "services": a.services,
                 })
             })
             .collect();

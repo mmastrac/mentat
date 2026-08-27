@@ -54,6 +54,34 @@ per token; after boot the only recurring call is the health monitor's
   vLLM version-checks it; logs a mentat banner at `ray.init`. Anything
   outside the audited surface raises `NotImplementedError` -- silent stubs
   are how this design would rot.
+- `mentat-serve` (`serve/`, its own tokio+hyper crate so those dependencies
+  stay out of the daemon build), the serving front door in a separate
+  container ([mentat-serve.yaml](mentat-serve.yaml)) -- mentatd never touches
+  inference traffic. HTTP on 6381: an OpenAI-compatible `/v1` that routes by
+  model name to the right group's API with streaming passed through, and one
+  `/mcp` merging every container's management MCP (tools prefixed
+  `<group>__`, plus a native `serve_status` tool showing the route table).
+  Discovery comes from the daemon rather than UDP: it polls each
+  `MENTAT_DAEMONS` entry's `/status` and holds its `/events` WebSocket so
+  any cluster event triggers an immediate re-read. This replaces
+  spark-agent's serving proxy.
+
+## Service announcement
+
+Model containers announce their endpoints through the agent registration:
+the entrypoints export `MENTAT_OPENAI_API` (head only -- a TP worker serves
+nothing) and `MENTAT_MCP_API` (every rank; the status server runs on all of
+them) right before `ray start`, the agent carries them on `AgentRegister`,
+and the daemon republishes them in `/status` and the `agent_register` event.
+Everything is optional and additive: an agent without the env vars registers
+exactly as before, and an old daemon ignores the extra field.
+
+Routing is gated on two facts: the group has a running actor, and the
+announced endpoint answers a `/v1/models` probe (also where served model
+names come from, so `SERVED_NAME` needs no separate announcement). One
+deliberate gap: an engine is admitted as soon as its API answers, which on
+glm53 is during the self-test window. The `/mcp` merge skips the health
+gate: the status server matters most while the engine is loading or wedged.
 
 ## Groups
 
@@ -75,7 +103,8 @@ elected head is a later phase.
 
 ## Deploy order
 
-1. `./build.sh` on gx10-n3 → `mentat-artifacts:<ver>` + `mentatd:<ver>`.
+1. `./build.sh` on gx10-n3 → `mentat-artifacts:<ver>` + `mentatd:<ver>` +
+   `mentat-serve:<ver>`.
 2. `mentatd.yaml` to `~/compose/mentatd/` on each box with the per-node
    `.env` from the comments in that file (`MENTAT_NODE_IP` is the CLUSTER
    address -- `10.100.0.x` on the pair). Up it. **Before any converted model
@@ -83,6 +112,10 @@ elected head is a later phase.
 3. Rebuild glm53 / ds4-flash (their Dockerfiles `COPY --from=mentat-artifacts`).
 4. `docker compose up` the models -- either node first; ordering stopped
    mattering.
+5. Optional, any box that should answer clients: `mentat-serve.yaml` to
+   `~/compose/mentat-serve/` with the per-node `.env` from its comments
+   (list every daemon -- a group registers with one daemon, and peer
+   auto-discovery only finds daemons that dialed inward).
 
 Rollback: point `IMAGE` at the previous (real-ray) image tag. The
 entrypoints kept full `ray` CLI compatibility, the neutralized
@@ -97,6 +130,8 @@ mentat stop [--group g]              # kill actors: the unstick lever
 curl -s http://<box>:6380/status | jq .
 curl -s http://<box>:6380/metrics
 websocat ws://<box>:6380/events      # snapshot, then live events
+curl -s http://<box>:6381/v1/models  # what mentat-serve will route right now
+curl -s http://<box>:6381/status.json | jq .   # and why (health per group)
 ```
 
 If a rank dies, the reason is in the container log (`event=actor_exit`
@@ -193,8 +228,14 @@ python3 tests/test_groups.py      # TP=4, parallel groups, same model twice
 python3 tests/test_vllm_shape.py  # call-for-call replay of RayExecutorV2
 python3 tests/test_multinode.py   # 3-daemon mesh: election, head death,
                                   # peer staleness (short MENTAT_* windows)
+python3 tests/test_serve.py       # mentat-serve: routing, gating, MCP merge
 cargo test                        # framing, WS handshake, the status-line grep contract
 ```
+
+`test_serve.py` builds and runs the real router binary against real
+daemon+agents with fake endpoints (`MENTAT_SERVE_TEST_BINARY` skips the
+cargo build, like `MENTAT_TEST_BINARY`), and proves pass-through streaming
+by timing the gap between SSE frames.
 
 On-hardware gate before touching the serving pair: build the glm53 image on
 n3, run the entrypoint's exact `ray start`/`ray status` incantations in it,

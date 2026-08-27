@@ -103,6 +103,9 @@ pub struct AgentInfo {
     pub cpus: u32,
     pub container: String,
     pub pid: u32,
+    /// Announced service endpoints ("openai", "mcp" -> URL). Stored and
+    /// republished verbatim for mentat-serve.
+    pub services: std::collections::BTreeMap<String, String>,
     pub writer: FrameWriter,
     pub alive: bool,
     /// When the agent link EOFed (degrade window start). None while

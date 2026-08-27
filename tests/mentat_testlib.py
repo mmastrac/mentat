@@ -103,9 +103,8 @@ class Cluster:
                 time.sleep(0.05)
         raise TimeoutError(f"port {port} never opened")
 
-    def start_agent(
-        self, group, gpus=1, container=None, node_ip="127.0.0.1", daemon_addr=None
-    ):
+    def start_agent(self, group, gpus=1, container=None, node_ip="127.0.0.1",
+                    daemon_addr=None, env_extra=None):
         container = container or f"c{len(self.agents)}"
         env = {
             **os.environ,
@@ -121,6 +120,9 @@ class Cluster:
             "PYTHONPATH": os.pathsep.join([PYTHON_PKG, HERE]),
             # The actor host needs these too; it inherits the agent env.
             "MENTAT_GCS_ADDRESS": self.address,
+            # Service announcements (MENTAT_OPENAI_API and friends) ride in
+            # here, the same way the entrypoints export them before ray start.
+            **(env_extra or {}),
         }
         env.pop("CUDA_VISIBLE_DEVICES", None)
         p = subprocess.Popen([BINARY, "start", "--block"], env=env)

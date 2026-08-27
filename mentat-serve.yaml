@@ -1,0 +1,42 @@
+# mentat-serve: the cluster's serving front door -- one OpenAI-compatible
+# endpoint (routes by model name to whichever group announced it, streaming
+# passed through) and one MCP endpoint merging the per-container management
+# MCPs (tools prefixed <group>__). A separate process from mentatd on
+# purpose: the daemon never touches inference traffic.
+#
+# Deploy to ~/compose/mentat-serve/ on whichever box(es) should answer
+# clients -- any box works, it only needs to reach every mentatd's HTTP port
+# and the announced endpoints. On the pair those are on 10.100.0.x, so a
+# front door for a pair-hosted model must run on one of the pair (n3
+# cannot reach that subnet). Per-node .env:
+#
+#   gx10-n1: MENTAT_DAEMONS=127.0.0.1:6380,10.100.0.1:6380,192.168.1.13:6380
+#   gx10-n2: MENTAT_DAEMONS=127.0.0.1:6380,10.100.0.2:6380,192.168.1.13:6380
+#   gx10-n3: MENTAT_DAEMONS=127.0.0.1:6380,192.168.1.11:6380,192.168.1.12:6380
+#
+# List every daemon: a group's agents all register with one daemon (the
+# group's head box), and peer auto-discovery only finds a daemon that dialed
+# inward -- outbound mesh links record http_port 0.
+#
+# Routing is health-gated: a group is admitted only while it has a running
+# actor and its announced endpoint answers a /models probe. The MCP merge
+# skips the gate: the status server matters most while the engine is loading
+# or wedged.
+services:
+  mentat-serve:
+    image: ${IMAGE:-mentat-serve:0.1.0}
+    container_name: mentat-serve
+    # Host networking: the announced endpoints live on host/cluster
+    # addresses (10.100.0.x on the pair) that bridge networking cannot reach.
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - MENTAT_DAEMONS=${MENTAT_DAEMONS:-127.0.0.1:6380}
+      - SERVE_PORT=${SERVE_PORT:-6381}
+      # Empty keeps the built-in default: own subnets, loopback, and the
+      # docker bridge ranges (a bridge-networked client like OpenWebUI
+      # reaching this host keeps its 172.x source).
+      - ALLOWED_SOURCES=${ALLOWED_SOURCES:-}
+      # Empty = 1800s, sized for generation -- a 198K prefill took 144.7s to
+      # first byte on this cluster.
+      - SERVING_TIMEOUT_S=${SERVING_TIMEOUT_S:-}

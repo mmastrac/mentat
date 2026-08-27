@@ -1222,6 +1222,7 @@ fn agent_conn(
         cpus,
         container,
         pid,
+        services,
         resume,
         unacked_refs,
     } = first.0.msg
@@ -1266,6 +1267,7 @@ fn agent_conn(
                 cpus,
                 container: container.clone(),
                 pid,
+                services: services.clone(),
                 writer: writer.clone(),
                 alive: true,
                 lost_at_ms: None,
@@ -1277,7 +1279,8 @@ fn agent_conn(
         st.emit(
             "agent_register",
             json!({ "group": group, "agent": agent_id, "node_ip": node_ip,
-                    "gpus": gpus.len(), "container": container }),
+                    "gpus": gpus.len(), "container": container,
+                    "services": services }),
         );
 
         // Resumed actors whose owner is gone (or that this daemon already
@@ -1436,15 +1439,21 @@ fn agent_conn(
                 actor_id,
                 ok,
                 error,
+                pid,
             } => {
                 let mut st = shared.st.lock().unwrap();
+                if let Some(a) = st.actors.get_mut(&actor_id) {
+                    if pid != 0 {
+                        a.pid = Some(pid);
+                    }
+                }
                 if ok {
                     if let Some(a) = st.actors.get_mut(&actor_id) {
                         if a.state == ActorState::Spawning {
                             a.state = ActorState::Running;
                         }
                     }
-                    st.emit("actor_running", json!({ "actor_id": actor_id }));
+                    st.emit("actor_running", json!({ "actor_id": actor_id, "pid": pid }));
                 } else {
                     mark_actor_dead(
                         &mut st,

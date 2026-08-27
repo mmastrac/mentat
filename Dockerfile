@@ -1,4 +1,4 @@
-# mentat: two build targets from one file, both arm64-native on gx10-n3.
+# mentat: three build targets from one file, all arm64-native on gx10-n3.
 #
 #   --target artifacts  ->  mentat-artifacts:<ver>
 #       /out/mentat                         the static-ish daemon/CLI binary
@@ -8,7 +8,11 @@
 #   --target runtime    ->  mentatd:<ver>
 #       The host-level daemon container (see mentatd.yaml).
 #
-# Build both with ./build.sh. The serving images hard-reference
+#   --target serve      ->  mentat-serve:<ver>
+#       The serving front door (see mentat-serve.yaml). Its own crate under
+#       serve/ -- tokio + hyper stay out of the daemon build on purpose.
+#
+# Build all with ./build.sh. The serving images hard-reference
 # mentat-artifacts:<ver>, so build.sh must run on the same box first --
 # qwen38/build.sh-style, there is no registry in this fleet.
 
@@ -47,3 +51,16 @@ RUN ln -s /usr/local/bin/mentat /usr/local/bin/ray \
 EXPOSE 6379 6380
 ENTRYPOINT ["mentat"]
 CMD ["daemon"]
+
+FROM ${RUST_IMAGE} AS serve-build
+WORKDIR /src
+COPY serve/ /src/
+RUN cargo build --release && ./target/release/mentat-serve --version
+
+FROM debian:bookworm-slim AS serve
+COPY --from=serve-build /src/target/release/mentat-serve /usr/local/bin/mentat-serve
+RUN mentat-serve --version
+# 6381: OpenAI-compatible /v1 plus the merged /mcp. network_mode: host again,
+# so EXPOSE is documentation.
+EXPOSE 6381
+ENTRYPOINT ["mentat-serve"]
