@@ -104,7 +104,7 @@ pub struct AgentInfo {
     pub container: String,
     pub pid: u32,
     /// Announced service endpoints ("openai", "mcp" -> URL). Stored and
-    /// republished verbatim for mentat-serve.
+    /// republished verbatim for mentatd-serve.
     pub services: std::collections::BTreeMap<String, String>,
     pub writer: FrameWriter,
     pub alive: bool,

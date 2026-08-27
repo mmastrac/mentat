@@ -1,9 +1,9 @@
-# mentat-serve is its own crate on purpose: the daemon crate stays
+# mentatd-serve is its own crate on purpose: the daemon crate stays
 # std+serde+clap so it builds on any stable toolchain, and the async stack
 # (tokio + hyper) the router needs for streaming proxying stays here where
 # only this binary pays for it.
 [package]
-name = "mentat-serve"
+name = "mentatd-serve"
 version = "0.1.0"
 edition = "2021"
 

@@ -82,7 +82,7 @@ async fn rpc(shared: &Arc<Shared>, req: Value) -> Option<Value> {
             Some(json!({"jsonrpc": "2.0", "id": rid, "result": {
                 "protocolVersion": proto,
                 "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "mentat-serve", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "mentatd-serve", "version": env!("CARGO_PKG_VERSION")},
             }}))
         }
         m if m.starts_with("notifications/") => None,
@@ -98,7 +98,7 @@ async fn rpc(shared: &Arc<Shared>, req: Value) -> Option<Value> {
 async fn merged_tools(shared: &Arc<Shared>) -> Vec<Value> {
     let mut out = vec![json!({
         "name": "serve_status",
-        "description": "What mentat-serve can route right now: watched daemons, \
+        "description": "What mentatd-serve can route right now: watched daemons, \
                         each group's health and endpoints, and the model table.",
         "inputSchema": {"type": "object", "properties": {}},
     })];

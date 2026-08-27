@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mentat-serve, GPU-free: real daemon + real agents announcing fake
+"""mentatd-serve, GPU-free: real daemon + real agents announcing fake
 endpoints, the real router binary in front. Covers the announcement carrying
 through /status, routing by model name (learned from the endpoint's own
 /models), streaming pass-through, health gating on actor death and on a dead
@@ -27,7 +27,7 @@ from mentat_testlib import Cluster, Daemon, free_port, run_ok  # noqa: E402
 
 SERVE_RUST = os.path.join(tl.ROOT, "serve")
 SERVE_BINARY = os.environ.get("MENTAT_SERVE_TEST_BINARY") or os.path.join(
-    SERVE_RUST, "target", "debug", "mentat-serve"
+    SERVE_RUST, "target", "debug", "mentatd-serve"
 )
 
 
@@ -143,7 +143,7 @@ class FakeModel:
 
 
 # A driver that spawns one actor and then stays alive holding it -- the
-# "engine is up" condition mentat-serve gates on. Prints the actor pid so the
+# "engine is up" condition mentatd-serve gates on. Prints the actor pid so the
 # test can check the daemon's actor table learned it (the SpawnResult
 # piggyback).
 DRIVER = """
@@ -280,7 +280,7 @@ def t02_no_actors_no_route_but_mcp_merged():
             return False
         return any(d.get("connected") for d in view["daemons"].values())
 
-    wait_until(connected, 15, "mentat-serve never connected to the daemon")
+    wait_until(connected, 15, "mentatd-serve never connected to the daemon")
     assert served_models() == [], served_models()
     code, body = serve_post("/v1/chat/completions",
                             {"model": "model-a", "messages": []})

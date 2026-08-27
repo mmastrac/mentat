@@ -1,4 +1,4 @@
-//! mentat-serve: the cluster's serving front door, in the separate process
+//! mentatd-serve: the cluster's serving front door, in the separate process
 //! the mentat design reserved for it -- mentatd never touches inference
 //! traffic, and this binary never touches cluster control.
 //!
@@ -649,7 +649,7 @@ async fn main() {
     // Just enough CLI for the Docker build's smoke test. Everything real is
     // configured by environment, like the daemon's compose file.
     if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("mentat-serve {}", env!("CARGO_PKG_VERSION"));
+        println!("mentatd-serve {}", env!("CARGO_PKG_VERSION"));
         return;
     }
 

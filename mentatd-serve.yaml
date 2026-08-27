@@ -1,10 +1,10 @@
-# mentat-serve: the cluster's serving front door -- one OpenAI-compatible
+# mentatd-serve: the cluster's serving front door -- one OpenAI-compatible
 # endpoint (routes by model name to whichever group announced it, streaming
 # passed through) and one MCP endpoint merging the per-container management
 # MCPs (tools prefixed <group>__). A separate process from mentatd on
 # purpose: the daemon never touches inference traffic.
 #
-# Deploy to ~/compose/mentat-serve/ on whichever box(es) should answer
+# Deploy to ~/compose/mentatd-serve/ on whichever box(es) should answer
 # clients -- any box works, it only needs to reach every mentatd's HTTP port
 # and the announced endpoints. On the pair those are on 10.100.0.x, so a
 # front door for a pair-hosted model must run on one of the pair (n3
@@ -22,9 +22,9 @@
 # skips the gate: the status server matters most while the engine is loading
 # or wedged.
 services:
-  mentat-serve:
-    image: ${IMAGE:-mentat-serve:0.1.0}
-    container_name: mentat-serve
+  mentatd-serve:
+    image: ${IMAGE:-mentatd-serve:0.1.0}
+    container_name: mentatd-serve
     # Host networking: the announced endpoints live on host/cluster
     # addresses (10.100.0.x on the pair) that bridge networking cannot reach.
     network_mode: host

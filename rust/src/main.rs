@@ -100,7 +100,54 @@ enum Cmd {
     },
 }
 
+/// Subcommands clap owns. Anything else is looked up as an external binary.
+const BUILTIN: &[&str] = &[
+    "daemon",
+    "start",
+    "status",
+    "stop",
+    "internal-agent",
+    "help",
+];
+
+/// `mentatd-<name>` beside this binary, else the first one on PATH.
+fn find_subcommand(name: &str) -> Option<std::path::PathBuf> {
+    let file = format!("mentatd-{name}");
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(&file)));
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    sibling
+        .into_iter()
+        .chain(std::env::split_paths(&path).map(|d| d.join(&file)))
+        .find(|p| p.is_file())
+}
+
+/// git-style dispatch: `mentatd serve --port 6381` becomes `mentatd-serve
+/// --port 6381`. Runs before clap so a subcommand can ship as its own crate
+/// without this binary declaring it. Returns if there is nothing to exec,
+/// leaving clap to report an unknown subcommand.
+fn exec_external_subcommand() {
+    use std::os::unix::process::CommandExt;
+
+    let mut args = std::env::args_os().skip(1);
+    let Some(sub) = args.next() else { return };
+    let name = sub.to_string_lossy().into_owned();
+    if name.starts_with('-') || BUILTIN.contains(&name.as_str()) {
+        return;
+    }
+    let Some(path) = find_subcommand(&name) else {
+        return;
+    };
+    // exec replaces this process, so it only returns on failure.
+    let err = std::process::Command::new(&path).args(args).exec();
+    eprintln!("mentatd: cannot run {}: {err}", path.display());
+    std::process::exit(1);
+}
+
 fn main() {
+    exec_external_subcommand();
+
     let invoked_as_ray = std::env::args()
         .next()
         .map(|a| a.rsplit('/').next().unwrap_or("").starts_with("ray"))
@@ -121,7 +168,10 @@ fn main() {
 
     match cli.cmd {
         None => {
-            eprintln!("usage: mentatd <daemon|start|status|stop> (see --help)");
+            eprintln!(
+                "usage: mentatd <daemon|start|status|stop> (see --help)\n\
+                 any other name runs mentatd-<name> from PATH, e.g. mentatd serve"
+            );
             std::process::exit(2);
         }
         Some(Cmd::Daemon {

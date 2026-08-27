@@ -1,24 +1,40 @@
 # mentat
 
-mentat replaces Ray for vLLM multi-node serving: a Rust daemon for placement,
-liveness and reaping, a Rust router for HTTP, and a pure-Python package holding
-the `ray` import name.
+`mentat` replaces Ray for vLLM and other LLM framework multi-node serving: a Rust
+daemon for placement, liveness and reaping, a Rust router for HTTP, and a
+pure-Python package that stubs the `ray` package.
 
-mentat has no object store, no memory monitor and no dashboard. Registration
-retries forever, so containers can start in any order. Each lifecycle decision
-is one log line. The driver's exception carries a dead actor's exit code and
-signal.
+`mentat` is barebones and lacks `ray` features intentionally (e.g.: no object store, no
+memory monitor, no dashboard). 
+
+`mentat` is friendlier to homelab clusters: Registration retries forever, so
+containers can start in any order. Lifecycle events are logged clearly for
+easier analysis.
+
+`mentat` is written in Rust and is as bare metal as possible. It takes only a
+few _megabytes_ of RAM to manage your cluster.
 
 ## Components
 
-- `mentatd daemon` — per-node daemon. Control port 6379, HTTP 6380.
-- `mentatd start` — agent, one per model container. `ray` symlink alias.
-- `mentatd status` / `mentatd stop` — inspect, kill actors.
-- `python/ray/` — pure-Python `ray` shim wheel, `pip install --no-deps`. Reports `__version__ == "2.57.0"`.
-- `serve/` — `mentat-serve`, separate crate + container. HTTP 6381.
+| Component | Where | Overhead |
+| --- | --- | --- |
+| `mentatd` — cluster daemon, agent and CLI in one binary. Control 6379, HTTP 6380. | [rust/](rust/), [crates.io](https://crates.io/crates/mentatd) | 1.7 MiB on disk, ~2.5 MiB RSS |
+| `mentatd-serve` — the serving router, its own crate and container. HTTP 6381. | [serve/](serve/) | 1.7 MiB on disk, ~3.2 MiB RSS |
+| `ray` shim — pure-Python package claiming the `ray` import name in model containers. `pip install --no-deps`. | [python/ray/](python/ray/) | ~2 MiB added to a running interpreter |
 
-One binary is the daemon, the agent and the CLI. The `ray` symlink keeps
-`ray start` and `ray status` working, and `ray --version` names both versions.
+## Commands
+
+- `mentatd daemon` — the per-node daemon.
+- `mentatd start` — register the container's GPUs. The `ray` symlink makes this `ray start`.
+- `mentatd status` / `mentatd stop` — inspect the cluster, kill actors.
+- `mentatd serve` — the router, if `mentatd-serve` is on PATH.
+
+Any name that is not built in runs `mentatd-<name>` from PATH, the way git
+finds its subcommands. `mentatd serve` and `mentatd-serve` are the same
+binary, so either works.
+
+The `ray` symlink keeps `ray start` and `ray status` working, and
+`ray --version` names both versions.
 
 `mentatd daemon` takes `--port` (6379), `--http-port` (6380), `--node-ip`,
 `--head-json` (`/tmp/mentat/head.json`) and `--peers`. Compose uses the
@@ -28,14 +44,14 @@ The shim reports `2.57.0` because vLLM version-checks Ray, and logs a banner at
 `ray.init`. Pure Python is free: `execute_model` runs over vLLM's MessageQueue
 and NCCL, zero Ray calls per token.
 
-`mentat-serve` is a separate crate and container. The daemon never touches
-inference traffic, so restarting the router leaves models serving.
+The daemon never touches inference traffic, so restarting the router leaves
+models serving.
 
 ## Ports
 
 - 6379/tcp — daemon control (`RAY_ADDRESS`)
 - 6380/tcp — daemon HTTP
-- 6381/tcp — mentat-serve HTTP
+- 6381/tcp — mentatd-serve HTTP
 - 6382/udp — daemon announcements
 
 ## Getting started
@@ -73,15 +89,16 @@ vllm serve ... --distributed-executor-backend ray -tp 2
 ```
 
 [GUIDE.md](GUIDE.md) covers the vLLM audit, the Ray workarounds you can delete,
-and the limits.
+and the limits. [GUIDE-SERVE.md](GUIDE-SERVE.md) covers serving several models
+behind one endpoint.
 
 ## Deploy
 
-1. `VERSION=<ver> ./build.sh` → `mentat-artifacts:<ver>`, `mentatd:<ver>`, `mentat-serve:<ver>`.
+1. `VERSION=<ver> ./build.sh` → `mentat-artifacts:<ver>`, `mentatd:<ver>`, `mentatd-serve:<ver>`.
 2. [mentatd.yaml](mentatd.yaml) → `~/compose/mentatd/` on each box, per-node `.env`. Before any model container.
 3. Rebuild the model images; they `COPY --from=mentat-artifacts`.
 4. `docker compose up` the models, either node first.
-5. Optional: [mentat-serve.yaml](mentat-serve.yaml) → `~/compose/mentat-serve/`. No `.env` required.
+5. Optional: [mentatd-serve.yaml](mentatd-serve.yaml) → `~/compose/mentatd-serve/`. No `.env` required.
 
 Step 2's ordering saves time. A container that starts first retries until a
 daemon answers.
@@ -118,10 +135,21 @@ exception text.
 - `/status` — JSON
 - `/events` — WebSocket; snapshot on connect, then `node_join`, `node_leave`, `head_change`, `agent_register`, `agent_lost`, `agent_degraded`, `agent_dead`, `pg_created`, `pg_ready`, `pg_timeout`, `actor_spawning`, `actor_running`, `actor_dead`, `driver_connected`, `driver_disconnected`
 
-`/events` sends a snapshot first, so a late client starts whole. `mentat-serve`
+`/events` sends a snapshot first, so a late client starts whole. `mentatd-serve`
 holds the socket open and re-reads `/status` on any event.
 
-## mentat-serve HTTP (6381)
+## mentatd-serve components
+
+- UDP listener ([main.rs](serve/src/main.rs)) — reads announcements on 6382, drops any whose source or claimed address misses `ALLOWED_SOURCES`, and adds the rest to the watch set.
+- Watch set — one task per daemon HTTP address. Polls `/status` and holds `/events` open, so a cluster event re-reads immediately instead of waiting out `POLL_INTERVAL_S`.
+- Event stream ([ws.rs](serve/src/ws.rs)) — the WebSocket client for `/events`. Coalesces a burst into one re-read, since boot emits many events at once.
+- Group table — merges the daemon views into one group per name. Views older than three poll intervals are stale. Overlap resolves toward the daemon with more running actors.
+- Prober — probes each candidate group's `/models` and keeps the answer. Candidates are groups with a running actor and an announced OpenAI endpoint. A daemon view change wakes it, so admission does not wait a full interval after boot.
+- Proxy ([proxy.rs](serve/src/proxy.rs)) — forwards `/v1` to the group that serves the requested model, streaming passed through.
+- MCP merge ([mcp.rs](serve/src/mcp.rs)) — merges every group's management MCP into one tool list, prefixed `<group>__`, with a `tools/list` cache per group. Adds the native `serve_status` tool.
+- Status view — the document behind `/`, `/healthz` and `/status.json`.
+
+## mentatd-serve HTTP (6381)
 
 - `/v1` — OpenAI-compatible, routed by model name, streaming passed through
 - `/mcp` — merged per-container MCP, tools prefixed `<group>__`, plus native `serve_status`
@@ -188,7 +216,7 @@ via `TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`. Linux only.
 `MENTAT_GPUS` lets the tests run without GPUs. Otherwise the agent counts with
 `nvidia-smi`.
 
-UDP announcement is how `mentat-serve` finds daemons. `MENTAT_ANNOUNCE_ADDR`
+UDP announcement is how `mentatd-serve` finds daemons. `MENTAT_ANNOUNCE_ADDR`
 adds unicast targets outside the broadcast domain. `MENTAT_ANNOUNCE_PORT=0`
 turns it off.
 
@@ -217,7 +245,7 @@ back to `SERVICE_NAME`, then `default`.
 
 The API variables are announced at `ray start` and read once, so export them
 first. Head-rank-only `MENTAT_OPENAI_API` is an entrypoint convention. The
-agent announces whatever is set, and `mentat-serve` takes the lexically first
+agent announces whatever is set, and `mentatd-serve` takes the lexically first
 of several.
 
 `MENTAT_HOST_CONNECT_TIMEOUT_MS` covers process start only. The actor host
@@ -233,7 +261,7 @@ Set on each actor process: `MENTAT_ACTOR_ID`, `MENTAT_NODE_ID`,
 `MENTAT_GPU_IDS` and `MENTAT_GCS_ADDRESS` from the daemon, plus
 `MENTAT_AGENT_PID` from the agent.
 
-## mentat-serve env vars
+## mentatd-serve env vars
 
 | Var | Default | Meaning |
 | --- | --- | --- |
@@ -254,7 +282,7 @@ claims. `172.` covers bridge-networked clients, which keep a `172.x` source.
 arrives when generation ends. A 198K prefill took 144.7s to first byte, so
 1800s leaves headroom. Lower it and long generations get cut first.
 
-`mentat-serve` also reads `POLL_INTERVAL_S`, `PROBE_INTERVAL_S`,
+`mentatd-serve` also reads `POLL_INTERVAL_S`, `PROBE_INTERVAL_S`,
 `PROBE_TIMEOUT_S`, `PROBE_FRESH_S`, `MCP_TIMEOUT_S`, `TOOLS_TTL_S` and
 `DISCOVER_PEERS`. The defaults derive from each other: `PROBE_FRESH_S` is three
 probe intervals plus a timeout. Setting one alone makes groups flap.
@@ -274,7 +302,7 @@ Unparsable `*_MS` values log `bad_env_ms` and use the default. Defaults live on
 - Actors run in their own process group; kills take the tree.
 - Actors are serial: a call issued after `run()` queues forever.
 - Agent link EOF: calls held, drained on reconnect; degrade at 30s, give up at 60s.
-- mentat-serve discovers daemons by UDP announcement, the `MENTAT_DAEMONS` seed, and mesh membership. Each watched daemon is polled on `/status` with `/events` held open.
+- mentatd-serve discovers daemons by UDP announcement, the `MENTAT_DAEMONS` seed, and mesh membership. Each watched daemon is polled on `/status` with `/events` held open.
 - Announcements are unsigned. Both datagram source and claimed address must match `ALLOWED_SOURCES`, and everything claimed is re-read over TCP and probed.
 - `/v1` routing gate: group has a running actor and its announced endpoint answers `/v1/models`, which is also the source of served model names. `/mcp` merge is ungated.
 - Engines are admitted as soon as their API answers, which can be during a model's self-test.
@@ -284,7 +312,7 @@ Unparsable `*_MS` values log `bad_env_ms` and use the default. Defaults live on
 - `ray start --head`, `--object_store_memory`, `RAY_OBJECT_STORE_MEMORY`, `RAY_memory_monitor_refresh_ms` accepted and ignored.
 
 One daemon owns each group's state and the rest carry replicas. When views
-disagree, `mentat-serve` takes the one with more running actors.
+disagree, `mentatd-serve` takes the one with more running actors.
 
 Actors get their own process group because vLLM workers fork helpers and a kill
 must take the tree. A survivor holds its memory outside `ps` RSS.

@@ -92,7 +92,7 @@ class Cluster:
                 **os.environ,
                 "MENTAT_NODE_IP": "127.0.0.1",
                 # A test daemon must never broadcast loopback addresses onto
-                # a real LAN where a production mentat-serve is listening.
+                # a real LAN where a production mentatd-serve is listening.
                 "MENTAT_ANNOUNCE_PORT": "0",
                 **self.daemon_env,
             },

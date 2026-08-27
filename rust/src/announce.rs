@@ -1,5 +1,5 @@
 //! Zero-config discovery: mentatd announces its addresses over UDP so
-//! mentat-serve needs no daemon list. Unsigned today because the control
+//! mentatd-serve needs no daemon list. Unsigned today because the control
 //! port accepts unauthenticated connections from the same network, so a
 //! signature here alone would add no boundary. Consumers treat an
 //! announcement as a hint -- an address to watch -- and verify everything

@@ -148,7 +148,7 @@ pub enum Msg {
         pid: u32,
         /// Service endpoints this container announces (e.g. "openai" -> the
         /// vLLM API URL, "mcp" -> the status-server's MCP URL), read from
-        /// MENTAT_*_API env vars. Consumed by mentat-serve. The daemon only
+        /// MENTAT_*_API env vars. Consumed by mentatd-serve. The daemon only
         /// stores and republishes them, and the serde default keeps an old
         /// agent and a new daemon (or the reverse) interoperating.
         #[serde(default)]
@@ -222,7 +222,7 @@ pub enum Msg {
         node_ip: String,
         /// The accepting daemon's own addresses, so the dialing side records
         /// full membership too -- without these an outbound link stored
-        /// http_port 0 and mesh-following consumers (mentat-serve) could not
+        /// http_port 0 and mesh-following consumers (mentatd-serve) could not
         /// reach that daemon's HTTP side. Defaulted for old daemons.
         #[serde(default)]
         control_addr: String,

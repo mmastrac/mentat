@@ -53,7 +53,7 @@ VERSION=0.1.0 ./build.sh
 ```
 
 That produces `mentat-artifacts:<ver>` (binary plus wheel, for `COPY --from`),
-`mentatd:<ver>` (the daemon container) and `mentat-serve:<ver>` (an optional
+`mentatd:<ver>` (the daemon container) and `mentatd-serve:<ver>` (an optional
 router).
 
 ## 2. Run a daemon on each box
@@ -118,6 +118,11 @@ If you serve more than one model on the cluster, give each its own
 `MENTAT_GROUP`. Placement, `ray.nodes()`, `cluster_resources()` and
 `ray status` are all group-scoped, so two models on one box never count each
 other's GPUs. `MENTAT_GROUP` falls back to `SERVICE_NAME`, then `default`.
+
+Groups are also what lets one endpoint front several models at once.
+[GUIDE-SERVE.md](GUIDE-SERVE.md) covers merging them: `mentatd-serve` routes
+`/v1` by model name to whichever group serves it, and merges every container's
+management MCP into one.
 
 ## 5. Delete your Ray workarounds
 

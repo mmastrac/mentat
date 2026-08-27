@@ -13,11 +13,11 @@ VERSION="${VERSION:-0.1.0}"
 
 sudo docker build --target artifacts -t "mentat-artifacts:${VERSION}" .
 sudo docker build --target runtime   -t "mentatd:${VERSION}" .
-sudo docker build --target serve     -t "mentat-serve:${VERSION}" .
+sudo docker build --target serve     -t "mentatd-serve:${VERSION}" .
 
 # The one property everything downstream depends on: the artifacts image
 # carries the binary and exactly one shim wheel.
 sudo docker run --rm "mentat-artifacts:${VERSION}" sh -c \
   '/out/mentatd --version && ls /out/mentatd-*-py3-none-any.whl'
 
-echo "BUILD_EXIT=$? TAGS=mentat-artifacts:${VERSION},mentatd:${VERSION},mentat-serve:${VERSION}"
+echo "BUILD_EXIT=$? TAGS=mentat-artifacts:${VERSION},mentatd:${VERSION},mentatd-serve:${VERSION}"

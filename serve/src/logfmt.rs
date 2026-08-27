@@ -1,5 +1,5 @@
 //! Same one-line structured logging as the daemon's logfmt.rs, prefixed
-//! `mentat-serve` so a merged log still says which binary spoke.
+//! `mentatd-serve` so a merged log still says which binary spoke.
 
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,7 +10,7 @@ pub fn log(event: &str, fields: &[(&str, String)]) {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let secs = ms / 1000;
-    let mut line = format!("mentat-serve ts={}.{:03} event={}", secs, ms % 1000, event);
+    let mut line = format!("mentatd-serve ts={}.{:03} event={}", secs, ms % 1000, event);
     for (k, v) in fields {
         if v.contains(' ') || v.contains('"') {
             line.push_str(&format!(" {}={:?}", k, v));

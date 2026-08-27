@@ -9,8 +9,8 @@
 #   --target runtime    ->  mentatd:<ver>
 #       The host-level daemon container (see mentatd.yaml).
 #
-#   --target serve      ->  mentat-serve:<ver>
-#       The serving front door (see mentat-serve.yaml). Its own crate under
+#   --target serve      ->  mentatd-serve:<ver>
+#       The serving front door (see mentatd-serve.yaml). Its own crate under
 #       serve/ -- tokio + hyper stay out of the daemon build on purpose.
 #
 # Build all with ./build.sh. The serving images hard-reference
@@ -56,13 +56,13 @@ CMD ["daemon"]
 FROM ${RUST_IMAGE} AS serve-build
 WORKDIR /src
 COPY serve/ /src/
-RUN cargo build --release && ./target/release/mentat-serve --version
+RUN cargo build --release && ./target/release/mentatd-serve --version
 
 FROM debian:bookworm-slim AS serve
-COPY --from=serve-build /src/target/release/mentat-serve /usr/local/bin/mentat-serve
-RUN mentat-serve --version
+COPY --from=serve-build /src/target/release/mentatd-serve /usr/local/bin/mentatd-serve
+RUN mentatd-serve --version
 # 6381: OpenAI-compatible /v1 plus the merged /mcp. 6382/udp: the daemons'
 # announcement port it listens on. network_mode: host again, so EXPOSE is
 # documentation.
 EXPOSE 6381 6382/udp
-ENTRYPOINT ["mentat-serve"]
+ENTRYPOINT ["mentatd-serve"]
