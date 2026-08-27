@@ -1,18 +1,17 @@
 # Replacing Ray with mentatd
 
-For anyone running vLLM multi-node on GB10 boxes who is tired of working
-around Ray's memory monitor and object store. This swaps Ray's control plane
-for a Rust daemon and a pure-Python shim. Your `vllm serve` line barely
-changes.
+This is for a working vLLM multi-node deployment on GB10 boxes that runs on
+Ray. It swaps Ray's control plane for a Rust daemon and a pure-Python shim.
+Your `vllm serve` line barely changes.
 
-## What actually changes
+## What changes
 
-Ray stays in the command line and leaves the process. `--distributed-executor-backend ray`
-still works, `ray start` and `ray status` still work, and `import ray` still
-succeeds. Underneath, the object store, the memory monitor, the raylet and the
-dashboard are gone. Per-token work is untouched: `execute_model` already runs
-over vLLM's own MessageQueue and NCCL, so the control plane does nothing after
-boot except a `ray.wait` every 5 seconds.
+The `ray` CLI and the `ray` import name keep working.
+`--distributed-executor-backend ray`, `ray start` and `ray status` all behave
+as before. The object store, the memory monitor, the raylet and the dashboard
+are gone. Per-token work is untouched: `execute_model` already runs over
+vLLM's own MessageQueue and NCCL, so the control plane does nothing after boot
+except a `ray.wait` every 5 seconds.
 
 ## Before you start: audit your vLLM
 
@@ -26,16 +25,15 @@ grep -rn 'ray\.' $(python -c 'import vllm,os;print(os.path.dirname(vllm.__file__
 
 If that turns up calls beyond `init/get/wait/remote/kill/nodes/cluster_resources/available_resources`,
 `ray.util.placement_group`, and `ray.util.get_node_ip_address`, stop and read
-the shim first. The failure mode is loud, not silent, but it is a failure at
-engine boot.
+the shim first. A missing attribute fails at engine boot.
 
-Two hard requirements: `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1`, because the legacy
-executor's compiled-DAG surface is deliberately unimplemented, and actor-class
-`@ray.remote` only. `ray.remote` on a plain function raises.
+`VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1` is required, because the legacy
+executor's compiled-DAG surface is unimplemented. `@ray.remote` works on actor
+classes, and raises on a plain function.
 
 ## 1. Get the artifacts
 
-Two pieces: a binary and a wheel.
+A binary and a wheel.
 
 ```bash
 cargo install mentatd
@@ -48,7 +46,7 @@ git clone https://github.com/mmastrac/mentat && cd mentat
 pip wheel --no-deps -w dist ./python
 ```
 
-Or build both in Docker, which is what the compose deployment uses:
+Or build both in Docker, as the compose deployment does:
 
 ```bash
 VERSION=0.1.0 ./build.sh
@@ -56,7 +54,7 @@ VERSION=0.1.0 ./build.sh
 
 That produces `mentat-artifacts:<ver>` (binary plus wheel, for `COPY --from`),
 `mentatd:<ver>` (the daemon container) and `mentat-serve:<ver>` (an optional
-router you can ignore for now).
+router).
 
 ## 2. Run a daemon on each box
 
@@ -77,7 +75,7 @@ the remote one. See [mentatd.yaml](mentatd.yaml).
 
 ## 3. Convert the model image
 
-Replace real Ray with the shim. The wheel installs *as* `ray` and claims the
+Replace real Ray with the shim. The wheel installs as `ray` and claims the
 import name:
 
 ```dockerfile
@@ -88,13 +86,11 @@ RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip install --no-deps /tmp/mentatd-0.1.0-py3-none-any.whl
 ```
 
-`--no-deps` matters. The shim has no dependencies and you do not want pip
-resolving Ray's.
+`--no-deps` keeps pip from resolving Ray's dependencies. The shim has none.
 
-The symlink is what keeps `ray start` and `ray status` in your existing
-entrypoint working. `ray --version` reports
-`ray, version 2.57.0 (mentatd 0.1.0)`, and the shim reports
-`__version__ == "2.57.0"` because vLLM version-checks it.
+The symlink keeps `ray start` and `ray status` working in your existing
+entrypoint. `ray --version` reports `ray, version 2.57.0 (mentatd 0.1.0)`, and
+the shim reports `__version__ == "2.57.0"` because vLLM version-checks it.
 
 ## 4. Adjust the entrypoint
 
@@ -106,17 +102,17 @@ export RAY_ADDRESS=10.0.0.1:6379      # same daemon for driver and every agent
 export MENTAT_GROUP=glm53             # one per model deployment
 export VLLM_HOST_IP=10.0.0.1          # this rank's cluster address
 
-ray start --address=$RAY_ADDRESS      # detaches; head/worker no longer differ
+ray start --address=$RAY_ADDRESS      # detaches, agent runs beside vllm
 ray status | grep -oE '[0-9.]+/[0-9.]+ GPU' | cut -d/ -f2 | cut -d. -f1
 vllm serve ... --distributed-executor-backend ray -tp 2
 ```
 
-`ray start --head` is accepted and ignored. There is no head-first ordering any
-more, so both nodes can come up in either order. A container that starts before
-its daemon retries until one answers.
+`ray start --head` is accepted and ignored. Both nodes can come up in either
+order, and a container that starts before its daemon retries until one
+answers.
 
 `ray status` prints exactly one line matching that GPU regex, scoped to your
-group, so the usual `GPU >= TP` gate keeps working unchanged.
+group, so the `GPU >= TP` gate keeps working.
 
 If you serve more than one model on the cluster, give each its own
 `MENTAT_GROUP`. Placement, `ray.nodes()`, `cluster_resources()` and
@@ -125,7 +121,7 @@ other's GPUs. `MENTAT_GROUP` falls back to `SERVICE_NAME`, then `default`.
 
 ## 5. Delete your Ray workarounds
 
-This is the point of the exercise. All of these become unnecessary:
+All of these become unnecessary:
 
 | Workaround | Why it can go |
 |---|---|
@@ -151,8 +147,8 @@ When a rank dies you get `event=actor_exit` with pid and signal in the
 container log, and the exit code and signal come back in the driver's exception
 rather than only in a raylet event log.
 
-`mentatd stop [--group g]` kills actors immediately. It is the manual lever
-when something wedges.
+`mentatd stop [--group g]` kills actors immediately. Use it when something
+wedges.
 
 ## Rollback
 
@@ -160,20 +156,18 @@ Point your image tag back at the previous Ray-based build. Nothing on the host
 needs undoing, since the daemon is inert once no agents talk to it. This works
 because the entrypoint keeps full `ray` CLI compatibility either way.
 
-## Where this will bite you
+## Limits
 
-Stated plainly, because most of it is unfixed rather than unfixable:
-
-- **One daemon per group.** The driver and every agent in a group must reach
-  the *same* daemon. The mesh gives you observability and head election, not
-  rendezvous. Set `RAY_ADDRESS` to one box and leave it.
-- **Actors are serial**, faithfully matching Ray. `run()` never returns for a
-  vLLM worker, so a call issued after it queues forever. vLLM never does this.
+- One daemon per group: the driver and every agent must reach the same one.
+  The mesh gives you observability and head election. Rendezvous follows
+  `RAY_ADDRESS`, so set it to one box and leave it.
+- Actors are serial, matching Ray. `run()` never returns for a vLLM worker, so
+  a call issued after it queues forever. vLLM never does this, and
   `call_pending_long` in the log means something else did.
-- **Audited surface only.** A vLLM base-image bump means re-running the grep
-  above before you ship.
-- **No authentication** on the control port. It accepts connections from anyone
+- The audited surface holds only for the vLLM it was audited against. A
+  base-image bump means re-running the grep above.
+- The control port has no authentication and accepts connections from anyone
   who can reach it. Announcement datagrams are unsigned hints, re-read over TCP
-  before they affect anything, but the port itself is open.
-- **Tested on one pair of boxes**, at TP=1 through TP=4, with GPU-free suites
-  for the lifecycle behaviour. Your hardware is not in that sample.
+  before they affect routing.
+- Tested on one pair of boxes at TP=1 through TP=4, with GPU-free suites for
+  the lifecycle behaviour. Your hardware is not in that sample.
