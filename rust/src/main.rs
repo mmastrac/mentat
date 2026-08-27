@@ -12,6 +12,7 @@ mod daemon;
 mod gpu;
 mod http;
 mod logfmt;
+mod mesh;
 mod proto;
 mod state;
 mod status;
@@ -46,6 +47,10 @@ enum Cmd {
         node_ip: Option<String>,
         #[arg(long, default_value = "/tmp/mentat/head.json")]
         head_json: String,
+        /// Comma-separated control addresses of the other mentatd instances
+        /// (also MENTAT_PEERS). Entries that are this daemon are skipped.
+        #[arg(long, value_delimiter = ',')]
+        peers: Vec<String>,
     },
     /// ray-compatible: register this container's GPUs with the local daemon.
     Start {
@@ -122,13 +127,25 @@ fn main() {
             http_port,
             node_ip,
             head_json,
+            peers,
         }) => {
             let node_ip = node_ip.unwrap_or_else(daemon::default_node_ip);
+            let peers = if peers.is_empty() {
+                std::env::var("MENTAT_PEERS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            } else {
+                peers
+            };
             if let Err(e) = daemon::run(daemon::DaemonOpts {
                 port,
                 http_port,
                 node_ip,
                 head_json,
+                peers,
             }) {
                 eprintln!("mentat daemon failed: {e}");
                 std::process::exit(1);
@@ -205,10 +222,13 @@ fn main() {
             json,
         }) => {
             let addr = resolve_address(address);
-            let scope = group.or_else(|| group_env());
-            match cli_request(&addr, Msg::Status {
-                group: scope.clone(),
-            }) {
+            let scope = group.or_else(group_env);
+            match cli_request(
+                &addr,
+                Msg::Status {
+                    group: scope.clone(),
+                },
+            ) {
                 Ok((Msg::StatusOk { data }, _)) => {
                     if json {
                         println!("{data}");
@@ -292,13 +312,13 @@ fn cli_request(addr: &str, msg: Msg) -> std::io::Result<(Msg, Vec<u8>)> {
     let (hello, _) = read_frame(&mut reader)?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at hello"))?;
     if let Msg::Err { error } = hello.msg {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, error));
+        return Err(std::io::Error::other(error));
     }
     write_frame(&mut writer, &Frame { req: 2, msg }, &[])?;
     let (resp, payload) = read_frame(&mut reader)?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at reply"))?;
     if let Msg::Err { error } = resp.msg {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, error));
+        return Err(std::io::Error::other(error));
     }
     Ok((resp.msg, payload))
 }

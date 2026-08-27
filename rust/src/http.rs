@@ -46,7 +46,12 @@ fn handle(shared: SharedRef, mut stream: TcpStream) {
         "/healthz" => respond(&mut stream, 200, "text/plain", b"ok\n"),
         "/metrics" => {
             let body = metrics(&shared);
-            respond(&mut stream, 200, "text/plain; version=0.0.4", body.as_bytes())
+            respond(
+                &mut stream,
+                200,
+                "text/plain; version=0.0.4",
+                body.as_bytes(),
+            )
         }
         "/status" => {
             let group = query
@@ -56,7 +61,12 @@ fn handle(shared: SharedRef, mut stream: TcpStream) {
             let st = shared.st.lock().unwrap();
             let snap = crate::status::snapshot(&st, group.as_deref());
             drop(st);
-            respond(&mut stream, 200, "application/json", snap.to_string().as_bytes())
+            respond(
+                &mut stream,
+                200,
+                "application/json",
+                snap.to_string().as_bytes(),
+            )
         }
         "/events" => {
             if headers
@@ -188,7 +198,9 @@ fn metrics(shared: &SharedRef) -> String {
         ("signal", st.counters.actor_exits_signal),
         ("error", st.counters.actor_exits_error),
     ] {
-        out.push_str(&format!("mentat_actor_exits_total{{kind=\"{kind}\"}} {v}\n"));
+        out.push_str(&format!(
+            "mentat_actor_exits_total{{kind=\"{kind}\"}} {v}\n"
+        ));
     }
     out.push_str("# TYPE mentat_calls_total counter\n");
     out.push_str(&format!("mentat_calls_total {}\n", st.counters.calls_total));
@@ -207,6 +219,18 @@ fn metrics(shared: &SharedRef) -> String {
         "mentat_event_subscribers {}\n",
         st.event_subs.len()
     ));
+    out.push_str("# TYPE mentat_peers gauge\n");
+    out.push_str(&format!(
+        "mentat_peers {}\n",
+        st.peers.values().filter(|p| p.alive).count()
+    ));
+    out.push_str("# TYPE mentat_is_head gauge\n");
+    out.push_str(&format!(
+        "mentat_is_head {}\n",
+        u8::from(st.head_node_id == st.node_id)
+    ));
+    out.push_str("# TYPE mentat_head_generation counter\n");
+    out.push_str(&format!("mentat_head_generation {}\n", st.head_generation));
     out
 }
 
@@ -220,7 +244,9 @@ fn websocket_events(shared: SharedRef, mut stream: TcpStream, headers: &HashMap<
     let Some(key) = headers.get("sec-websocket-key") else {
         return;
     };
-    let accept = base64(&sha1(format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes()));
+    let accept = base64(&sha1(
+        format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
+    ));
     let resp = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
     );

@@ -194,11 +194,34 @@ pub enum Msg {
     Ping,
     Pong,
 
+    // ---- daemon <-> daemon (mesh) ----
+    PeerHello {
+        node_id: String,
+        node_ip: String,
+        control_addr: String,
+        http_port: u16,
+    },
+    PeerHelloOk {
+        node_id: String,
+        node_ip: String,
+    },
+    /// Periodic push of a daemon's own snapshot, so every daemon can serve a
+    /// merged cluster view without request forwarding.
+    PeerStatus {
+        data: Value,
+    },
+    /// A locally-originated event, replicated so any daemon's /events stream
+    /// carries the whole cluster. Never re-forwarded.
+    PeerEvent {
+        origin: String,
+        line: String,
+    },
+
     // ---- actor host (python) <-> agent, over the per-actor unix socket ----
     HostHello {
         actor_id: String,
     },
-    Ctor,     // payload: pickle (cls, args, kwargs)
+    Ctor, // payload: pickle (cls, args, kwargs)
     CtorOk,
     CtorErr {
         /// repr() of the exception, so the reason survives into Rust logs
@@ -235,9 +258,8 @@ pub fn write_frame<W: Write>(w: &mut W, frame: &Frame, payload: &[u8]) -> io::Re
 /// Returns Ok(None) on clean EOF at a frame boundary.
 pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<(Frame, Vec<u8>)>> {
     let mut lens = [0u8; 8];
-    match read_exact_or_eof(r, &mut lens)? {
-        false => return Ok(None),
-        true => {}
+    if !read_exact_or_eof(r, &mut lens)? {
+        return Ok(None);
     }
     let hlen = u32::from_le_bytes(lens[0..4].try_into().unwrap());
     let plen = u32::from_le_bytes(lens[4..8].try_into().unwrap());
@@ -254,7 +276,10 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<(Frame, Vec<u8>)>> {
     let frame: Frame = serde_json::from_slice(&header).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("bad frame header: {e}: {}", String::from_utf8_lossy(&header)),
+            format!(
+                "bad frame header: {e}: {}",
+                String::from_utf8_lossy(&header)
+            ),
         )
     })?;
     Ok(Some((frame, payload)))
@@ -324,7 +349,10 @@ mod tests {
     #[test]
     fn eof_mid_frame_is_an_error() {
         let mut buf: Vec<u8> = Vec::new();
-        let f = Frame { req: 1, msg: Msg::Ping };
+        let f = Frame {
+            req: 1,
+            msg: Msg::Ping,
+        };
         write_frame(&mut buf, &f, b"").unwrap();
         buf.truncate(buf.len() - 2);
         let mut cur = std::io::Cursor::new(buf);

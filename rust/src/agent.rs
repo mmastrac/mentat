@@ -33,6 +33,9 @@ struct HostActor {
     gpu_ids: Vec<u32>,
     host: Option<UnixFrameWriter>,
     pending_refs: HashSet<String>,
+    /// Calls that arrived before the host connected, drained in arrival
+    /// order at connect time -- actor calls are ordered in real ray.
+    queued_calls: Vec<(String, String, Vec<u8>)>,
     /// A kill that arrived before the pid was known; honored right after fork.
     kill_requested: bool,
 }
@@ -82,9 +85,7 @@ pub fn run(opts: AgentOpts) -> ! {
     let mut attempt: u64 = 0;
     loop {
         attempt += 1;
-        match serve_once(
-            &shared, &opts, &agent_id, &container, &node_ip, &gpus, cpus,
-        ) {
+        match serve_once(&shared, &opts, &agent_id, &container, &node_ip, &gpus, cpus) {
             Ok(()) => log("agent_daemon_link_closed", &[("agent", agent_id.clone())]),
             Err(e) => {
                 if attempt % 10 == 1 {
@@ -159,7 +160,7 @@ fn serve_once(
             );
         }
         Msg::Err { error } => {
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, error));
+            return Err(std::io::Error::other(error));
         }
         other => {
             return Err(std::io::Error::new(
@@ -209,6 +210,7 @@ fn serve_once(
                         gpu_ids: gpu_ids.clone(),
                         host: None,
                         pending_refs: HashSet::new(),
+                        queued_calls: Vec::new(),
                         kill_requested: false,
                     },
                 );
@@ -241,17 +243,12 @@ fn serve_once(
                                     &payload,
                                 )
                                 .is_ok(),
-                            // Host not connected yet: the ctor thread hasn't
-                            // finished the handshake. Queue by retrying from a
-                            // helper thread rather than blocking the agent loop.
+                            // Host not connected yet (the handshake thread is
+                            // still working): queue, drained in order at
+                            // connect time.
                             None => {
-                                let shared2 = shared.clone();
-                                let writer2 = writer.clone();
-                                let (aid, rid, m, p) =
-                                    (actor_id.clone(), ref_id.clone(), method.clone(), payload.clone());
-                                std::thread::spawn(move || {
-                                    deferred_call(shared2, writer2, aid, rid, m, p)
-                                });
+                                a.queued_calls
+                                    .push((ref_id.clone(), method.clone(), payload));
                                 true
                             }
                         }
@@ -279,80 +276,23 @@ fn serve_once(
     }
 }
 
-/// Retry a call whose actor host hasn't finished connecting yet. Gives up
-/// after 120 s -- far beyond any legitimate python startup.
-fn deferred_call(
-    shared: Arc<AgentShared>,
-    writer: FrameWriter,
-    actor_id: String,
-    ref_id: String,
-    method: String,
-    payload: Vec<u8>,
-) {
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        std::thread::sleep(Duration::from_millis(100));
-        let mut actors = shared.actors.lock().unwrap();
-        match actors.get_mut(&actor_id) {
-            None => {
-                // Actor died before the host ever connected; the daemon's
-                // ActorExit already resolved this ref.
-                return;
-            }
-            Some(a) => {
-                if let Some(h) = &a.host {
-                    let res = h.send(
-                        Msg::HostCall {
-                            ref_id: ref_id.clone(),
-                            method: method.clone(),
-                        },
-                        0,
-                        &payload,
-                    );
-                    if res.is_err() {
-                        let _ = writer.send(
-                            Msg::ActorResult {
-                                ref_id,
-                                ok: false,
-                                error: "actor host socket write failed".into(),
-                            },
-                            0,
-                            &[],
-                        );
-                    }
-                    return;
-                }
-            }
-        }
-        drop(actors);
-        if Instant::now() > deadline {
-            let _ = writer.send(
-                Msg::ActorResult {
-                    ref_id,
-                    ok: false,
-                    error: "actor host never connected".into(),
-                },
-                0,
-                &[],
-            );
-            return;
-        }
-    }
-}
-
 fn spawn_actor(
     shared: Arc<AgentShared>,
     writer: FrameWriter,
     actor_id: String,
     name: String,
     env: BTreeMap<String, String>,
-    gpu_ids: Vec<u32>,
+    _gpu_ids: Vec<u32>, // already recorded in the map entry by the caller
     payload: Vec<u8>,
 ) {
     // Short name on purpose: sockaddr_un caps the whole path at ~104 bytes
     // on macOS, and test tmpdirs are long. 12 hex chars of a random 32 still
     // cannot collide within one agent's lifetime.
-    let sock_path = format!("{}/a-{}.sock", shared.sock_dir, &actor_id[..12.min(actor_id.len())]);
+    let sock_path = format!(
+        "{}/a-{}.sock",
+        shared.sock_dir,
+        &actor_id[..12.min(actor_id.len())]
+    );
     let _ = std::fs::remove_file(&sock_path);
     let listener = match UnixListener::bind(&sock_path) {
         Ok(l) => l,
@@ -449,7 +389,9 @@ fn spawn_actor(
                     ),
                     (
                         "signal",
-                        signal.map(|s| s.to_string()).unwrap_or_else(|| "none".into()),
+                        signal
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "none".into()),
                     ),
                 ],
             );
@@ -505,16 +447,43 @@ fn spawn_actor(
     if host_writer.send(Msg::Ctor, 0, &payload).is_err() {
         return;
     }
-    if let Some(a) = shared.actors.lock().unwrap().get_mut(&actor_id) {
-        a.host = Some(host_writer);
+    {
+        // Publish the host and drain calls that arrived before it connected,
+        // in arrival order (the host executes serially behind the ctor).
+        let mut actors = shared.actors.lock().unwrap();
+        if let Some(a) = actors.get_mut(&actor_id) {
+            a.host = Some(host_writer.clone());
+            for (ref_id, method, call_payload) in a.queued_calls.drain(..) {
+                if host_writer
+                    .send(
+                        Msg::HostCall {
+                            ref_id: ref_id.clone(),
+                            method,
+                        },
+                        0,
+                        &call_payload,
+                    )
+                    .is_err()
+                {
+                    if let Some(w) = shared.daemon.lock().unwrap().as_ref() {
+                        let _ = w.send(
+                            Msg::ActorResult {
+                                ref_id,
+                                ok: false,
+                                error: "actor host socket write failed".into(),
+                            },
+                            0,
+                            &[],
+                        );
+                    }
+                }
+            }
+        }
     }
 
-    // Relay: host results flow back to the daemon.
-    loop {
-        let (frame, payload) = match read_frame(&mut host_reader) {
-            Ok(Some(fp)) => fp,
-            _ => break, // EOF/err: the reaper reports the death
-        };
+    // Relay: host results flow back to the daemon. EOF/err ends the loop and
+    // the reaper reports the death.
+    while let Ok(Some((frame, payload))) = read_frame(&mut host_reader) {
         let daemon = shared.daemon.lock().unwrap().clone();
         match frame.msg {
             Msg::CtorOk => {

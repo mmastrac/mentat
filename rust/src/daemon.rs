@@ -13,9 +13,9 @@ use serde_json::{json, Value};
 use crate::logfmt::log;
 use crate::proto::{read_frame, Frame, Msg};
 use crate::state::{
-    local_ip_toward, node_id_for, random_hex_id, write_json_file, ActorInfo, ActorState,
-    AgentInfo, BundleAssignment, ClientInfo, FrameWriter, PgInfo, PgState, RefInfo, RefState,
-    Shared, SharedRef, State,
+    local_ip_toward, node_id_for, random_hex_id, write_json_file, ActorInfo, ActorState, AgentInfo,
+    BundleAssignment, ClientInfo, FrameWriter, PgInfo, PgState, RefInfo, RefState, Shared,
+    SharedRef, State,
 };
 
 pub struct DaemonOpts {
@@ -23,6 +23,8 @@ pub struct DaemonOpts {
     pub http_port: u16,
     pub node_ip: String,
     pub head_json: String,
+    /// Control addresses of the other mentatd instances (static seed list).
+    pub peers: Vec<String>,
 }
 
 pub fn default_node_ip() -> String {
@@ -61,6 +63,45 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
     );
 
     crate::http::serve(shared.clone(), opts.http_port);
+    crate::mesh::start(shared.clone(), opts.peers, opts.port, opts.http_port);
+
+    // Slow-call sweeper: vLLM's run() ref legitimately never resolves, but a
+    // NORMAL method call sitting pending for long means it queued behind a
+    // blocking method (actors are serial, like real ray). That is the
+    // likeliest way a future vLLM change breaks silently, so make it loud.
+    {
+        let shared = shared.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+            let now = crate::state::now_ms_u64();
+            let mut st = shared.st.lock().unwrap();
+            let mut warn: Vec<(String, String, u64)> = Vec::new();
+            for (rid, r) in st.refs.iter_mut() {
+                if matches!(r.state, RefState::Pending)
+                    && r.method != "run"
+                    && !r.warned
+                    && now.saturating_sub(r.created_ms) > 15_000
+                {
+                    r.warned = true;
+                    warn.push((rid.clone(), r.method.clone(), now - r.created_ms));
+                }
+            }
+            for (rid, method, age) in warn {
+                log(
+                    "call_pending_long",
+                    &[
+                        ("ref", rid),
+                        ("method", method),
+                        ("age_ms", age.to_string()),
+                        (
+                            "hint",
+                            "queued behind a blocking method, or the worker is stuck".to_string(),
+                        ),
+                    ],
+                );
+            }
+        });
+    }
 
     for stream in listener.incoming() {
         match stream {
@@ -148,6 +189,7 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
     match first.0.msg {
         Msg::Hello { .. } => client_conn(shared, reader, writer, peer_ip, first.0),
         Msg::AgentRegister { .. } => agent_conn(shared, reader, writer, peer_ip, first),
+        Msg::PeerHello { .. } => crate::mesh::accept_peer(shared, reader, writer, first),
         other => {
             let _ = writer.send(
                 Msg::Err {
@@ -184,9 +226,10 @@ fn client_conn(
         let mut st = shared.st.lock().unwrap();
 
         if session {
-            let dup = st.clients.values().any(|c| {
-                c.group == group && c.has_session && c.id != client_id
-            });
+            let dup = st
+                .clients
+                .values()
+                .any(|c| c.group == group && c.has_session && c.id != client_id);
             if dup {
                 let _ = writer.send(
                     Msg::Err {
@@ -215,21 +258,22 @@ fn client_conn(
                 .unwrap_or_else(|| node_id_for(&peer_ip))
         };
 
-        let entry = st.clients.entry(client_id.clone()).or_insert_with(|| {
-            ClientInfo {
+        let entry = st
+            .clients
+            .entry(client_id.clone())
+            .or_insert_with(|| ClientInfo {
                 id: client_id.clone(),
                 group: group.clone(),
                 node_id: node_id.clone(),
                 has_session: false,
-            }
-        });
+            });
         entry.group = group.clone();
         if session {
             entry.has_session = true;
         }
         let node_id = entry.node_id.clone();
         st.counters.clients_total += 1;
-        let head = st.node_id.clone();
+        let head = st.head_node_id.clone();
         let node_ip = st.node_ip.clone();
         let gcs = st.gcs_address.clone();
         if session {
@@ -309,9 +353,9 @@ fn handle_client_msg(
                 node_entry(&st.node_id, &st.node_ip, 0.0, 8.0),
             );
             for a in st.agents.values().filter(|a| a.alive && a.group == group) {
-                let e = nodes.entry(a.node_id.clone()).or_insert_with(|| {
-                    node_entry(&a.node_id, &a.node_ip, 0.0, a.cpus as f64)
-                });
+                let e = nodes
+                    .entry(a.node_id.clone())
+                    .or_insert_with(|| node_entry(&a.node_id, &a.node_ip, 0.0, a.cpus as f64));
                 if let Some(res) = e.get_mut("Resources").and_then(|r| r.as_object_mut()) {
                     let g = res.get("GPU").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     res.insert("GPU".into(), json!(g + a.gpus.len() as f64));
@@ -432,7 +476,16 @@ fn handle_client_msg(
             pg_id,
             bundle_index,
             env,
-        } => create_actor(shared, client_id, name, num_gpus, pg_id, bundle_index, env, payload),
+        } => create_actor(
+            shared,
+            client_id,
+            name,
+            num_gpus,
+            pg_id,
+            bundle_index,
+            env,
+            payload,
+        ),
         Msg::Call { actor_id, method } => {
             let mut st = shared.st.lock().unwrap();
             st.counters.calls_total += 1;
@@ -440,17 +493,20 @@ fn handle_client_msg(
             let Some(actor) = st.actors.get(&actor_id) else {
                 return err(format!("no such actor {actor_id}"));
             };
+            let new_ref = |state: RefState| RefInfo {
+                state,
+                actor: Some(actor_id.clone()),
+                owner: client_id.to_string(),
+                method: method.clone(),
+                created_ms: crate::state::now_ms_u64(),
+                warned: false,
+            };
             match &actor.state {
                 ActorState::Dead { reason } => {
-                    let reason = reason.clone();
-                    st.refs.insert(
-                        ref_id.clone(),
-                        RefInfo {
-                            state: RefState::ActorDied { reason },
-                            actor: Some(actor_id),
-                            owner: client_id.to_string(),
-                        },
-                    );
+                    let r = new_ref(RefState::ActorDied {
+                        reason: reason.clone(),
+                    });
+                    st.refs.insert(ref_id.clone(), r);
                 }
                 _ => {
                     let agent_writer = st
@@ -460,26 +516,14 @@ fn handle_client_msg(
                         .map(|a| a.writer.clone());
                     match agent_writer {
                         None => {
-                            st.refs.insert(
-                                ref_id.clone(),
-                                RefInfo {
-                                    state: RefState::ActorDied {
-                                        reason: "agent connection lost".into(),
-                                    },
-                                    actor: Some(actor_id),
-                                    owner: client_id.to_string(),
-                                },
-                            );
+                            let r = new_ref(RefState::ActorDied {
+                                reason: "agent connection lost".into(),
+                            });
+                            st.refs.insert(ref_id.clone(), r);
                         }
                         Some(w) => {
-                            st.refs.insert(
-                                ref_id.clone(),
-                                RefInfo {
-                                    state: RefState::Pending,
-                                    actor: Some(actor_id.clone()),
-                                    owner: client_id.to_string(),
-                                },
-                            );
+                            let r = new_ref(RefState::Pending);
+                            st.refs.insert(ref_id.clone(), r);
                             let send_res = w.send(
                                 Msg::CallActor {
                                     actor_id,
@@ -527,7 +571,7 @@ fn handle_client_msg(
                 let st = shared.st.lock().unwrap();
                 st.actors
                     .values()
-                    .filter(|a| group.as_deref().map_or(true, |g| a.group == g))
+                    .filter(|a| group.as_deref().is_none_or(|g| a.group == g))
                     .filter(|a| !matches!(a.state, ActorState::Dead { .. }))
                     .map(|a| a.id.clone())
                     .collect()
@@ -575,11 +619,14 @@ fn create_actor(
     let mut st = shared.st.lock().unwrap();
     let group = client_group(&st, client_id);
 
-    let dup = st.actors.values().any(|a| {
-        a.group == group && a.name == name && !matches!(a.state, ActorState::Dead { .. })
-    });
+    let dup = st
+        .actors
+        .values()
+        .any(|a| a.group == group && a.name == name && !matches!(a.state, ActorState::Dead { .. }));
     if dup {
-        return err(format!("actor name '{name}' already exists in group '{group}'"));
+        return err(format!(
+            "actor name '{name}' already exists in group '{group}'"
+        ));
     }
 
     let Some(pg) = st.pgs.get(&pg_id) else {
@@ -655,7 +702,12 @@ fn create_actor(
         &payload,
     );
     if let Err(e) = send_res {
-        mark_actor_dead(&mut st, &shared.cv, &actor_id, &format!("spawn send failed: {e}"));
+        mark_actor_dead(
+            &mut st,
+            &shared.cv,
+            &actor_id,
+            &format!("spawn send failed: {e}"),
+        );
         return err(format!("agent send failed: {e}"));
     }
 
@@ -769,9 +821,7 @@ fn do_wait(
     loop {
         let ready: Vec<String> = ref_ids
             .iter()
-            .filter(|r| {
-                !matches!(resolve_ref(&st, r), Res::Pending)
-            })
+            .filter(|r| !matches!(resolve_ref(&st, r), Res::Pending))
             .cloned()
             .collect();
         if ready.len() >= want {
@@ -1150,8 +1200,12 @@ fn agent_conn(
                 }
                 let reason = format!(
                     "actor process exited (exit_code={} signal={})",
-                    exit_code.map(|c| c.to_string()).unwrap_or_else(|| "none".into()),
-                    signal.map(|s| s.to_string()).unwrap_or_else(|| "none".into()),
+                    exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "none".into()),
+                    signal
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "none".into()),
                 );
                 mark_actor_dead(&mut st, &shared.cv, &actor_id, &reason);
             }

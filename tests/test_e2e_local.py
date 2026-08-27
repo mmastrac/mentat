@@ -214,8 +214,11 @@ a = ray.remote(FakeWorker).options(
     scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg,
                                                          placement_group_bundle_index=0),
 ).remote()
+# pid BEFORE block_forever: actor calls are serial, so anything issued after
+# a never-returning method would queue forever (same as real ray).
+pid = ray.get(a.pid.remote())
 a.block_forever.remote()
-print("PID", ray.get(a.pid.remote()), flush=True)
+print("PID", pid, flush=True)
 os._exit(0)  # die without any cleanup, like a crashed driver
 """
     env = {

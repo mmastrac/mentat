@@ -1,5 +1,5 @@
-"""Shared harness for the mentat integration tests: builds the binary once,
-starts daemons/agents as subprocesses with fake GPUs, and cleans them up."""
+"""Shared helpers for the mentat integration tests: build the binary once,
+start daemons/agents as subprocesses with fake GPUs, clean them up."""
 
 import atexit
 import json
@@ -108,6 +108,7 @@ class Cluster:
             # The actor host needs these too; it inherits the agent env.
             "MENTAT_GCS_ADDRESS": self.address,
         }
+        env.pop("CUDA_VISIBLE_DEVICES", None)
         p = subprocess.Popen([BINARY, "start", "--block"], env=env)
         _children.append(p)
         self.agents.append(p)
@@ -146,6 +147,83 @@ class Cluster:
         for p in self.agents + [self.daemon]:
             if p.poll() is None:
                 p.kill()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class Daemon:
+    """One mentatd in a mesh test: its own ports, node_ip, and peer list."""
+
+    def __init__(self, node_ip, peers=(), port=None):
+        build_binary()
+        self.tmp = tempfile.mkdtemp(prefix="mentatd-")
+        self.node_ip = node_ip
+        self.port = port or free_port()
+        self.http_port = free_port()
+        self.address = f"127.0.0.1:{self.port}"
+        self.peers = list(peers)
+        self.proc = subprocess.Popen(
+            [
+                BINARY,
+                "daemon",
+                "--port",
+                str(self.port),
+                "--http-port",
+                str(self.http_port),
+                "--node-ip",
+                node_ip,
+                "--head-json",
+                os.path.join(self.tmp, "head.json"),
+                *(
+                    ["--peers", ",".join(self.peers)]
+                    if self.peers
+                    else []
+                ),
+            ],
+        )
+        _children.append(self.proc)
+
+    def wait_up(self, timeout=10):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
+                return self
+            except OSError:
+                time.sleep(0.05)
+        raise TimeoutError(f"daemon {self.address} never came up")
+
+    def status_json(self, group=None):
+        url = f"http://127.0.0.1:{self.http_port}/status"
+        if group:
+            url += f"?group={group}"
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return json.load(r)
+
+    def start_agent(self, group, gpus=1, container="c", tmp=None):
+        env = {
+            **os.environ,
+            "MENTAT_DAEMON": self.address,
+            "MENTAT_GROUP": group,
+            "MENTAT_GPUS": str(gpus),
+            "MENTAT_NODE_IP": self.node_ip,
+            "CONTAINER_NAME": container,
+            "MENTAT_SOCK_DIR": tmp or self.tmp,
+            "MENTAT_PYTHON": sys.executable,
+            "PYTHONPATH": os.pathsep.join([PYTHON_PKG, HERE]),
+            "MENTAT_GCS_ADDRESS": self.address,
+        }
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        p = subprocess.Popen([BINARY, "start", "--block"], env=env)
+        _children.append(p)
+        return p
+
+    def kill(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait(timeout=5)
+
+    def cleanup(self):
+        self.kill()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 

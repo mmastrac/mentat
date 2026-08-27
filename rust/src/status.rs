@@ -1,8 +1,8 @@
 //! Status snapshot (JSON for /status and StatusOk) and the CLI rendering.
 //!
-//! The rendering carries one load-bearing contract: in group scope it prints
-//! EXACTLY ONE line matching `[0-9.]+/[0-9.]+ GPU`, because the glm53/ds4
-//! entrypoints gate worker readiness on
+//! One contract the entrypoints depend on: in group scope the rendering
+//! prints exactly one line matching `[0-9.]+/[0-9.]+ GPU`, because glm53/ds4
+//! gate worker readiness on
 //!   ray status | grep -oE '[0-9.]+/[0-9.]+ GPU' | cut -d/ -f2 | cut -d. -f1
 //! and a second matching line would corrupt that pipeline. Every other line
 //! spells gpu counts as `gpus=a/b` to stay out of the regex's way.
@@ -111,12 +111,52 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
         );
     }
 
+    let peers: serde_json::Map<String, Value> = st
+        .peers
+        .values()
+        .map(|p| {
+            // Only a summary of the peer's groups; the full detail lives on
+            // that daemon's own /status.
+            let peer_groups: Value = p.last_status["groups"]
+                .as_object()
+                .map(|gs| {
+                    Value::Object(
+                        gs.iter()
+                            .map(|(name, g)| {
+                                (
+                                    name.clone(),
+                                    json!({
+                                        "gpus_total": g["gpus_total"],
+                                        "gpus_used": g["gpus_used"],
+                                    }),
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .unwrap_or(Value::Null);
+            (
+                p.node_id.clone(),
+                json!({
+                    "node_ip": p.node_ip,
+                    "control_addr": p.control_addr,
+                    "http_port": p.http_port,
+                    "alive": p.alive,
+                    "last_seen_ms": p.last_seen_ms,
+                    "groups": peer_groups,
+                }),
+            )
+        })
+        .collect();
+
     json!({
         "node_id": st.node_id,
         "node_ip": st.node_ip,
         "hostname": st.hostname,
         "gcs_address": st.gcs_address,
-        "head_node_id": st.node_id,
+        "head_node_id": st.head_node_id,
+        "head_generation": st.head_generation,
+        "peers": peers,
         "groups": out_groups,
         "counters": {
             "actors_spawned": st.counters.actors_spawned,
@@ -148,11 +188,26 @@ pub fn render(data: &Value, scoped: bool) -> String {
             "Resources: {used:.1}/{total:.1} GPU ({used:.1} reserved in placement groups)\n"
         ));
     }
+    let is_head = data["head_node_id"] == data["node_id"];
     out.push_str(&format!(
-        "mentat head: {} ({})\n",
+        "mentat daemon: {} ({}){}\n",
         data["gcs_address"].as_str().unwrap_or("?"),
         data["hostname"].as_str().unwrap_or("?"),
+        if is_head { " [head]" } else { "" },
     ));
+    for (pid, p) in data["peers"].as_object().into_iter().flatten() {
+        out.push_str(&format!(
+            "peer {}... {} alive={}{}\n",
+            &pid[..8.min(pid.len())],
+            p["node_ip"].as_str().unwrap_or("?"),
+            p["alive"],
+            if data["head_node_id"].as_str() == Some(pid) {
+                " [head]"
+            } else {
+                ""
+            },
+        ));
+    }
 
     for (name, g) in groups {
         out.push_str(&format!(
@@ -185,7 +240,8 @@ pub fn render(data: &Value, scoped: bool) -> String {
                 "  actor {} [{}] node={}... pid={} state={}\n",
                 a["name"].as_str().unwrap_or("?"),
                 a["id"].as_str().unwrap_or("?"),
-                &a["node_id"].as_str().unwrap_or("??????")[..6.min(a["node_id"].as_str().unwrap_or("??????").len())],
+                &a["node_id"].as_str().unwrap_or("??????")
+                    [..6.min(a["node_id"].as_str().unwrap_or("??????").len())],
                 a["pid"].as_u64().unwrap_or(0),
                 a["state"].as_str().unwrap_or("?"),
             ));

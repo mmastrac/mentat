@@ -137,6 +137,10 @@ pub struct RefInfo {
     pub state: RefState,
     pub actor: Option<ActorId>,
     pub owner: ClientId,
+    pub method: String,
+    pub created_ms: u64,
+    /// Set once the slow-call sweeper has complained about this ref.
+    pub warned: bool,
 }
 
 pub struct ClientInfo {
@@ -157,11 +161,28 @@ pub struct Counters {
     pub agents_registered: u64,
 }
 
+pub struct PeerInfo {
+    pub node_id: NodeId,
+    pub node_ip: String,
+    pub control_addr: String,
+    pub http_port: u16,
+    pub writer: FrameWriter,
+    pub alive: bool,
+    pub last_seen_ms: u64,
+    pub last_status: Value,
+}
+
 pub struct State {
     pub node_id: NodeId,
     pub node_ip: String,
     pub hostname: String,
     pub gcs_address: String,
+    /// Mesh view. Key is the peer's node_id.
+    pub peers: HashMap<NodeId, PeerInfo>,
+    /// The elected head (lowest node_id among self + live peers, after
+    /// hold-down). Starts as self.
+    pub head_node_id: NodeId,
+    pub head_generation: u64,
     pub agents: HashMap<AgentId, AgentInfo>,
     pub actors: HashMap<ActorId, ActorInfo>,
     pub pgs: HashMap<PgId, PgInfo>,
@@ -187,8 +208,12 @@ pub type SharedRef = Arc<Shared>;
 
 impl State {
     pub fn new(node_ip: String, hostname: String, gcs_address: String) -> Self {
+        let node_id = node_id_for(&node_ip);
         State {
-            node_id: node_id_for(&node_ip),
+            head_node_id: node_id.clone(),
+            head_generation: 0,
+            peers: HashMap::new(),
+            node_id,
             node_ip,
             hostname,
             gcs_address,
@@ -217,7 +242,9 @@ impl State {
         format!("{actor}:{r}")
     }
 
-    /// Record an event: ring buffer for late subscribers, push to live ones.
+    /// Record a locally-originated event: push to live subscribers and
+    /// replicate to mesh peers (who deliver to their subscribers only --
+    /// events are never re-forwarded).
     pub fn emit(&mut self, kind: &str, fields: Value) {
         let seq = self.next_event_seq;
         self.next_event_seq += 1;
@@ -225,7 +252,8 @@ impl State {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let mut data = json!({ "type": kind, "seq": seq, "ts_ms": ts_ms as u64 });
+        let mut data =
+            json!({ "type": kind, "seq": seq, "ts_ms": ts_ms as u64, "node": self.node_id });
         if let (Some(obj), Some(f)) = (data.as_object_mut(), fields.as_object()) {
             for (k, v) in f {
                 obj.insert(k.clone(), v.clone());
@@ -233,6 +261,24 @@ impl State {
         }
         let line = data.to_string();
         crate::logfmt::log("event", &[("data", line.clone())]);
+        self.event_subs.retain(|tx| tx.send(line.clone()).is_ok());
+        let origin = self.node_id.clone();
+        for peer in self.peers.values() {
+            if peer.alive {
+                let _ = peer.writer.send(
+                    crate::proto::Msg::PeerEvent {
+                        origin: origin.clone(),
+                        line: line.clone(),
+                    },
+                    0,
+                    &[],
+                );
+            }
+        }
+    }
+
+    /// Deliver a peer's replicated event to local subscribers.
+    pub fn deliver_peer_event(&mut self, line: String) {
         self.event_subs.retain(|tx| tx.send(line.clone()).is_ok());
     }
 
@@ -287,6 +333,13 @@ pub fn local_ip_toward(dest: &str) -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect(dest).ok()?;
     Some(sock.local_addr().ok()?.ip().to_string())
+}
+
+pub fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Write a small JSON file atomically (tmp + rename).

@@ -1,0 +1,33 @@
+# mentatd: the host-level mentat daemon, one per GB10 box. Deploy to
+# ~/compose/mentatd/ on each node with a per-node .env, spark-agent style:
+#
+#   gx10-n1 (.env): MENTAT_NODE_IP=10.100.0.2
+#                     MENTAT_PEERS=10.100.0.1:6379,192.168.1.13:6379
+#   gx10-n2 (.env): MENTAT_NODE_IP=10.100.0.1
+#                     MENTAT_PEERS=10.100.0.2:6379,192.168.1.13:6379
+#   gx10-n3 (.env): MENTAT_NODE_IP=192.168.1.13
+#                     MENTAT_PEERS=192.168.1.11:6379,192.168.1.12:6379
+#
+# MENTAT_NODE_IP is this node's CLUSTER identity -- on the serving pair that
+# is the ConnectX 10.100.0.x address (matching VLLM_HOST_IP inside the model
+# containers), NOT the LAN address. Left empty the daemon derives its identity
+# from the default route, which lands on 192.168.1.x and breaks the
+# driver-node match on the pair. n3 has no QSFP link, so its LAN address IS
+# its cluster identity, and it must dial the pair by their LAN addresses --
+# the mesh dedupes by node id, not by the address a link happened to use.
+#
+# Must be running before any converted model container starts: the containers'
+# `ray start` registers with this daemon on 127.0.0.1:6379 (retrying, so
+# ordering only delays them, never kills them).
+services:
+  mentatd:
+    image: ${IMAGE:-mentatd:0.1.0}
+    container_name: mentatd
+    # Host networking on purpose: the control port must be reachable both at
+    # 127.0.0.1:6379 (agents in host-network model containers) and on the
+    # cluster subnets (the worker's agent and the mesh).
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - MENTAT_NODE_IP=${MENTAT_NODE_IP:-}
+      - MENTAT_PEERS=${MENTAT_PEERS:-}
