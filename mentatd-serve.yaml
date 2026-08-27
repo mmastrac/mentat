@@ -29,6 +29,11 @@ services:
     # addresses (10.100.0.x on the pair) that bridge networking cannot reach.
     network_mode: host
     restart: unless-stopped
+    # The HMAC key when it lives in a file. Point MENTAT_SECRET_PATH at the
+    # key on the host and set MENTAT_SECRET_FILE=/run/mentat/secret. Unset,
+    # this mounts /dev/null, which reads empty and costs nothing.
+    volumes:
+      - ${MENTAT_SECRET_PATH:-/dev/null}:/run/mentat/secret:ro
     environment:
       # The local seed costs nothing beside the UDP path and covers a
       # listener that missed the first announcements. To the bare binary an
@@ -45,6 +50,8 @@ services:
       # HMAC key for announcements. Set it here and on every daemon, or on
       # neither: a router holding a key accepts signed announcements only.
       - MENTAT_SECRET=${MENTAT_SECRET:-}
+      # Set this to /run/mentat/secret to use the mount above. A path
+      # that reads empty turns signing off, even with MENTAT_SECRET set.
       - MENTAT_SECRET_FILE=${MENTAT_SECRET_FILE:-}
       # Cluster name. Foreign universes are dropped without a log line.
       - MENTAT_UNIVERSE=${MENTAT_UNIVERSE:-}

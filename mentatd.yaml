@@ -28,6 +28,11 @@ services:
     # cluster subnets (the worker's agent and the mesh).
     network_mode: host
     restart: unless-stopped
+    # The HMAC key when it lives in a file. Point MENTAT_SECRET_PATH at the
+    # key on the host and set MENTAT_SECRET_FILE=/run/mentat/secret. Unset,
+    # this mounts /dev/null, which reads empty and costs nothing.
+    volumes:
+      - ${MENTAT_SECRET_PATH:-/dev/null}:/run/mentat/secret:ro
     environment:
       - MENTAT_NODE_IP=${MENTAT_NODE_IP:-}
       - MENTAT_PEERS=${MENTAT_PEERS:-}
@@ -53,6 +58,8 @@ services:
       # Unset leaves them unsigned. A file keeps the key out of the
       # environment.
       - MENTAT_SECRET=${MENTAT_SECRET:-}
+      # Set this to /run/mentat/secret to use the mount above. A path
+      # that reads empty turns signing off, even with MENTAT_SECRET set.
       - MENTAT_SECRET_FILE=${MENTAT_SECRET_FILE:-}
       # Cluster name. Foreign universes are dropped without a log line.
       - MENTAT_UNIVERSE=${MENTAT_UNIVERSE:-}
