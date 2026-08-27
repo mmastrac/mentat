@@ -1,12 +1,13 @@
 #!/bin/bash
 set -euo pipefail
-# Build both mentat images natively on a GX10 (run on gx10-n3, the box that
+# Build the mentat images natively on a GX10 (run on gx10-n3, the box that
 # is NOT part of the serving pair, so a rebuild never disturbs a live cluster).
 #
 #   VERSION=0.1.0 ./build.sh
 #
-# glm53/Dockerfile and ds4-flash/Dockerfile COPY --from mentat-artifacts:<ver>,
-# so this must have run on the build box before either of those builds.
+# The model images (home-infra's glm53/ds4-flash Dockerfiles) COPY --from
+# mentat-artifacts:<ver>, so this must have run on the build box before
+# either of those builds.
 cd "$(dirname "$0")"
 VERSION="${VERSION:-0.1.0}"
 

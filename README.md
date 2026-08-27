@@ -5,6 +5,11 @@ Rust daemon + CLI, plus a pure-Python `ray` package that satisfies exactly
 the API surface vLLM's `RayExecutorV2` uses. Named after the human computers
 of Dune; it does the thinking Ray was hired for, without the baggage.
 
+This repo is the control plane and router alone. The model deployments that
+consume it -- the glm53 / ds4-flash compose stacks, their entrypoints, and
+the spark-agent host tooling mentioned throughout -- live in the home-infra
+repo under `infra/docker/spark/`.
+
 ## Why it exists
 
 Ray was in the glm53/ds4-flash images for one reason: `--distributed-executor-
@@ -119,7 +124,8 @@ elected head is a later phase.
    `.env` from the comments in that file (`MENTAT_NODE_IP` is the CLUSTER
    address -- `10.100.0.x` on the pair). Up it. **Before any converted model
    container.**
-3. Rebuild glm53 / ds4-flash (their Dockerfiles `COPY --from=mentat-artifacts`).
+3. Rebuild the model images (home-infra's glm53 / ds4-flash; their
+   Dockerfiles `COPY --from=mentat-artifacts`).
 4. `docker compose up` the models -- either node first; ordering stopped
    mattering.
 5. Optional, any box that should answer clients: `mentat-serve.yaml` to

@@ -3,7 +3,8 @@
 #   --target artifacts  ->  mentat-artifacts:<ver>
 #       /out/mentat                         the static-ish daemon/CLI binary
 #       /out/mentat_ray_shim-*.whl          the pure-Python `ray` shim
-#       Consumed by glm53/ and ds4-flash/ via COPY --from. Never runs.
+#       Consumed by the model images (home-infra's glm53/ds4-flash) via
+#       COPY --from. Never runs.
 #
 #   --target runtime    ->  mentatd:<ver>
 #       The host-level daemon container (see mentatd.yaml).
@@ -14,7 +15,7 @@
 #
 # Build all with ./build.sh. The serving images hard-reference
 # mentat-artifacts:<ver>, so build.sh must run on the same box first --
-# qwen38/build.sh-style, there is no registry in this fleet.
+# there is no registry in this fleet.
 
 # Moving major tag on purpose: the crate is std + serde + clap and builds on
 # any modern stable; a broken toolchain bump fails HERE at build time, never
