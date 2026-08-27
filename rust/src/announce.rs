@@ -106,7 +106,9 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
                 v["mentat_announce"] = secret::SIGNED_VERSION.into();
                 v["boot_id"] = boot_id.clone().into();
                 v["seq"] = seq.fetch_add(1, Ordering::Relaxed).into();
-                v["t"] = secret::now_s().into();
+                // Integer seconds: f64 does not survive a JSON round trip,
+                // so a float here breaks the signature. See secret::canonical.
+                v["t"] = (secret::now_s() as u64).into();
             }
             match &key {
                 Some(k) => secret::sign(&v, k),

@@ -87,6 +87,12 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// The bytes a signature covers.
+///
+/// The verifier re-serializes a payload it parsed, so every value in it must
+/// survive a JSON round trip. Integers and strings do. `f64` does not:
+/// serde_json writes 1787862155.6581013 and reads it back as
+/// 1787862155.658101, which changes the bytes and fails the signature for
+/// some values and not others. Keep floats out of anything signed.
 fn canonical(payload: &Value) -> String {
     payload.to_string()
 }
@@ -232,6 +238,37 @@ mod tests {
         let signed = sign(&serde_json::json!({"universe": "lab"}), b"secret");
         assert_eq!(peek_universe(signed.as_bytes()).as_deref(), Some("lab"));
         assert_eq!(verify(signed.as_bytes(), b"wrong"), None);
+    }
+
+    /// The announcement as announce.rs builds it, through the path a
+    /// listener actually takes: parse the envelope, re-serialize the payload,
+    /// check the signature. A float field would fail this.
+    #[test]
+    fn announcement_survives_the_listener_path() {
+        let payload = serde_json::json!({
+            "mentat_announce": SIGNED_VERSION,
+            "node_id": "6d656e7461743a3137322e31382e302e33",
+            "control": "172.18.0.3:6379",
+            "http": "172.18.0.3:6380",
+            "universe": "lab",
+            "boot_id": "6d6474919bbe7beb",
+            "seq": 159u64,
+            "t": 1787862155u64,
+        });
+        let env = sign(&payload, b"k");
+        assert_eq!(verify(env.as_bytes(), b"k"), Some(payload));
+    }
+
+    /// Why `t` is an integer. Recorded because the failure is intermittent:
+    /// it depends on the value, so a float passes in testing and fails in
+    /// production every few seconds.
+    #[test]
+    fn floats_do_not_survive_the_round_trip() {
+        let v = serde_json::json!({"t": 1787862155.6581013f64});
+        let once = v.to_string();
+        let twice = serde_json::from_str::<Value>(&once).unwrap().to_string();
+        assert_ne!(once, twice);
+        assert_eq!(verify(sign(&v, b"k").as_bytes(), b"k"), None);
     }
 
     #[test]
