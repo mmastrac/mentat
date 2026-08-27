@@ -10,16 +10,15 @@
 
 use std::io::BufReader;
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 
+use crate::config::cfg;
 use crate::daemon::set_keepalive;
 use crate::logfmt::log;
 use crate::proto::{read_frame, Frame, Msg};
 use crate::state::{now_ms_u64, FrameWriter, PeerInfo, SharedRef};
-
-const HOLD_DOWN_TICKS: u32 = 5; // seconds of stability before a head change
 
 pub fn start(shared: SharedRef, seeds: Vec<String>, control_port: u16, http_port: u16) {
     for seed in seeds {
@@ -29,6 +28,10 @@ pub fn start(shared: SharedRef, seeds: Vec<String>, control_port: u16, http_port
     {
         let shared = shared.clone();
         std::thread::spawn(move || elector(shared));
+    }
+    {
+        let shared = shared.clone();
+        std::thread::spawn(move || staleness_sweeper(shared));
     }
     std::thread::spawn(move || status_pusher(shared));
 }
@@ -203,6 +206,7 @@ fn register_peer(
             writer,
             alive: true,
             last_seen_ms: now_ms_u64(),
+            stale: false,
             last_status: serde_json::Value::Null,
         },
     );
@@ -235,6 +239,10 @@ fn peer_loop(
                 if let Some(p) = st.peers.get_mut(&peer_id) {
                     p.last_status = data;
                     p.last_seen_ms = now_ms_u64();
+                    if p.stale {
+                        p.stale = false;
+                        log("peer_recovered", &[("peer", peer_id.clone())]);
+                    }
                 }
             }
             Msg::PeerEvent { line, .. } => {
@@ -258,27 +266,83 @@ fn peer_loop(
     }
 
     let mut st = shared.st.lock().unwrap();
+    // Owned + still alive: the staleness sweeper may already have declared
+    // this peer gone (and closed the socket under us) -- don't emit twice.
     let owned = st
         .peers
         .get(&peer_id)
-        .map(|p| FrameWriter::same_socket(&p.writer, &writer))
+        .map(|p| p.alive && FrameWriter::same_socket(&p.writer, &writer))
         .unwrap_or(false);
     if owned {
         if let Some(p) = st.peers.get_mut(&peer_id) {
             p.alive = false;
         }
-        st.emit("node_leave", json!({ "peer": peer_id }));
+        st.emit(
+            "node_leave",
+            json!({ "peer": peer_id, "reason": "link closed" }),
+        );
     }
     shared.cv.notify_all();
 }
 
+/// The mesh analog of the agent degrade window: a peer that stops sending
+/// (status pushes double as heartbeats) is logged stale after
+/// MENTAT_PEER_STALE_AFTER_MS and declared gone after
+/// MENTAT_PEER_DEAD_AFTER_MS -- covering wedged-but-connected peers that a
+/// clean EOF would never report. The connector keeps re-dialing.
+fn staleness_sweeper(shared: SharedRef) {
+    let stale_after = cfg().peer_stale_after_ms;
+    let dead_after = cfg().peer_dead_after_ms;
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let now = now_ms_u64();
+        let mut st = shared.st.lock().unwrap();
+        let mut gone: Vec<(String, u64)> = Vec::new();
+        for p in st.peers.values_mut() {
+            if !p.alive {
+                continue;
+            }
+            let silent = now.saturating_sub(p.last_seen_ms);
+            if silent >= dead_after {
+                p.alive = false;
+                p.writer.shutdown();
+                gone.push((p.node_id.clone(), silent));
+            } else if silent >= stale_after && !p.stale {
+                p.stale = true;
+                log(
+                    "peer_stale",
+                    &[
+                        ("peer", p.node_id.clone()),
+                        ("silent_ms", silent.to_string()),
+                    ],
+                );
+            }
+        }
+        let any_gone = !gone.is_empty();
+        for (peer, silent) in gone {
+            log(
+                "peer_dead",
+                &[("peer", peer.clone()), ("silent_ms", silent.to_string())],
+            );
+            st.emit("node_leave", json!({ "peer": peer, "reason": "stale" }));
+        }
+        if any_gone {
+            shared.cv.notify_all();
+        }
+    }
+}
+
 /// Deterministic head: lowest node id among self + live peers, committed only
-/// after HOLD_DOWN_TICKS seconds of stability so a flapping link cannot
+/// after MENTAT_ELECTION_HOLD_DOWN_MS of stability so a flapping link cannot
 /// thrash the designation.
 fn elector(shared: SharedRef) {
-    let mut candidate_streak: Option<(String, u32)> = None;
+    let hold_down = Duration::from_millis(cfg().election_hold_down_ms);
+    // Tick at ~1/5th of the hold-down so short test values still commit in a
+    // handful of ticks.
+    let tick = Duration::from_millis((cfg().election_hold_down_ms / 5).clamp(100, 1000));
+    let mut candidate_since: Option<(String, Instant)> = None;
     loop {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(tick);
         let mut st = shared.st.lock().unwrap();
         let mut ids: Vec<&str> = st
             .peers
@@ -289,20 +353,17 @@ fn elector(shared: SharedRef) {
         ids.push(st.node_id.as_str());
         let candidate = ids.iter().min().unwrap().to_string();
         if candidate == st.head_node_id {
-            candidate_streak = None;
+            candidate_since = None;
             continue;
         }
-        let streak = match &mut candidate_streak {
-            Some((c, n)) if *c == candidate => {
-                *n += 1;
-                *n
-            }
+        let since = match &candidate_since {
+            Some((c, t)) if *c == candidate => *t,
             _ => {
-                candidate_streak = Some((candidate.clone(), 1));
-                1
+                candidate_since = Some((candidate.clone(), Instant::now()));
+                continue;
             }
         };
-        if streak >= HOLD_DOWN_TICKS {
+        if since.elapsed() >= hold_down {
             let old = std::mem::replace(&mut st.head_node_id, candidate.clone());
             st.head_generation += 1;
             let generation = st.head_generation;
@@ -310,16 +371,18 @@ fn elector(shared: SharedRef) {
                 "head_change",
                 json!({ "head": candidate, "previous": old, "generation": generation }),
             );
-            candidate_streak = None;
+            candidate_since = None;
         }
     }
 }
 
-/// Push our snapshot to every live peer every 2s (doubles as a keepalive the
-/// reader side timestamps).
+/// Push our snapshot to every live peer every MENTAT_PEER_STATUS_INTERVAL_MS
+/// (doubles as the heartbeat the reader side timestamps and the staleness
+/// sweeper judges by).
 fn status_pusher(shared: SharedRef) {
+    let interval = Duration::from_millis(cfg().peer_status_interval_ms.max(50));
     loop {
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(interval);
         let (snap, writers): (serde_json::Value, Vec<FrameWriter>) = {
             let st = shared.st.lock().unwrap();
             (

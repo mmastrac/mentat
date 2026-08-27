@@ -85,7 +85,13 @@ pub struct ActorInfo {
     pub owner: ClientId,
     pub state: ActorState,
     pub pid: Option<u32>,
+    /// Calls held while the agent link is down (the degrade window), sent in
+    /// arrival order when the agent re-registers.
+    pub queued_calls: Vec<QueuedCall>,
 }
+
+/// A held call: (ref_id, method, payload).
+pub type QueuedCall = (RefId, String, Vec<u8>);
 
 pub struct AgentInfo {
     pub id: AgentId,
@@ -99,6 +105,11 @@ pub struct AgentInfo {
     pub pid: u32,
     pub writer: FrameWriter,
     pub alive: bool,
+    /// When the agent link EOFed (degrade window start). None while
+    /// connected, and cleared again once the give-up threshold has fired.
+    pub lost_at_ms: Option<u64>,
+    /// The degrade event has been emitted for the current outage.
+    pub degraded: bool,
     /// Registration order; placement uses it for deterministic bundle order.
     pub seq: u64,
 }
@@ -125,6 +136,10 @@ pub struct PgInfo {
     pub strategy: String,
     pub assignment: Vec<Option<BundleAssignment>>,
     pub state: PgState,
+    pub created_ms: u64,
+    /// Why a Removed pg failed (pending timeout etc.); surfaced as the
+    /// RayActorError reason when the driver gets the ready ref.
+    pub fail_reason: Option<String>,
 }
 
 pub enum RefState {
@@ -169,6 +184,8 @@ pub struct PeerInfo {
     pub writer: FrameWriter,
     pub alive: bool,
     pub last_seen_ms: u64,
+    /// The staleness warning has fired for the current silence.
+    pub stale: bool,
     pub last_status: Value,
 }
 

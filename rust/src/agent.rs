@@ -14,6 +14,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::config::cfg;
 use crate::daemon::set_keepalive;
 use crate::gpu::detect_gpus;
 use crate::logfmt::log;
@@ -44,6 +45,21 @@ struct AgentShared {
     daemon: Mutex<Option<FrameWriter>>,
     actors: Mutex<HashMap<String, HostActor>>,
     sock_dir: String,
+    /// Daemon-bound messages (results, exits) that could not be delivered
+    /// while the daemon link was down. Drained in order right after the next
+    /// successful register so nothing from an outage is silently lost.
+    unsent: Mutex<Vec<(Msg, Vec<u8>)>>,
+}
+
+/// Send to the daemon if the link is up, otherwise buffer for the reconnect.
+fn send_daemon(shared: &AgentShared, msg: Msg, payload: &[u8]) {
+    let writer = shared.daemon.lock().unwrap().clone();
+    let sent = writer
+        .map(|w| w.send(msg.clone(), 0, payload).is_ok())
+        .unwrap_or(false);
+    if !sent {
+        shared.unsent.lock().unwrap().push((msg, payload.to_vec()));
+    }
 }
 
 pub fn run(opts: AgentOpts) -> ! {
@@ -84,6 +100,7 @@ pub fn run(opts: AgentOpts) -> ! {
         daemon: Mutex::new(None),
         actors: Mutex::new(HashMap::new()),
         sock_dir,
+        unsent: Mutex::new(Vec::new()),
     });
 
     let mut attempt: u64 = 0;
@@ -138,6 +155,19 @@ fn serve_once(
             .collect()
     };
 
+    // Refs whose results sit in the unsent buffer: named in the register so
+    // the daemon keeps them pending until the drain below delivers them.
+    let unacked_refs: Vec<String> = shared
+        .unsent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(m, _)| match m {
+            Msg::ActorResult { ref_id, .. } => Some(ref_id.clone()),
+            _ => None,
+        })
+        .collect();
+
     writer.send(
         Msg::AgentRegister {
             agent_id: agent_id.to_string(),
@@ -149,6 +179,7 @@ fn serve_once(
             container: container.to_string(),
             pid: std::process::id(),
             resume,
+            unacked_refs,
         },
         1,
         &[],
@@ -175,13 +206,29 @@ fn serve_once(
     }
     *shared.daemon.lock().unwrap() = Some(writer.clone());
 
-    // Ping keeps the connection exercised so a dead daemon is noticed within
-    // seconds; a failed send shuts the socket down, which unblocks the read
-    // loop below.
+    // Deliver everything buffered during the outage, oldest first, before any
+    // new traffic. A failure re-buffers the remainder. The read loop will
+    // notice the dead link and retry the whole register.
+    {
+        let mut unsent = shared.unsent.lock().unwrap();
+        let backlog: Vec<(Msg, Vec<u8>)> = unsent.drain(..).collect();
+        let mut it = backlog.into_iter();
+        for (msg, payload) in it.by_ref() {
+            if writer.send(msg.clone(), 0, &payload).is_err() {
+                unsent.push((msg, payload));
+                unsent.extend(it);
+                break;
+            }
+        }
+    }
+
+    // Ping keeps the connection exercised (MENTAT_AGENT_PING_INTERVAL_MS) so
+    // a dead daemon is noticed within seconds. A failed send shuts the socket
+    // down, which unblocks the read loop below.
     {
         let writer = writer.clone();
         std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(cfg().agent_ping_interval_ms.max(100)));
             if writer.send(Msg::Ping, 0, &[]).is_err() {
                 writer.shutdown();
                 break;
@@ -405,24 +452,28 @@ fn spawn_actor(
             }
             shared.actors.lock().unwrap().remove(&actor_id);
             let _ = std::fs::remove_file(&sock_path);
-            if let Some(w) = shared.daemon.lock().unwrap().as_ref() {
-                let _ = w.send(
-                    Msg::ActorExit {
-                        actor_id,
-                        exit_code: code,
-                        signal,
-                    },
-                    0,
-                    &[],
-                );
-            }
+            // Buffered if the daemon link is down: a death during an outage
+            // must still reach the daemon after the reconnect.
+            send_daemon(
+                &shared,
+                Msg::ActorExit {
+                    actor_id,
+                    exit_code: code,
+                    signal,
+                },
+                &[],
+            );
         });
     }
 
-    // Handshake: the host connects before importing anything heavy, so a
-    // 60 s window is generous. If the process dies first, the reaper has
-    // already reported and we just clean up.
-    let host_stream = match accept_with_timeout(&listener, Duration::from_secs(60)) {
+    // Handshake: the host connects before importing anything heavy, so the
+    // default 60 s window (MENTAT_HOST_CONNECT_TIMEOUT_MS) is generous. If
+    // the process dies first, the reaper has already reported and we just
+    // clean up.
+    let host_stream = match accept_with_timeout(
+        &listener,
+        Duration::from_millis(cfg().host_connect_timeout_ms),
+    ) {
         Some(s) => s,
         None => {
             log("actor_host_no_connect", &[("actor", actor_id.clone())]);
@@ -469,73 +520,64 @@ fn spawn_actor(
                     )
                     .is_err()
                 {
-                    if let Some(w) = shared.daemon.lock().unwrap().as_ref() {
-                        let _ = w.send(
-                            Msg::ActorResult {
-                                ref_id,
-                                ok: false,
-                                error: "actor host socket write failed".into(),
-                            },
-                            0,
-                            &[],
-                        );
-                    }
+                    send_daemon(
+                        &shared,
+                        Msg::ActorResult {
+                            ref_id,
+                            ok: false,
+                            error: "actor host socket write failed".into(),
+                        },
+                        &[],
+                    );
                 }
             }
         }
     }
 
-    // Relay: host results flow back to the daemon. EOF/err ends the loop and
-    // the reaper reports the death.
+    // Relay: host results flow back to the daemon (buffered across a daemon
+    // link outage). EOF/err ends the loop and the reaper reports the death.
     while let Ok(Some((frame, payload))) = read_frame(&mut host_reader) {
-        let daemon = shared.daemon.lock().unwrap().clone();
         match frame.msg {
             Msg::CtorOk => {
                 log("actor_ready", &[("actor", actor_id.clone())]);
-                if let Some(w) = &daemon {
-                    let _ = w.send(
-                        Msg::SpawnResult {
-                            actor_id: actor_id.clone(),
-                            ok: true,
-                            error: String::new(),
-                        },
-                        0,
-                        &[],
-                    );
-                }
+                send_daemon(
+                    &shared,
+                    Msg::SpawnResult {
+                        actor_id: actor_id.clone(),
+                        ok: true,
+                        error: String::new(),
+                    },
+                    &[],
+                );
             }
             Msg::CtorErr { error } => {
                 log(
                     "actor_ctor_error",
                     &[("actor", actor_id.clone()), ("error", error.clone())],
                 );
-                if let Some(w) = &daemon {
-                    let _ = w.send(
-                        Msg::SpawnResult {
-                            actor_id: actor_id.clone(),
-                            ok: false,
-                            error: format!("constructor raised: {error}"),
-                        },
-                        0,
-                        &[],
-                    );
-                }
+                send_daemon(
+                    &shared,
+                    Msg::SpawnResult {
+                        actor_id: actor_id.clone(),
+                        ok: false,
+                        error: format!("constructor raised: {error}"),
+                    },
+                    &[],
+                );
             }
             Msg::HostResult { ref_id, ok } => {
                 if let Some(a) = shared.actors.lock().unwrap().get_mut(&actor_id) {
                     a.pending_refs.remove(&ref_id);
                 }
-                if let Some(w) = &daemon {
-                    let _ = w.send(
-                        Msg::ActorResult {
-                            ref_id,
-                            ok,
-                            error: String::new(),
-                        },
-                        0,
-                        &payload,
-                    );
-                }
+                send_daemon(
+                    &shared,
+                    Msg::ActorResult {
+                        ref_id,
+                        ok,
+                        error: String::new(),
+                    },
+                    &payload,
+                );
             }
             other => log(
                 "actor_host_unexpected",

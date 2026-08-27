@@ -39,8 +39,9 @@ per token; after boot the only recurring call is the health monitor's
   ([mentatd.yaml](mentatd.yaml)). Control port 6379 (what `RAY_ADDRESS`
   points at), HTTP 6380: `/metrics` (Prometheus), `/status` (JSON),
   `/events` (WebSocket: snapshot on connect, then `node_join/leave`,
-  `head_change`, `agent_register/lost`, `pg_created/ready`,
-  `actor_spawning/running/dead`, `driver_connected/disconnected`).
+  `head_change`, `agent_register/lost/degraded/dead`,
+  `pg_created/ready/timeout`, `actor_spawning/running/dead`,
+  `driver_connected/disconnected`).
   Daemons mesh over `MENTAT_PEERS`, elect a head (lowest node id, 5 s
   hold-down), replicate events, and exchange status so any daemon shows the
   whole cluster.
@@ -103,15 +104,95 @@ pid/signal) and in vLLM's own exception text. If the head-box daemon
 restarts mid-serve, agents reconnect and the daemon kills the now-ownerless
 actors; vLLM exits and the stack restarts clean -- nothing leaks.
 
+An agent link EOF does not kill actors immediately: the daemon holds them
+through a degrade window (event `agent_degraded` at 30 s, calls issued
+meanwhile are held and drained on reconnect) and gives up at 60 s (event
+`agent_dead`, actors marked dead, run() sentinels resolve, the driver
+restarts). `mentat stop` stays instant. A placement group that never gets
+its agents fails after 10 min instead of pending forever. All of these
+windows are env-tunable -- see Tuning.
+
+## Tuning
+
+Every lifecycle window is a MENTAT_* env var in milliseconds, read once at
+process start. The daemon reads the cluster-level ones (mentatd's per-node
+`.env`), the agent reads the container-level ones (the model container's
+env). Defaults sit on the `Cfg` struct in [config.rs](rust/src/config.rs),
+where each is read, and an unparsable value logs `bad_env_ms` and uses the
+default. The defaults fit the serving pair. Change a knob when a measured
+time disagrees with it, and change it to that measurement plus margin.
+
+`MENTAT_PG_PENDING_TIMEOUT_MS` (600000 = 10 min): the clock on "my workers
+never showed up". A placement group still waiting for GPUs after this fails,
+and the driver gets an error instead of hanging forever. Time your slowest
+expected cold start end to end -- image pull, weight mount, container boot,
+agent registration -- and keep this above it. Lower it if you would rather
+learn about a wedged worker box in two minutes than ten. vLLM's own wait
+loop tolerates the full window.
+
+`MENTAT_AGENT_DEGRADED_AFTER_MS` (30000) and `MENTAT_AGENT_DEAD_AFTER_MS`
+(60000): what happens when a model container loses its daemon link. Nothing
+dies right away. The agent reconnects on its own, and calls made during the
+outage are held and delivered when it does. At the degraded mark an
+`agent_degraded` event fires, so set that to "how long before I want to
+hear about it". At the dead mark the daemon gives up: actors are marked
+dead, vLLM's monitor sees its run() refs resolve, and the stack restarts.
+Set that to the point where restarting beats waiting. A restart costs the
+~9 min model boot, so if your outages are switch reboots that heal in two
+minutes, raise it well past two minutes. If a lost link always means a dead
+container, lower it and restart sooner. Keep degraded below dead, or the
+warning never fires before the give-up.
+
+`MENTAT_PEER_STALE_AFTER_MS` (30000) and `MENTAT_PEER_DEAD_AFTER_MS`
+(60000): the same two steps for daemon-to-daemon links, catching a daemon
+that wedges while its socket stays open. Serving traffic never crosses the
+mesh, so these only decide how fast `mentat status` and the head
+designation notice. The heartbeat they judge by is the status push
+(`MENTAT_PEER_STATUS_INTERVAL_MS`, 2000). Keep the stale window several
+pushes wide, or healthy peers flap.
+
+`MENTAT_ELECTION_HOLD_DOWN_MS` (5000): how long the would-be head must stay
+stable before `head_change` commits. Raise it if a flapping link churns the
+designation. The tests shorten it. Production has no reason to.
+
+`MENTAT_SLOW_CALL_WARN_MS` (15000): warning only, one `call_pending_long`
+log line per slow call. It exists to catch a future vLLM issuing a call
+behind a blocking one. Boot-time calls like `wait_for_init` legitimately
+pend for minutes and draw the line once per boot -- expected. The same line
+at steady state is a bug report. Raise it if the boot-time line bothers
+you.
+
+`MENTAT_SESSION_REAP_GRACE_MS` (0): how long a dead vLLM's workers linger
+before the daemon kills them. Keep 0. A restarting vLLM needs the old
+actors' names and GPUs back, so every second of grace is a second added to
+the restart. Set it briefly only to inspect workers after a driver crash.
+
+Container-side:
+
+`MENTAT_HOST_CONNECT_TIMEOUT_MS` (60000): how long the agent waits for a
+freshly spawned actor process to dial back. This covers python starting and
+importing the small host module only -- the heavy vLLM import happens after
+the handshake -- so it fires only when python itself cannot start. Leave it.
+
+`MENTAT_AGENT_PING_INTERVAL_MS` (2000): how often the agent pings the
+daemon, which bounds how fast a dead daemon is noticed. Cheap either way.
+
+`MENTAT_TCP_DEAD_AFTER_MS` (75000), read by both sides: the Linux TCP
+keepalive target for a peer that wedges while its connection stays open (a
+hard power-off, a hung box). The kernel-level backstop behind every window
+above. Rarely worth touching.
+
 ## Testing
 
 GPU-free, self-contained (daemon + agents as subprocesses, fake GPUs):
 
 ```
-python3 tests/test_e2e_local.py    # audited behaviors incl. kill -9 liveness
+python3 tests/test_e2e_local.py   # audited behaviors incl. kill -9 liveness,
+                                  # pg timeout, degrade window, give-up
 python3 tests/test_groups.py      # TP=4, parallel groups, same model twice
 python3 tests/test_vllm_shape.py  # call-for-call replay of RayExecutorV2
-python3 tests/test_multinode.py   # 3-daemon mesh: election, head death (~40s)
+python3 tests/test_multinode.py   # 3-daemon mesh: election, head death,
+                                  # peer staleness (short MENTAT_* windows)
 cargo test                        # framing, WS handshake, the status-line grep contract
 ```
 

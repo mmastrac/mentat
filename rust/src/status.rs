@@ -40,6 +40,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                     "node_id": a.node_id,
                     "container": a.container,
                     "alive": a.alive,
+                    "degraded": a.degraded,
                     "gpus": a.gpus.len(),
                     "gpus_free": st.free_gpus_of(&a.id).len(),
                     "gpu_vendor": a.gpu_vendor,
@@ -142,6 +143,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                     "control_addr": p.control_addr,
                     "http_port": p.http_port,
                     "alive": p.alive,
+                    "stale": p.stale,
                     "last_seen_ms": p.last_seen_ms,
                     "groups": peer_groups,
                 }),
@@ -217,7 +219,7 @@ pub fn render(data: &Value, scoped: bool) -> String {
         ));
         for a in g["agents"].as_array().into_iter().flatten() {
             out.push_str(&format!(
-                "  agent {} node={} container={} gpus={}/{} vendor={} alive={}\n",
+                "  agent {} node={} container={} gpus={}/{} vendor={} alive={}{}\n",
                 a["id"].as_str().unwrap_or("?"),
                 a["node_ip"].as_str().unwrap_or("?"),
                 a["container"].as_str().unwrap_or("?"),
@@ -225,6 +227,11 @@ pub fn render(data: &Value, scoped: bool) -> String {
                 a["gpus"].as_u64().unwrap_or(0),
                 a["gpu_vendor"].as_str().unwrap_or("?"),
                 a["alive"].as_bool().unwrap_or(false),
+                if a["degraded"].as_bool().unwrap_or(false) {
+                    " degraded=true"
+                } else {
+                    ""
+                },
             ));
         }
         for p in g["placement_groups"].as_array().into_iter().flatten() {

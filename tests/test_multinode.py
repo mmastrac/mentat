@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Mesh behavior across three daemons on one box: workers-first startup,
 head election with hold-down, head failure and re-election, event
-replication, and a serving group surviving a head change. Run with:
+replication, a serving group surviving a head change, and peer staleness
+(a wedged daemon going stale -> dead -> recovered). Run with:
 
     python3 tests/test_multinode.py
 
-Slower than the other suites (~40 s): election hold-down is 5 real seconds.
+The daemons run with shortened MENTAT_* windows (election hold-down 1.5 s
+instead of the 5 s default, fast status pushes, ~3 s peer death) -- which is
+itself the test that those knobs work.
 """
 
 import json
 import os
+import signal
 import socket
 import sys
 import time
@@ -19,6 +23,15 @@ sys.path.insert(0, HERE)
 
 import mentat_testlib as tl  # noqa: E402
 from mentat_testlib import Daemon, fresh_shim, free_port, run_ok  # noqa: E402
+
+# Short lifecycle windows for every daemon in the mesh. Status pushes must
+# stay several times faster than the stale window (they are the heartbeat).
+MESH_ENV = {
+    "MENTAT_ELECTION_HOLD_DOWN_MS": "1500",
+    "MENTAT_PEER_STATUS_INTERVAL_MS": "300",
+    "MENTAT_PEER_STALE_AFTER_MS": "1200",
+    "MENTAT_PEER_DEAD_AFTER_MS": "3000",
+}
 
 state = {}
 
@@ -38,8 +51,8 @@ def t01_workers_first_then_head():
     # depends on head-first ordering anymore.
     p1 = free_port()
     d1_addr = f"127.0.0.1:{p1}"
-    d2 = Daemon("127.0.0.2", peers=[d1_addr]).wait_up()
-    d3 = Daemon("127.0.0.3", peers=[d1_addr, d2.address]).wait_up()
+    d2 = Daemon("127.0.0.2", peers=[d1_addr], env=MESH_ENV).wait_up()
+    d3 = Daemon("127.0.0.3", peers=[d1_addr, d2.address], env=MESH_ENV).wait_up()
     state.update(d2=d2, d3=d3, d1_addr=d1_addr, p1=p1)
 
     # With only d2/d3 up, d2 (lower ip) must win after hold-down.
@@ -54,7 +67,7 @@ def t01_workers_first_then_head():
 
 def t02_lowest_id_takes_over():
     d1 = Daemon("127.0.0.1", peers=[state["d2"].address, state["d3"].address],
-                port=state["p1"]).wait_up()
+                port=state["p1"], env=MESH_ENV).wait_up()
     state["d1"] = d1
     d1_id = d1.status_json()["node_id"]
     state["d1_id"] = d1_id
@@ -194,6 +207,35 @@ def t05_group_survived_head_change():
     assert actor_states.count("running") == 2, actor_states
 
 
+def t06_peer_staleness_and_recovery():
+    # A wedged (SIGSTOPped) daemon stops pushing status without an EOF. The
+    # staleness sweeper must declare it gone after MENTAT_PEER_DEAD_AFTER_MS,
+    # the serving group must not care, and a SIGCONT must let the mesh heal.
+    d2, d3 = state["d2"], state["d3"]
+    d3_id = d3.status_json()["node_id"]
+
+    os.kill(d3.proc.pid, signal.SIGSTOP)
+    try:
+        wait_for(
+            lambda: not d2.status_json()["peers"][d3_id]["alive"],
+            15,
+            "d2 to declare the wedged d3 dead",
+        )
+        # A wedged peer daemon leaves the group on d2 alone.
+        ray = state["ray"]
+        done, _ = ray.wait(state["run_refs"], num_returns=1, timeout=1)
+        assert not done, "no worker may die from a wedged peer daemon"
+    finally:
+        os.kill(d3.proc.pid, signal.SIGCONT)
+
+    # d3's connector re-dials d2 and the link comes back.
+    wait_for(
+        lambda: d2.status_json()["peers"][d3_id]["alive"],
+        20,
+        "d2 and the resumed d3 to re-link",
+    )
+
+
 def main():
     tests = [
         t01_workers_first_then_head,
@@ -201,6 +243,7 @@ def main():
         t03_group_serves_on_non_head_daemon,
         t04_events_stream_carries_head_change,
         t05_group_survived_head_change,
+        t06_peer_staleness_and_recovery,
     ]
     try:
         for t in tests:

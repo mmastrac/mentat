@@ -149,6 +149,11 @@ pub enum Msg {
         /// Actors still alive from before a reconnect, so the daemon can
         /// rebuild instead of orphaning them.
         resume: Vec<ResumeActor>,
+        /// Ref ids whose results are buffered agent-side from a link outage
+        /// and will be re-sent right after this register. The daemon keeps
+        /// them pending until those results arrive.
+        #[serde(default)]
+        unacked_refs: Vec<String>,
     },
     AgentRegisterOk {
         node_id: String,

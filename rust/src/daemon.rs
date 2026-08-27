@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::config::cfg;
 use crate::logfmt::log;
 use crate::proto::{read_frame, Frame, Msg};
 use crate::state::{
@@ -65,41 +66,14 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
     crate::http::serve(shared.clone(), opts.http_port);
     crate::mesh::start(shared.clone(), opts.peers, opts.port, opts.http_port);
 
-    // Slow-call sweeper: vLLM's run() ref legitimately never resolves, but a
-    // NORMAL method call sitting pending for long means it queued behind a
-    // blocking method (actors are serial, like real ray). That is the
-    // likeliest way a future vLLM change breaks silently, so make it loud.
+    // Lifecycle sweeper: slow-call warnings, the pending-pg timeout, and the
+    // agent degrade/give-up windows. A single thread ticking every 200 ms,
+    // cheap enough that the short windows the tests use still fire on time.
     {
         let shared = shared.clone();
         std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(15));
-            let now = crate::state::now_ms_u64();
-            let mut st = shared.st.lock().unwrap();
-            let mut warn: Vec<(String, String, u64)> = Vec::new();
-            for (rid, r) in st.refs.iter_mut() {
-                if matches!(r.state, RefState::Pending)
-                    && r.method != "run"
-                    && !r.warned
-                    && now.saturating_sub(r.created_ms) > 15_000
-                {
-                    r.warned = true;
-                    warn.push((rid.clone(), r.method.clone(), now - r.created_ms));
-                }
-            }
-            for (rid, method, age) in warn {
-                log(
-                    "call_pending_long",
-                    &[
-                        ("ref", rid),
-                        ("method", method),
-                        ("age_ms", age.to_string()),
-                        (
-                            "hint",
-                            "queued behind a blocking method, or the worker is stuck".to_string(),
-                        ),
-                    ],
-                );
-            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            sweep_lifecycle(&shared);
         });
     }
 
@@ -113,6 +87,139 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// One tick of the lifecycle sweeper.
+fn sweep_lifecycle(shared: &SharedRef) {
+    let now = crate::state::now_ms_u64();
+    let mut st = shared.st.lock().unwrap();
+
+    // Slow-call warnings: vLLM's run() ref legitimately never resolves, but a
+    // NORMAL method call sitting pending for long means it queued behind a
+    // blocking method (actors are serial, like real ray). That is the
+    // likeliest way a future vLLM change breaks silently, so make it loud.
+    let warn_after = cfg().slow_call_warn_ms;
+    let mut warn: Vec<(String, String, u64)> = Vec::new();
+    for (rid, r) in st.refs.iter_mut() {
+        if matches!(r.state, RefState::Pending)
+            && r.method != "run"
+            && !r.warned
+            && now.saturating_sub(r.created_ms) > warn_after
+        {
+            r.warned = true;
+            warn.push((rid.clone(), r.method.clone(), now - r.created_ms));
+        }
+    }
+    for (rid, method, age) in warn {
+        log(
+            "call_pending_long",
+            &[
+                ("ref", rid),
+                ("method", method),
+                ("age_ms", age.to_string()),
+                (
+                    "hint",
+                    "queued behind a blocking method, or the worker is stuck".to_string(),
+                ),
+            ],
+        );
+    }
+
+    // Pending-pg timeout: a placement group that never gets its agents must
+    // fail loudly instead of leaving the driver waiting forever.
+    let pg_timeout = cfg().pg_pending_timeout_ms;
+    let timed_out: Vec<(String, String, u64)> = st
+        .pgs
+        .values()
+        .filter(|p| p.state == PgState::Pending)
+        .filter(|p| now.saturating_sub(p.created_ms) > pg_timeout)
+        .map(|p| (p.id.clone(), p.group.clone(), now - p.created_ms))
+        .collect();
+    for (pg_id, group, age) in timed_out {
+        if let Some(pg) = st.pgs.get_mut(&pg_id) {
+            pg.state = PgState::Removed;
+            pg.fail_reason = Some(format!(
+                "placement group still PENDING after {age}ms: group '{group}' never had \
+                 enough registered GPUs (MENTAT_PG_PENDING_TIMEOUT_MS)"
+            ));
+        }
+        log(
+            "pg_pending_timeout",
+            &[
+                ("pg", pg_id.clone()),
+                ("group", group.clone()),
+                ("age_ms", age.to_string()),
+            ],
+        );
+        st.emit(
+            "pg_timeout",
+            json!({ "group": group, "pg_id": pg_id, "waited_ms": age }),
+        );
+        shared.cv.notify_all();
+    }
+
+    // Agent degrade / give-up windows.
+    let degraded_after = cfg().agent_degraded_after_ms;
+    let dead_after = cfg().agent_dead_after_ms;
+    let mut degrade: Vec<(String, String, u64)> = Vec::new();
+    let mut give_up: Vec<(String, String, u64)> = Vec::new();
+    for a in st.agents.values_mut() {
+        let Some(lost_at) = a.lost_at_ms else {
+            continue;
+        };
+        let down = now.saturating_sub(lost_at);
+        if down >= dead_after {
+            a.lost_at_ms = None;
+            give_up.push((a.id.clone(), a.group.clone(), down));
+        } else if down >= degraded_after && !a.degraded {
+            a.degraded = true;
+            degrade.push((a.id.clone(), a.group.clone(), down));
+        }
+    }
+    for (agent, group, down) in degrade {
+        log(
+            "agent_degraded",
+            &[
+                ("agent", agent.clone()),
+                ("group", group.clone()),
+                ("down_ms", down.to_string()),
+            ],
+        );
+        st.emit(
+            "agent_degraded",
+            json!({ "group": group, "agent": agent, "down_ms": down }),
+        );
+    }
+    for (agent, group, down) in give_up {
+        let orphaned: Vec<String> = st
+            .actors
+            .values()
+            .filter(|ac| ac.agent == agent && !matches!(ac.state, ActorState::Dead { .. }))
+            .map(|ac| ac.id.clone())
+            .collect();
+        log(
+            "agent_gave_up",
+            &[
+                ("agent", agent.clone()),
+                ("group", group.clone()),
+                ("down_ms", down.to_string()),
+                ("actors", orphaned.len().to_string()),
+            ],
+        );
+        st.emit(
+            "agent_dead",
+            json!({ "group": group, "agent": agent, "down_ms": down,
+                    "actors": orphaned.len() }),
+        );
+        for id in orphaned {
+            mark_actor_dead(
+                &mut st,
+                &shared.cv,
+                &id,
+                &format!("agent link lost for {down}ms (MENTAT_AGENT_DEAD_AFTER_MS); giving up"),
+            );
+        }
+    }
 }
 
 pub fn hostname() -> String {
@@ -137,14 +244,16 @@ pub fn set_keepalive(stream: &TcpStream) {
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
         // Aggressive-ish probing on Linux: a wedged peer is declared dead in
-        // ~75s instead of the kernel default of >2h. wait_for_init blocks for
-        // ~10 minutes legitimately, but that's an idle-with-live-peer case,
-        // which keepalive handles correctly.
+        // ~MENTAT_TCP_DEAD_AFTER_MS (default 75s) instead of the kernel
+        // default of >2h. wait_for_init blocks for ~10 minutes legitimately,
+        // but that's an idle-with-live-peer case, which keepalive handles
+        // correctly. The target splits as idle + 3 probes: 2/5 + 3*(1/5).
         #[cfg(target_os = "linux")]
         {
-            let idle: libc::c_int = 30;
-            let intvl: libc::c_int = 15;
+            let total_s = (cfg().tcp_dead_after_ms / 1000).max(5) as libc::c_int;
             let cnt: libc::c_int = 3;
+            let intvl: libc::c_int = (total_s / 5).max(1);
+            let idle: libc::c_int = (total_s - cnt * intvl).max(1);
             libc::setsockopt(
                 fd,
                 libc::IPPROTO_TCP,
@@ -412,6 +521,8 @@ fn handle_client_msg(
                     strategy,
                     assignment: vec![None; n],
                     state: PgState::Pending,
+                    created_ms: crate::state::now_ms_u64(),
+                    fail_reason: None,
                 },
             );
             st.emit(
@@ -514,7 +625,22 @@ fn handle_client_msg(
                         .get(&actor.agent)
                         .filter(|a| a.alive)
                         .map(|a| a.writer.clone());
+                    let agent_known = st.agents.contains_key(&actor.agent);
                     match agent_writer {
+                        // Agent link is down but inside the degrade window
+                        // (the actor would be Dead otherwise): hold the call,
+                        // drained in order when the agent re-registers.
+                        None if agent_known => {
+                            let r = new_ref(RefState::Pending);
+                            st.refs.insert(ref_id.clone(), r);
+                            log(
+                                "call_held",
+                                &[("ref", ref_id.clone()), ("actor", actor_id.clone())],
+                            );
+                            if let Some(a) = st.actors.get_mut(&actor_id) {
+                                a.queued_calls.push((ref_id.clone(), method, payload));
+                            }
+                        }
                         None => {
                             let r = new_ref(RefState::ActorDied {
                                 reason: "agent connection lost".into(),
@@ -526,18 +652,22 @@ fn handle_client_msg(
                             st.refs.insert(ref_id.clone(), r);
                             let send_res = w.send(
                                 Msg::CallActor {
-                                    actor_id,
+                                    actor_id: actor_id.clone(),
                                     ref_id: ref_id.clone(),
-                                    method,
+                                    method: method.clone(),
                                 },
                                 0,
                                 &payload,
                             );
                             if send_res.is_err() {
-                                if let Some(r) = st.refs.get_mut(&ref_id) {
-                                    r.state = RefState::ActorDied {
-                                        reason: "agent connection lost mid-send".into(),
-                                    };
+                                // The link is dying under us. The EOF handler
+                                // and degrade window take it from here.
+                                log(
+                                    "call_held",
+                                    &[("ref", ref_id.clone()), ("actor", actor_id.clone())],
+                                );
+                                if let Some(a) = st.actors.get_mut(&actor_id) {
+                                    a.queued_calls.push((ref_id.clone(), method, payload));
                                 }
                             }
                         }
@@ -679,6 +809,7 @@ fn create_actor(
             owner: client_id.to_string(),
             state: ActorState::Spawning,
             pid: None,
+            queued_calls: Vec::new(),
         },
     );
     st.counters.actors_spawned += 1;
@@ -741,7 +872,10 @@ fn resolve_ref(st: &State, ref_id: &str) -> Res {
                 },
                 PgState::Pending => Res::Pending,
                 PgState::Removed => Res::ActorDied {
-                    reason: "placement group removed".into(),
+                    reason: pg
+                        .fail_reason
+                        .clone()
+                        .unwrap_or_else(|| "placement group removed".into()),
                 },
             },
         };
@@ -891,6 +1025,9 @@ pub fn mark_actor_dead(st: &mut State, cv: &std::sync::Condvar, actor_id: &str, 
         actor.state = ActorState::Dead {
             reason: reason.to_string(),
         };
+        // Held calls die with the actor. Their refs resolve in the fan-out
+        // below.
+        actor.queued_calls.clear();
         let group = actor.group.clone();
         let name = actor.name.clone();
         st.emit(
@@ -913,9 +1050,46 @@ pub fn mark_actor_dead(st: &mut State, cv: &std::sync::Condvar, actor_id: &str, 
 }
 
 fn reap_client(shared: &SharedRef, client_id: &str) {
-    let (actor_ids, group) = {
+    // The client identity goes away immediately even when a reap grace is
+    // configured -- a restarting vLLM is a brand-new client that must be able
+    // to open its driver session without waiting out the grace.
+    let group = {
         let mut st = shared.st.lock().unwrap();
         let group = client_group(&st, client_id);
+        st.clients.remove(client_id);
+        st.emit(
+            "driver_disconnected",
+            json!({ "group": group, "client_id": client_id }),
+        );
+        group
+    };
+    shared.cv.notify_all();
+
+    let grace = cfg().session_reap_grace_ms;
+    if grace == 0 {
+        reap_client_resources(shared, client_id, &group);
+    } else {
+        log(
+            "session_reap_deferred",
+            &[
+                ("client", client_id.to_string()),
+                ("grace_ms", grace.to_string()),
+            ],
+        );
+        let shared = shared.clone();
+        let client_id = client_id.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(grace));
+            reap_client_resources(&shared, &client_id, &group);
+        });
+    }
+}
+
+/// Kill a dead driver's actors, remove its placement groups and refs. Split
+/// from reap_client so MENTAT_SESSION_REAP_GRACE_MS can defer just this part.
+fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
+    let actor_ids: Vec<String> = {
+        let mut st = shared.st.lock().unwrap();
         let ids: Vec<String> = st
             .actors
             .values()
@@ -927,24 +1101,21 @@ fn reap_client(shared: &SharedRef, client_id: &str) {
                 pg.state = PgState::Removed;
             }
         }
-        st.clients.remove(client_id);
         if !ids.is_empty() {
             st.emit(
                 "driver_gone_reaping",
                 json!({ "group": group, "client_id": client_id, "actors": ids.len() }),
             );
         }
-        (ids, group)
+        ids
     };
     for id in &actor_ids {
         kill_actor(shared, id, "driver session closed");
     }
     let mut st = shared.st.lock().unwrap();
     st.refs.retain(|_, r| r.owner != client_id);
-    st.emit(
-        "driver_disconnected",
-        json!({ "group": group, "client_id": client_id }),
-    );
+    // GPUs just came free. Another group's pending pg may fit now.
+    try_place(&mut st, &shared.cv);
     shared.cv.notify_all();
 }
 
@@ -1052,6 +1223,7 @@ fn agent_conn(
         container,
         pid,
         resume,
+        unacked_refs,
     } = first.0.msg
     else {
         unreachable!()
@@ -1096,6 +1268,8 @@ fn agent_conn(
                 pid,
                 writer: writer.clone(),
                 alive: true,
+                lost_at_ms: None,
+                degraded: false,
                 seq,
             },
         );
@@ -1106,22 +1280,22 @@ fn agent_conn(
                     "gpus": gpus.len(), "container": container }),
         );
 
-        // Resumed actors whose owner is gone get killed; the rest are
-        // re-adopted (matters once the mesh can move the head).
+        // Resumed actors whose owner is gone (or that this daemon already
+        // declared dead, e.g. a kill or give-up during the outage) get
+        // killed. The rest are re-adopted (matters once the mesh can move
+        // the head). The kills are sent after AgentRegisterOk below -- the
+        // agent's handshake expects that as the first frame.
+        let mut kills: Vec<String> = Vec::new();
         for r in &resume {
             let keep = st
                 .actors
                 .get(&r.actor_id)
-                .map(|a| st.clients.contains_key(&a.owner))
+                .map(|a| {
+                    st.clients.contains_key(&a.owner) && !matches!(a.state, ActorState::Dead { .. })
+                })
                 .unwrap_or(false);
             if !keep {
-                let _ = writer.send(
-                    Msg::Kill {
-                        actor_id: r.actor_id.clone(),
-                    },
-                    0,
-                    &[],
-                );
+                kills.push(r.actor_id.clone());
                 log(
                     "resume_rejected",
                     &[("actor", r.actor_id.clone()), ("agent", agent_id.clone())],
@@ -1129,6 +1303,80 @@ fn agent_conn(
             }
         }
 
+        // The resume list is authoritative for what survived on the agent's
+        // side. An actor this daemon still thinks is live but the agent no
+        // longer carries (agent restarted, or the actor exited during the
+        // outage and the exit report was lost) is dead.
+        {
+            let resumed: std::collections::HashSet<&str> =
+                resume.iter().map(|r| r.actor_id.as_str()).collect();
+            let missing: Vec<String> = st
+                .actors
+                .values()
+                .filter(|a| {
+                    a.agent == agent_id
+                        && !matches!(a.state, ActorState::Dead { .. })
+                        && !resumed.contains(a.id.as_str())
+                })
+                .map(|a| a.id.clone())
+                .collect();
+            for id in missing {
+                mark_actor_dead(
+                    &mut st,
+                    &shared.cv,
+                    &id,
+                    "agent reconnected without this actor",
+                );
+            }
+        }
+
+        // A pending ref the agent neither carries (pending_refs), has a
+        // buffered result for (unacked_refs), nor sits in this daemon's own
+        // held-call queue was lost in flight during the outage: fail it so
+        // the driver raises instead of hanging forever.
+        {
+            let known: std::collections::HashSet<&str> = resume
+                .iter()
+                .flat_map(|r| r.pending_refs.iter())
+                .chain(unacked_refs.iter())
+                .map(|s| s.as_str())
+                .collect();
+            let queued: std::collections::HashSet<String> = st
+                .actors
+                .values()
+                .filter(|a| a.agent == agent_id)
+                .flat_map(|a| a.queued_calls.iter().map(|(r, _, _)| r.clone()))
+                .collect();
+            let this_agents_actor = |actor: &Option<String>, st: &State| {
+                actor
+                    .as_deref()
+                    .and_then(|id| st.actors.get(id))
+                    .is_some_and(|a| a.agent == agent_id)
+            };
+            let lost: Vec<String> = st
+                .refs
+                .iter()
+                .filter(|(rid, r)| {
+                    matches!(r.state, RefState::Pending)
+                        && this_agents_actor(&r.actor, &st)
+                        && !known.contains(rid.as_str())
+                        && !queued.contains(rid.as_str())
+                })
+                .map(|(rid, _)| rid.clone())
+                .collect();
+            for rid in lost {
+                log("ref_lost_in_outage", &[("ref", rid.clone())]);
+                if let Some(r) = st.refs.get_mut(&rid) {
+                    r.state = RefState::ActorDied {
+                        reason: "call lost while the agent link was down".into(),
+                    };
+                }
+            }
+        }
+
+        // AgentRegisterOk must be the first frame on the link -- the agent's
+        // handshake rejects anything else -- so kills and held-call drains
+        // follow it.
         let _ = writer.send(
             Msg::AgentRegisterOk {
                 node_id: node_id.clone(),
@@ -1136,6 +1384,37 @@ fn agent_conn(
             first.0.req,
             &[],
         );
+        for actor_id in kills {
+            let _ = writer.send(Msg::Kill { actor_id }, 0, &[]);
+        }
+
+        // Drain calls held during the outage, in arrival order.
+        {
+            let drains: Vec<(String, Vec<crate::state::QueuedCall>)> = st
+                .actors
+                .values_mut()
+                .filter(|a| a.agent == agent_id && !matches!(a.state, ActorState::Dead { .. }))
+                .filter(|a| !a.queued_calls.is_empty())
+                .map(|a| (a.id.clone(), std::mem::take(&mut a.queued_calls)))
+                .collect();
+            for (actor_id, calls) in drains {
+                for (ref_id, method, payload) in calls {
+                    log(
+                        "held_call_sent",
+                        &[("ref", ref_id.clone()), ("actor", actor_id.clone())],
+                    );
+                    let _ = writer.send(
+                        Msg::CallActor {
+                            actor_id: actor_id.clone(),
+                            ref_id,
+                            method,
+                        },
+                        0,
+                        &payload,
+                    );
+                }
+            }
+        }
         try_place(&mut st, &shared.cv);
     }
     shared.cv.notify_all();
@@ -1178,7 +1457,13 @@ fn agent_conn(
             }
             Msg::ActorResult { ref_id, ok, error } => {
                 let mut st = shared.st.lock().unwrap();
-                if let Some(r) = st.refs.get_mut(&ref_id) {
+                // First resolution wins: a result re-sent after an outage must
+                // not overwrite a ref the driver may already have seen fail.
+                if let Some(r) = st
+                    .refs
+                    .get_mut(&ref_id)
+                    .filter(|r| matches!(r.state, RefState::Pending))
+                {
                     r.state = if !ok && payload.is_empty() && !error.is_empty() {
                         RefState::ActorDied { reason: error }
                     } else {
@@ -1220,9 +1505,13 @@ fn agent_conn(
         }
     }
 
-    // Agent link lost: its actors are unreachable. Declare them dead so
-    // pending refs (including run() sentinels) resolve and the driver finds
-    // out, rather than hanging forever.
+    // Agent link lost: its actors are unreachable, but a link blip and a dead
+    // container look identical here, so start the degrade window instead of
+    // declaring death. The lifecycle sweeper marks the agent degraded after
+    // MENTAT_AGENT_DEGRADED_AFTER_MS and gives up (actors dead, run()
+    // sentinels resolve, driver restarts) after MENTAT_AGENT_DEAD_AFTER_MS;
+    // an agent that re-registers inside the window carries on with nothing
+    // lost.
     let mut st = shared.st.lock().unwrap();
     // Only if this reader owned the current registration -- a re-register may
     // already have replaced the entry with a fresh connection.
@@ -1232,19 +1521,19 @@ fn agent_conn(
         .map(|a| FrameWriter::same_socket(&a.writer, &writer))
         .unwrap_or(false);
     if owned {
-        if let Some(a) = st.agents.get_mut(&agent_id) {
+        let group = if let Some(a) = st.agents.get_mut(&agent_id) {
             a.alive = false;
-        }
-        st.emit("agent_lost", json!({ "agent": agent_id }));
-        let orphaned: Vec<String> = st
-            .actors
-            .values()
-            .filter(|ac| ac.agent == agent_id && !matches!(ac.state, ActorState::Dead { .. }))
-            .map(|ac| ac.id.clone())
-            .collect();
-        for id in orphaned {
-            mark_actor_dead(&mut st, &shared.cv, &id, "agent connection lost");
-        }
+            a.lost_at_ms = Some(crate::state::now_ms_u64());
+            a.degraded = false;
+            a.group.clone()
+        } else {
+            String::new()
+        };
+        st.emit(
+            "agent_lost",
+            json!({ "agent": agent_id, "group": group,
+                    "degrade_window_ms": cfg().agent_dead_after_ms }),
+        );
     }
     shared.cv.notify_all();
 }

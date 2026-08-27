@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -56,15 +57,19 @@ atexit.register(_reap_all)
 
 
 class Cluster:
-    """One daemon plus N agents, all on localhost with MENTAT_GPUS fakes."""
+    """One daemon plus N agents, all on localhost with MENTAT_GPUS fakes.
 
-    def __init__(self):
+    daemon_env: extra MENTAT_* variables for the daemon process (the lifecycle
+    timeout tests use short windows here)."""
+
+    def __init__(self, daemon_env=None):
         build_binary()
         self.tmp = tempfile.mkdtemp(prefix="mentat-test-")
         self.port = free_port()
         self.http_port = free_port()
         self.address = f"127.0.0.1:{self.port}"
         self.head_json = os.path.join(self.tmp, "head.json")
+        self.daemon_env = daemon_env or {}
         self.daemon = self._spawn_daemon()
         self._wait_port(self.port)
         self.agents = []
@@ -83,7 +88,7 @@ class Cluster:
                 "--head-json",
                 self.head_json,
             ],
-            env={**os.environ, "MENTAT_NODE_IP": "127.0.0.1"},
+            env={**os.environ, "MENTAT_NODE_IP": "127.0.0.1", **self.daemon_env},
         )
         _children.append(p)
         return p
@@ -98,11 +103,15 @@ class Cluster:
                 time.sleep(0.05)
         raise TimeoutError(f"port {port} never opened")
 
-    def start_agent(self, group, gpus=1, container=None, node_ip="127.0.0.1"):
+    def start_agent(
+        self, group, gpus=1, container=None, node_ip="127.0.0.1", daemon_addr=None
+    ):
         container = container or f"c{len(self.agents)}"
         env = {
             **os.environ,
-            "MENTAT_DAEMON": self.address,
+            # daemon_addr lets the link-loss tests route the agent through a
+            # TcpProxy while the driver talks to the daemon directly.
+            "MENTAT_DAEMON": daemon_addr or self.address,
             "MENTAT_GROUP": group,
             "MENTAT_GPUS": str(gpus),
             "MENTAT_NODE_IP": node_ip,
@@ -156,9 +165,10 @@ class Cluster:
 
 
 class Daemon:
-    """One mentatd in a mesh test: its own ports, node_ip, and peer list."""
+    """One mentatd in a mesh test: its own ports, node_ip, peer list, and
+    optional MENTAT_* env overrides."""
 
-    def __init__(self, node_ip, peers=(), port=None):
+    def __init__(self, node_ip, peers=(), port=None, env=None):
         build_binary()
         self.tmp = tempfile.mkdtemp(prefix="mentatd-")
         self.node_ip = node_ip
@@ -184,6 +194,7 @@ class Daemon:
                     else []
                 ),
             ],
+            env={**os.environ, **(env or {})},
         )
         _children.append(self.proc)
 
@@ -230,6 +241,90 @@ class Daemon:
     def cleanup(self):
         self.kill()
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class TcpProxy:
+    """A cuttable TCP relay for link-loss tests: point an agent's
+    MENTAT_DAEMON at proxy.address, then cut()/pause() to simulate a dropped
+    link while both endpoints stay alive. resume() lets the agent's retry
+    loop reconnect."""
+
+    def __init__(self, target_addr):
+        host, _, port = target_addr.rpartition(":")
+        self.target = (host, int(port))
+        self.listener = socket.socket()
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(16)
+        self.address = f"127.0.0.1:{self.listener.getsockname()[1]}"
+        self.paused = False
+        self.closed = False
+        self.conns = []
+        self.lock = threading.Lock()
+        threading.Thread(target=self._accept_loop, daemon=True).start()
+
+    def _accept_loop(self):
+        while not self.closed:
+            try:
+                client, _ = self.listener.accept()
+            except OSError:
+                return
+            with self.lock:
+                refuse = self.paused or self.closed
+            if refuse:
+                client.close()
+                continue
+            try:
+                server = socket.create_connection(self.target, timeout=5)
+            except OSError:
+                client.close()
+                continue
+            with self.lock:
+                self.conns.append((client, server))
+            for a, b in ((client, server), (server, client)):
+                threading.Thread(target=self._pipe, args=(a, b), daemon=True).start()
+
+    @staticmethod
+    def _pipe(src, dst):
+        try:
+            while True:
+                data = src.recv(65536)
+                if not data:
+                    break
+                dst.sendall(data)
+        except OSError:
+            pass
+        for s in (src, dst):
+            try:
+                s.close()
+            except OSError:
+                pass
+
+    def pause(self):
+        with self.lock:
+            self.paused = True
+
+    def resume(self):
+        with self.lock:
+            self.paused = False
+
+    def cut(self):
+        with self.lock:
+            conns, self.conns = self.conns, []
+        for pair in conns:
+            for s in pair:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+    def close(self):
+        self.closed = True
+        self.cut()
+        try:
+            self.listener.close()
+        except OSError:
+            pass
 
 
 def fresh_shim(address, group):
