@@ -190,6 +190,8 @@ pub struct PeerInfo {
     /// Every address the peer says it answers on, for a consumer that can
     /// reach none of node_ip or link_ip.
     pub addrs: Vec<String>,
+    /// Operator tags per address, carried for consumers, never read here.
+    pub addr_tags: std::collections::BTreeMap<String, Vec<String>>,
     pub control_addr: String,
     pub http_port: u16,
     pub writer: FrameWriter,

@@ -420,6 +420,10 @@ async fn udp_listener(shared: Arc<Shared>) {
     // Sources whose advertised address has already been reported as
     // unroutable-looking, so the note lands once rather than every round.
     let mut noted: HashSet<String> = HashSet::new();
+    // node_id -> the address chosen for it. A dual-homed daemon broadcasts on
+    // every interface, so without this the same node is watched once per
+    // link.
+    let mut chosen: HashMap<String, String> = HashMap::new();
     let universe = secret::universe();
     let mut buf = [0u8; 2048];
     loop {
@@ -513,24 +517,56 @@ async fn udp_listener(shared: Arc<Shared>) {
         if !source_allowed(&shared.cfg, &src_ip) || !source_allowed(&shared.cfg, http_ip) {
             continue;
         }
-        // Watch the address the datagram arrived from, not the one it
-        // advertises. The advertised IP is the daemon's cluster identity, so
-        // on a multi-homed box it names the subnet the cluster talks on --
-        // which a listener off that subnet cannot route to. The source
-        // address just carried a packet here, which is the proof that
-        // matters. The port still comes from the announcement, since only
-        // the daemon knows which port its HTTP server is on.
-        if http_ip != src_ip && noted.insert(src_ip.clone()) {
+        // One watch per node. A node with two links broadcasts on both, and
+        // the datagrams differ only in source address.
+        let node = v["node_id"].as_str().unwrap_or_default().to_string();
+        if !node.is_empty() && chosen.contains_key(&node) {
+            continue;
+        }
+        // The node ranks its own addresses, most preferred first, because
+        // only it knows which link is the fast one. Take the best it offers
+        // that lands on a subnet we are attached to; failing that, the source
+        // address, which at least carried this packet here.
+        let ranked: Vec<String> = v["addrs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str())
+            .map(str::to_string)
+            .collect();
+        // An advertised address is a claim, so it passes the same allowlist
+        // the source did. Without this an announcement could name any host
+        // and have this process connect to it.
+        let subnets = local_subnets();
+        let pick = ranked
+            .iter()
+            .filter(|a| source_allowed(&shared.cfg, a))
+            .find(|a| on_local_subnet(a, &subnets))
+            .cloned()
+            .unwrap_or_else(|| src_ip.clone());
+        if pick != src_ip && noted.insert(src_ip.clone()) {
+            log(
+                "announce_preferred_addr",
+                &[
+                    ("src", src_ip.clone()),
+                    ("advertised", http.to_string()),
+                    ("watching", format!("{pick}:{http_port}")),
+                ],
+            );
+        } else if http_ip != src_ip && noted.insert(src_ip.clone()) {
             log(
                 "announce_addr_mismatch",
                 &[
                     ("src", src_ip.clone()),
                     ("advertised", http.to_string()),
-                    ("watching", format!("{src_ip}:{http_port}")),
+                    ("watching", format!("{pick}:{http_port}")),
                 ],
             );
         }
-        ensure_watched(&shared, format!("{src_ip}:{http_port}"));
+        if !node.is_empty() {
+            chosen.insert(node, pick.clone());
+        }
+        ensure_watched(&shared, format!("{pick}:{http_port}"));
     }
 }
 
@@ -776,7 +812,11 @@ async fn http_json(
 }
 
 fn source_allowed(cfg: &Config, addr: &str) -> bool {
-    cfg.allowed_sources.iter().any(|p| addr.starts_with(p))
+    prefix_allowed(&cfg.allowed_sources, addr)
+}
+
+fn prefix_allowed(allowed: &[String], addr: &str) -> bool {
+    allowed.iter().any(|p| addr.starts_with(p))
 }
 
 async fn handle(
@@ -918,6 +958,17 @@ mod tests {
             "addrs": ["172.16.9.9"],
         });
         assert_eq!(peer_address(&p, &subnets()).as_deref(), Some("172.16.4.4"));
+    }
+
+    /// An advertised address is a claim. Without the allowlist check on the
+    /// candidates, an announcement naming any host would have this process
+    /// connect to it.
+    #[test]
+    fn an_advertised_address_is_still_a_claim() {
+        let allowed = vec!["127.".to_string()];
+        assert!(prefix_allowed(&allowed, "127.0.0.1"));
+        assert!(!prefix_allowed(&allowed, "192.168.1.109"));
+        assert!(!prefix_allowed(&allowed, "203.0.113.7"));
     }
 
     #[test]

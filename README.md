@@ -173,7 +173,7 @@ Model names come from probing the group's own `/v1/models`.
 | `MENTAT_ANNOUNCE_PORT` | 6382 | UDP announce port; 0 disables |
 | `MENTAT_ANNOUNCE_ADDR` | empty | Extra unicast announce targets |
 | `MENTAT_ANNOUNCE_INTERVAL_S` | 5 | Announce interval |
-| `MENTAT_ANNOUNCE_IFACES` | auto | Interfaces to announce on and advertise |
+| `MENTAT_ANNOUNCE_IFACES` | auto | Interfaces to announce on, in preference order, with optional tags |
 | `MENTAT_PG_PENDING_TIMEOUT_MS` | 600000 | Placement group PENDING → fail |
 | `MENTAT_AGENT_DEGRADED_AFTER_MS` | 30000 | Disconnected agent → `agent_degraded` |
 | `MENTAT_AGENT_DEAD_AFTER_MS` | 60000 | Disconnected agent → actors dead |
@@ -221,7 +221,9 @@ UDP announcement is how `mentatd-serve` finds daemons. `MENTAT_ANNOUNCE_ADDR`
 adds unicast targets outside the broadcast domain. `MENTAT_ANNOUNCE_PORT=0`
 turns it off. `MENTAT_ANNOUNCE_IFACES` names the interfaces explicitly when
 the default guess (every up non-loopback interface bar container bridges) is
-wrong.
+wrong. Its order is a preference: list the fast link first and a consumer
+that can reach both takes it. An entry may carry tags for a consumer to route
+on, `enp1s0f0np0=connectx+rdma,eno1=lan`, which nothing reads yet.
 
 A listener watches the address a datagram arrived from, not the one it
 advertises: `node_ip` is the node's cluster identity, so on a multi-homed box

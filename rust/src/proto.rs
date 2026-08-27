@@ -216,11 +216,15 @@ pub enum Msg {
         node_ip: String,
         control_addr: String,
         http_port: u16,
-        /// Every address the dialing daemon answers on. node_ip is only what
-        /// it calls itself, so a third party may not route there. Defaulted
-        /// for old daemons.
+        /// Every address the dialing daemon answers on, most preferred
+        /// first. node_ip is only what it calls itself, so a third party may
+        /// not route there. Defaulted for old daemons.
         #[serde(default)]
         addrs: Vec<String>,
+        /// Operator tags per address, for consumers that route classes of
+        /// traffic over different links. Carried, never interpreted here.
+        #[serde(default)]
+        addr_tags: BTreeMap<String, Vec<String>>,
     },
     PeerHelloOk {
         node_id: String,
@@ -235,6 +239,8 @@ pub enum Msg {
         http_port: u16,
         #[serde(default)]
         addrs: Vec<String>,
+        #[serde(default)]
+        addr_tags: BTreeMap<String, Vec<String>>,
     },
     /// Periodic push of a daemon's own snapshot, so every daemon can serve a
     /// merged cluster view without request forwarding.

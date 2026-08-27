@@ -11,6 +11,7 @@
 //! listener keeps treating an announcement as a hint -- an address to watch
 //! -- and verifies everything it claims over TCP.
 
+use std::collections::BTreeMap;
 use std::net::UdpSocket;
 use std::time::Duration;
 
@@ -101,6 +102,7 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
                 "http": format!("{}:{}", st.node_ip, st.http_port),
                 "universe": universe,
                 "addrs": local_addrs(),
+                "addr_tags": local_addr_tags(),
             });
             if key.is_some() {
                 // Version 2 carries what bounds replay: t against the
@@ -127,42 +129,87 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
     }
 }
 
-/// Interfaces worth announcing on.
+/// One selected interface: the address it carries and the tags it was given.
+pub struct Iface {
+    pub iface: getifaddrs::Interface,
+    pub tags: Vec<String>,
+}
+
+/// Interfaces worth announcing on, most preferred first.
 ///
-/// MENTAT_ANNOUNCE_IFACES names them explicitly, comma separated, for the
-/// cases the default guess gets wrong. Unset, every up non-loopback IPv4
-/// interface except the container bridges, which carry no peers and would
-/// have every node announcing to itself.
-fn selected_ifaces() -> Vec<getifaddrs::Interface> {
-    let only: Vec<String> = std::env::var("MENTAT_ANNOUNCE_IFACES")
+/// MENTAT_ANNOUNCE_IFACES names them explicitly and its order is the
+/// preference order: put the fast link first and consumers that can reach
+/// both will take it. Only this node can rank its own links -- a consumer
+/// sees two addresses that both work and cannot tell which is the fast path.
+///
+/// An entry may carry tags, which travel with the address and mean nothing
+/// here. They exist so a consumer can eventually say which class of traffic
+/// belongs on which link:
+///
+///     MENTAT_ANNOUNCE_IFACES=enp1s0f0np0=connectx+rdma,eno1=lan
+///
+/// Unset, every up non-loopback IPv4 interface except the container bridges,
+/// which carry no peers and would have every node announcing to itself, in
+/// whatever order the kernel lists them and with no tags.
+fn selected_ifaces() -> Vec<Iface> {
+    // "name" or "name=tag+tag", comma separated.
+    let spec: Vec<(String, Vec<String>)> = std::env::var("MENTAT_ANNOUNCE_IFACES")
         .unwrap_or_default()
         .split(',')
-        .map(|s| s.trim().to_string())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
+        .map(|e| {
+            let (name, tags) = e.split_once('=').unwrap_or((e, ""));
+            let tags = tags
+                .split('+')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect();
+            (name.trim().to_string(), tags)
+        })
         .collect();
     let Ok(ifaces) = getifaddrs::InterfaceFilter::new().v4().get() else {
         return Vec::new();
     };
-    ifaces
+    let mut out: Vec<Iface> = ifaces
         .filter(|i| {
             i.flags.contains(InterfaceFlags::UP) && !i.flags.contains(InterfaceFlags::LOOPBACK)
         })
         .filter(|i| {
-            if only.is_empty() {
+            if spec.is_empty() {
                 !["docker", "veth", "br-", "virbr"]
                     .iter()
                     .any(|p| i.name.starts_with(p))
             } else {
-                only.iter().any(|n| n == &i.name)
+                spec.iter().any(|(n, _)| n == &i.name)
             }
         })
-        .collect()
+        .map(|i| {
+            let tags = spec
+                .iter()
+                .find(|(n, _)| n == &i.name)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_default();
+            Iface { iface: i, tags }
+        })
+        .collect();
+    if !spec.is_empty() {
+        // Rank by position in the operator's list rather than the kernel's.
+        out.sort_by_key(|i| {
+            spec.iter()
+                .position(|(n, _)| n == &i.iface.name)
+                .unwrap_or(usize::MAX)
+        });
+    }
+    out
 }
 
 /// One broadcast address per selected interface.
 fn broadcast_targets(port: u16) -> Vec<String> {
     selected_ifaces()
         .into_iter()
+        .map(|i| i.iface)
         .filter(|i| i.flags.contains(InterfaceFlags::BROADCAST))
         .filter_map(|i| i.address.associated_address())
         .map(|b| format!("{b}:{port}"))
@@ -175,7 +222,17 @@ fn broadcast_targets(port: u16) -> Vec<String> {
 pub fn local_addrs() -> Vec<String> {
     selected_ifaces()
         .into_iter()
-        .filter_map(|i| i.address.ip_addr())
+        .filter_map(|i| i.iface.address.ip_addr())
         .map(|a| a.to_string())
+        .collect()
+}
+
+/// Tags per address, for the addresses that were given any. Empty unless
+/// MENTAT_ANNOUNCE_IFACES names tags, so a datagram carries no dead weight.
+pub fn local_addr_tags() -> BTreeMap<String, Vec<String>> {
+    selected_ifaces()
+        .into_iter()
+        .filter(|i| !i.tags.is_empty())
+        .filter_map(|i| i.iface.address.ip_addr().map(|a| (a.to_string(), i.tags)))
         .collect()
 }

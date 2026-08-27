@@ -100,6 +100,7 @@ fn try_connect(
             control_addr: format!("{my_ip}:{control_port}"),
             http_port,
             addrs: crate::announce::local_addrs(),
+            addr_tags: crate::announce::local_addr_tags(),
         },
         1,
         &[],
@@ -107,14 +108,15 @@ fn try_connect(
     let (frame, _) = read_frame(&mut reader)?.ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at peer hello")
     })?;
-    let (peer_id, peer_ip, peer_control, peer_http, peer_addrs) = match frame.msg {
+    let (peer_id, peer_ip, peer_control, peer_http, peer_addrs, peer_tags) = match frame.msg {
         Msg::PeerHelloOk {
             node_id,
             node_ip,
             control_addr,
             http_port,
             addrs,
-        } => (node_id, node_ip, control_addr, http_port, addrs),
+            addr_tags,
+        } => (node_id, node_ip, control_addr, http_port, addrs, addr_tags),
         other => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -139,12 +141,15 @@ fn try_connect(
         .unwrap_or_else(|| seed.to_string());
     if !register_peer(
         shared,
-        peer_id.clone(),
-        peer_ip,
-        link_ip,
-        peer_addrs,
-        control,
-        peer_http,
+        PeerIdent {
+            node_id: peer_id.clone(),
+            node_ip: peer_ip,
+            link_ip,
+            addrs: peer_addrs,
+            addr_tags: peer_tags,
+            control_addr: control,
+            http_port: peer_http,
+        },
         writer.clone(),
     ) {
         // An alive link to this node already exists (e.g. it dialed us
@@ -169,6 +174,7 @@ pub fn accept_peer(
         control_addr,
         http_port,
         addrs,
+        addr_tags,
     } = hello.0.msg
     else {
         unreachable!()
@@ -189,6 +195,7 @@ pub fn accept_peer(
             control_addr: my_control,
             http_port: my_http,
             addrs: crate::announce::local_addrs(),
+            addr_tags: crate::announce::local_addr_tags(),
         },
         hello.0.req,
         &[],
@@ -198,12 +205,15 @@ pub fn accept_peer(
     }
     if !register_peer(
         &shared,
-        node_id.clone(),
-        node_ip,
-        link_ip,
-        addrs,
-        control_addr,
-        http_port,
+        PeerIdent {
+            node_id: node_id.clone(),
+            node_ip,
+            link_ip,
+            addrs,
+            addr_tags,
+            control_addr,
+            http_port,
+        },
         writer.clone(),
     ) {
         return;
@@ -214,16 +224,27 @@ pub fn accept_peer(
 /// Keep-first semantics: an alive existing link wins and the new one is
 /// refused (returns false). Replacing a healthy link would let two daemons
 /// that dial each other under different addresses churn links forever.
-fn register_peer(
-    shared: &SharedRef,
+/// What a peer says about itself in its hello, plus what the link observed.
+struct PeerIdent {
     node_id: String,
     node_ip: String,
     link_ip: String,
     addrs: Vec<String>,
+    addr_tags: std::collections::BTreeMap<String, Vec<String>>,
     control_addr: String,
     http_port: u16,
-    writer: FrameWriter,
-) -> bool {
+}
+
+fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool {
+    let PeerIdent {
+        node_id,
+        node_ip,
+        link_ip,
+        addrs,
+        addr_tags,
+        control_addr,
+        http_port,
+    } = p;
     let mut st = shared.st.lock().unwrap();
     if let Some(old) = st.peers.get(&node_id) {
         if old.alive {
@@ -237,6 +258,7 @@ fn register_peer(
             node_ip: node_ip.clone(),
             link_ip,
             addrs,
+            addr_tags,
             control_addr,
             http_port,
             writer,

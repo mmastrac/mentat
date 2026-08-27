@@ -105,10 +105,9 @@ outage does not orphan them.
 | `peer_status` | Periodic snapshot push |
 | `peer_event` | One replicated event. The receiver does not re-forward it |
 
-Both hellos carry `node_id`, `node_ip`, `control_addr`, `http_port` and
-`addrs`. `addrs` lists every address the daemon answers on; `node_ip` is only
-what it calls itself. `control_addr`, `http_port` and `addrs` default to
-empty for daemons that predate them.
+Both hellos carry `node_id`, `node_ip`, `control_addr`, `http_port`, `addrs`
+and `addr_tags`. `control_addr`, `http_port`, `addrs` and `addr_tags` default
+to empty for daemons that predate them.
 
 Links are keep-first: if a live link to that `node_id` exists, the new one is
 refused. Two daemons dialing each other under different addresses would
@@ -139,7 +138,8 @@ Unsigned (version 1):
 
 ```json
 {"mentat_announce": 1, "node_id": "...", "control": "10.0.0.1:6379",
- "http": "10.0.0.1:6380", "universe": "default", "addrs": ["10.0.0.1"]}
+ "http": "10.0.0.1:6380", "universe": "default", "addrs": ["10.0.0.1"],
+ "addr_tags": {"10.0.0.1": ["connectx"]}}
 ```
 
 Signed (version 2) wraps the same payload:
@@ -180,17 +180,29 @@ A daemon reports three kinds of address. They are not interchangeable:
 | --- | --- |
 | `node_ip` | What the node calls itself. Its cluster identity |
 | `link_ip` | The address a mesh link uses: the socket peer address inbound, the dialed address outbound |
-| `addrs` | Every address the node answers on |
+| `addrs` | Every address the node answers on, most preferred first |
+| `addr_tags` | Operator tags per address. Carried, never interpreted |
 
 `node_ip` is not an address a third party can necessarily reach. On a
 multi-homed node it names the subnet the cluster talks on, which a host off
 that subnet has no route to.
 
-A consumer picks in this order:
+`addrs` is ordered: the node lists its preferred link first. Only the node
+can rank its own links, since a consumer that can reach both sees no
+difference between them. The order comes from `MENTAT_ANNOUNCE_IFACES`.
 
-1. The source address of a datagram it received, which is proof.
-2. Any candidate on one of its own subnets.
-3. `link_ip`, then `addrs`, then `node_ip`.
+`addr_tags` maps an address to operator-defined tags, e.g.
+`{"10.100.0.1": ["connectx", "rdma"]}`. Nothing reads them yet. They exist so
+a consumer can route classes of traffic over different links.
+
+A consumer picks one address per node, in this order:
+
+1. The highest-ranked entry in `addrs` on one of its own subnets.
+2. The source address of a datagram it received, which is proof of reach.
+3. `link_ip`, then the rest of `addrs`, then `node_ip`.
+
+One watch per `node_id`. A node with two links broadcasts on both, and the
+datagrams differ only in source address.
 
 ## HTTP
 
