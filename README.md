@@ -90,7 +90,7 @@ vllm serve ... --distributed-executor-backend ray -tp 2
 
 [GUIDE.md](GUIDE.md) covers the vLLM audit, the Ray workarounds you can delete,
 and the limits. [GUIDE-SERVE.md](GUIDE-SERVE.md) covers serving several models
-behind one endpoint.
+behind one endpoint. [PROTOCOL.md](PROTOCOL.md) is the wire format.
 
 ## Deploy
 
@@ -173,6 +173,7 @@ Model names come from probing the group's own `/v1/models`.
 | `MENTAT_ANNOUNCE_PORT` | 6382 | UDP announce port; 0 disables |
 | `MENTAT_ANNOUNCE_ADDR` | empty | Extra unicast announce targets |
 | `MENTAT_ANNOUNCE_INTERVAL_S` | 5 | Announce interval |
+| `MENTAT_ANNOUNCE_IFACES` | auto | Interfaces to announce on and advertise |
 | `MENTAT_PG_PENDING_TIMEOUT_MS` | 600000 | Placement group PENDING → fail |
 | `MENTAT_AGENT_DEGRADED_AFTER_MS` | 30000 | Disconnected agent → `agent_degraded` |
 | `MENTAT_AGENT_DEAD_AFTER_MS` | 60000 | Disconnected agent → actors dead |
@@ -218,7 +219,14 @@ via `TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`. Linux only.
 
 UDP announcement is how `mentatd-serve` finds daemons. `MENTAT_ANNOUNCE_ADDR`
 adds unicast targets outside the broadcast domain. `MENTAT_ANNOUNCE_PORT=0`
-turns it off.
+turns it off. `MENTAT_ANNOUNCE_IFACES` names the interfaces explicitly when
+the default guess (every up non-loopback interface bar container bridges) is
+wrong.
+
+A listener watches the address a datagram arrived from, not the one it
+advertises: `node_ip` is the node's cluster identity, so on a multi-homed box
+it names a subnet the listener may not route to. [PROTOCOL.md](PROTOCOL.md)
+has the selection order.
 
 ## Agent / container env vars
 

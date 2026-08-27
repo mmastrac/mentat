@@ -187,6 +187,9 @@ pub struct PeerInfo {
     /// calls itself, which on a multi-homed box is a subnet a third party
     /// may not route to. This one carried a working connection.
     pub link_ip: String,
+    /// Every address the peer says it answers on, for a consumer that can
+    /// reach none of node_ip or link_ip.
+    pub addrs: Vec<String>,
     pub control_addr: String,
     pub http_port: u16,
     pub writer: FrameWriter,

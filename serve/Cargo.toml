@@ -19,6 +19,7 @@ hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 serde_json = "1"
+getifaddrs = "0.6"
 hmac = "0.12"
 sha2 = "0.10"
 

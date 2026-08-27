@@ -142,6 +142,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                 json!({
                     "node_ip": p.node_ip,
                     "link_ip": p.link_ip,
+                    "addrs": p.addrs,
                     "control_addr": p.control_addr,
                     "http_port": p.http_port,
                     "alive": p.alive,
@@ -156,6 +157,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
     json!({
         "node_id": st.node_id,
         "node_ip": st.node_ip,
+        "addrs": crate::announce::local_addrs(),
         "hostname": st.hostname,
         "gcs_address": st.gcs_address,
         "head_node_id": st.head_node_id,

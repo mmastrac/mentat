@@ -100,6 +100,7 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
                 "control": st.gcs_address,
                 "http": format!("{}:{}", st.node_ip, st.http_port),
                 "universe": universe,
+                "addrs": local_addrs(),
             });
             if key.is_some() {
                 // Version 2 carries what bounds replay: t against the
@@ -126,24 +127,55 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
     }
 }
 
-/// One broadcast address per IPv4 interface worth announcing on.
+/// Interfaces worth announcing on.
 ///
-/// Docker's own bridges carry no listeners and would have every node
-/// announcing to itself, so they are skipped by name -- the only part of this
-/// the interface flags cannot express.
-fn broadcast_targets(port: u16) -> Vec<String> {
+/// MENTAT_ANNOUNCE_IFACES names them explicitly, comma separated, for the
+/// cases the default guess gets wrong. Unset, every up non-loopback IPv4
+/// interface except the container bridges, which carry no peers and would
+/// have every node announcing to itself.
+fn selected_ifaces() -> Vec<getifaddrs::Interface> {
+    let only: Vec<String> = std::env::var("MENTAT_ANNOUNCE_IFACES")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let Ok(ifaces) = getifaddrs::InterfaceFilter::new().v4().get() else {
         return Vec::new();
     };
-    let want = InterfaceFlags::UP | InterfaceFlags::BROADCAST;
     ifaces
-        .filter(|i| i.flags.contains(want) && !i.flags.contains(InterfaceFlags::LOOPBACK))
         .filter(|i| {
-            !["docker", "veth", "br-", "virbr"]
-                .iter()
-                .any(|p| i.name.starts_with(p))
+            i.flags.contains(InterfaceFlags::UP) && !i.flags.contains(InterfaceFlags::LOOPBACK)
         })
+        .filter(|i| {
+            if only.is_empty() {
+                !["docker", "veth", "br-", "virbr"]
+                    .iter()
+                    .any(|p| i.name.starts_with(p))
+            } else {
+                only.iter().any(|n| n == &i.name)
+            }
+        })
+        .collect()
+}
+
+/// One broadcast address per selected interface.
+fn broadcast_targets(port: u16) -> Vec<String> {
+    selected_ifaces()
+        .into_iter()
+        .filter(|i| i.flags.contains(InterfaceFlags::BROADCAST))
         .filter_map(|i| i.address.associated_address())
         .map(|b| format!("{b}:{port}"))
+        .collect()
+}
+
+/// Every address this node answers on, for consumers that cannot reach the
+/// one it calls itself. A listener should still prefer the address a packet
+/// actually arrived from; this list is what to fall back to.
+pub fn local_addrs() -> Vec<String> {
+    selected_ifaces()
+        .into_iter()
+        .filter_map(|i| i.address.ip_addr())
+        .map(|a| a.to_string())
         .collect()
 }

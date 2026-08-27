@@ -24,6 +24,7 @@ mod secret;
 mod ws;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -533,6 +534,61 @@ async fn udp_listener(shared: Arc<Shared>) {
     }
 }
 
+/// This box's IPv4 networks, as (network, mask). An address inside one of
+/// these is on a wire we are attached to, which is the closest thing to
+/// proof of reachability available without dialling it.
+fn local_subnets() -> Vec<(u32, u32)> {
+    let Ok(ifaces) = getifaddrs::InterfaceFilter::new().v4().get() else {
+        return Vec::new();
+    };
+    ifaces
+        .filter_map(|i| match (i.address.ip_addr(), i.address.netmask()) {
+            (Some(IpAddr::V4(a)), Some(IpAddr::V4(m))) => {
+                let (a, m) = (u32::from(a), u32::from(m));
+                Some((a & m, m))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn on_local_subnet(ip: &str, subnets: &[(u32, u32)]) -> bool {
+    let Ok(v4) = ip.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    let a = u32::from(v4);
+    subnets.iter().any(|(net, mask)| a & mask == *net)
+}
+
+/// Which address to reach a peer on, given what a daemon reports about it.
+///
+/// Candidates run in order of evidence: link_ip carried the mesh link, addrs
+/// is what the peer says it answers on, node_ip is only the name it calls
+/// itself. An address on one of our own subnets beats that order outright,
+/// since the pair's cluster identity is a subnet a LAN-only box cannot route
+/// to. Old daemons report neither link_ip nor addrs, leaving node_ip.
+fn peer_address(p: &Value, subnets: &[(u32, u32)]) -> Option<String> {
+    let mut cands: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |v: Option<&str>| {
+        if let Some(s) = v.filter(|s| !s.is_empty()) {
+            if seen.insert(s.to_string()) {
+                cands.push(s.to_string());
+            }
+        }
+    };
+    push(p["link_ip"].as_str());
+    for a in p["addrs"].as_array().into_iter().flatten() {
+        push(a.as_str());
+    }
+    push(p["node_ip"].as_str());
+    cands
+        .iter()
+        .find(|c| on_local_subnet(c, subnets))
+        .or_else(|| cands.first())
+        .cloned()
+}
+
 async fn poll_status(shared: &Arc<Shared>, addr: &str) {
     let url = format!("http://{addr}/status");
     match http_get_json(&shared.client, &url, Duration::from_secs(5)).await {
@@ -542,6 +598,7 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) {
                 // HTTP address (PeerHello inbound, PeerHelloOk outbound), so
                 // one seed daemon reveals the rest. http_port 0 means the
                 // peer daemon predates the PeerHelloOk address echo.
+                let subnets = local_subnets();
                 for (_, p) in snap["peers"].as_object().into_iter().flatten() {
                     let Some(port) = p["http_port"].as_u64() else {
                         continue;
@@ -549,14 +606,7 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) {
                     if port == 0 {
                         continue;
                     }
-                    // link_ip is the address that carried the mesh link, so
-                    // something reached the peer there. node_ip is only what
-                    // the peer calls itself. Old daemons send no link_ip.
-                    let ip = p["link_ip"]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| p["node_ip"].as_str());
-                    if let Some(ip) = ip {
+                    if let Some(ip) = peer_address(p, &subnets) {
                         ensure_watched(shared, format!("{ip}:{port}"));
                     }
                 }
@@ -818,5 +868,65 @@ async fn main() {
                 .serve_connection(TokioIo::new(stream), svc)
                 .await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 10.0.0.0/24 and 192.168.1.0/24, as a two-homed box would report them.
+    fn subnets() -> Vec<(u32, u32)> {
+        let mask = u32::from(Ipv4Addr::new(255, 255, 255, 0));
+        vec![
+            (u32::from(Ipv4Addr::new(10, 0, 0, 0)), mask),
+            (u32::from(Ipv4Addr::new(192, 168, 1, 0)), mask),
+        ]
+    }
+
+    #[test]
+    fn subnet_membership() {
+        let s = subnets();
+        assert!(on_local_subnet("10.0.0.7", &s));
+        assert!(on_local_subnet("192.168.1.13", &s));
+        assert!(!on_local_subnet("10.100.0.1", &s));
+        assert!(!on_local_subnet("not-an-ip", &s));
+    }
+
+    /// The reported failure: the peer calls itself by an address on a subnet
+    /// this box has no route to, and the reachable one is only in addrs.
+    #[test]
+    fn a_reachable_addr_beats_an_unroutable_identity() {
+        let p = serde_json::json!({
+            "node_ip": "10.100.0.1",
+            "link_ip": "10.100.0.1",
+            "addrs": ["10.100.0.1", "192.168.1.11"],
+        });
+        assert_eq!(
+            peer_address(&p, &subnets()).as_deref(),
+            Some("192.168.1.11")
+        );
+    }
+
+    /// With nothing on a local subnet, the link address still leads: it
+    /// carried a connection, and a routed network needs no local wire.
+    #[test]
+    fn link_ip_leads_when_nothing_is_local() {
+        let p = serde_json::json!({
+            "node_ip": "10.100.0.1",
+            "link_ip": "172.16.4.4",
+            "addrs": ["172.16.9.9"],
+        });
+        assert_eq!(peer_address(&p, &subnets()).as_deref(), Some("172.16.4.4"));
+    }
+
+    #[test]
+    fn an_old_daemon_reports_node_ip_alone() {
+        let p = serde_json::json!({"node_ip": "192.168.1.11"});
+        assert_eq!(
+            peer_address(&p, &subnets()).as_deref(),
+            Some("192.168.1.11")
+        );
+        assert_eq!(peer_address(&serde_json::json!({}), &subnets()), None);
     }
 }
