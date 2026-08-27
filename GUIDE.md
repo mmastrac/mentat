@@ -49,7 +49,7 @@ pip wheel --no-deps -w dist ./python
 Or build both in Docker, as the compose deployment does:
 
 ```bash
-VERSION=0.1.0 ./build.sh
+VERSION=0.2.0 ./build.sh
 ```
 
 That produces `mentat-artifacts:<ver>` (binary plus wheel, for `COPY --from`),
@@ -79,17 +79,17 @@ Replace real Ray with the shim. The wheel installs as `ray` and claims the
 import name:
 
 ```dockerfile
-COPY --from=mentat-artifacts:0.1.0 /out/mentatd /usr/local/bin/mentatd
-COPY --from=mentat-artifacts:0.1.0 /out/mentatd-0.1.0-py3-none-any.whl /tmp/
+COPY --from=mentat-artifacts:0.2.0 /out/mentatd /usr/local/bin/mentatd
+COPY --from=mentat-artifacts:0.2.0 /out/mentatd-0.2.0-py3-none-any.whl /tmp/
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
- && pip install --no-deps /tmp/mentatd-0.1.0-py3-none-any.whl
+ && pip install --no-deps /tmp/mentatd-0.2.0-py3-none-any.whl
 ```
 
 `--no-deps` keeps pip from resolving Ray's dependencies. The shim has none.
 
 The symlink keeps `ray start` and `ray status` working in your existing
-entrypoint. `ray --version` reports `ray, version 2.57.0 (mentatd 0.1.0)`, and
+entrypoint. `ray --version` reports `ray, version 2.57.0 (mentatd 0.2.0)`, and
 the shim reports `__version__ == "2.57.0"` because vLLM version-checks it.
 
 ## 4. Adjust the entrypoint

@@ -3,14 +3,14 @@ set -euo pipefail
 # Build the mentat images. Both binaries link statically against musl, so the
 # artifacts image drops into a model image of any base.
 #
-#   VERSION=0.1.0 ./build.sh
+#   VERSION=0.2.0 ./build.sh
 #   DOCKER=docker ./build.sh          # if your daemon needs no sudo
 #   REGISTRY=ghcr.io/mmastrac ./build.sh   # also tag for a registry
 #
 # Model images COPY --from mentat-artifacts:<ver>, so this must run on the
 # same box before those builds where there is no registry to pull from.
 cd "$(dirname "$0")"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
 DOCKER="${DOCKER:-sudo docker}"
 REGISTRY="${REGISTRY:-}"
 

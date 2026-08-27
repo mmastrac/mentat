@@ -75,7 +75,7 @@ claims the import name:
 ```
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
- && pip install --no-deps /tmp/mentatd-0.1.0-py3-none-any.whl
+ && pip install --no-deps /tmp/mentatd-0.2.0-py3-none-any.whl
 ```
 
 The entrypoint keeps its `ray start` and `ray status` calls. Export first:
