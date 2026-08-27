@@ -9,11 +9,12 @@
 //!   - one MCP endpoint merging the per-container management MCPs, tools
 //!     prefixed `<group>__` so identical tool names cannot collide.
 //!
-//! Discovery comes from the mentat daemon (this replaces spark-agent's
-//! UDP-discovered ServingHandler): every daemon in MENTAT_DAEMONS is polled
-//! for /status, with a /events WebSocket held open so any cluster event
-//! triggers an immediate re-read. Routing is gated on health: a group is
-//! admitted only while it has a running actor and its announced endpoint
+//! Discovery: daemons are found by their UDP announcements (port 6382) and
+//! by the seed list in MENTAT_DAEMONS (the local daemon by default), then
+//! followed through the mesh's own membership. Each watched daemon is
+//! polled for /status, with a /events WebSocket held open so any cluster
+//! event triggers an immediate re-read. Routing is gated on health: a group
+//! is admitted only while it has a running actor and its announced endpoint
 //! answers a probe.
 
 mod logfmt;
@@ -43,6 +44,7 @@ pub type HttpClient = Client<HttpConnector, Full<Bytes>>;
 pub struct Config {
     pub daemons: Vec<String>,
     pub port: u16,
+    pub announce_port: u16,
     pub poll_interval: Duration,
     pub probe_interval: Duration,
     pub probe_timeout: Duration,
@@ -75,12 +77,19 @@ impl Config {
         let probe_interval = env_secs("PROBE_INTERVAL_S", 5.0);
         let probe_timeout = env_secs("PROBE_TIMEOUT_S", 3.0);
         Config {
-            daemons: env_str("MENTAT_DAEMONS", "127.0.0.1:6380")
+            // Unset means seed with the local daemon; set-but-empty means no
+            // seeds at all, leaving UDP announcements as the only way in.
+            daemons: std::env::var("MENTAT_DAEMONS")
+                .unwrap_or_else(|_| "127.0.0.1:6380".to_string())
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
             port: env_str("SERVE_PORT", "6381").parse().unwrap_or(6381),
+            // The daemons' announcement port; 0 turns the listener off.
+            announce_port: env_str("MENTAT_ANNOUNCE_PORT", "6382")
+                .parse()
+                .unwrap_or(6382),
             poll_interval: env_secs("POLL_INTERVAL_S", 10.0),
             probe_interval,
             probe_timeout,
@@ -366,6 +375,57 @@ async fn watch_daemon(shared: Arc<Shared>, addr: String) {
     }
 }
 
+/// Listen for the daemons' UDP announcements. An announcement is a hint: it
+/// only adds a watch candidate, and everything the daemon claims is then
+/// read over TCP and probed like any other -- which is why the datagrams
+/// carry no signature today. Both the datagram source and the claimed
+/// address must pass the same prefix list as the HTTP side. A future
+/// MENTAT_SECRET signs the datagrams under a bumped mentat_announce
+/// version, and the check slots in beside the prefix gate below.
+async fn udp_listener(shared: Arc<Shared>) {
+    let port = shared.cfg.announce_port;
+    if port == 0 {
+        return;
+    }
+    let sock = match tokio::net::UdpSocket::bind(("0.0.0.0", port)).await {
+        Ok(s) => s,
+        Err(e) => {
+            log(
+                "announce_listen_failed",
+                &[("port", port.to_string()), ("error", e.to_string())],
+            );
+            return;
+        }
+    };
+    log("announce_listen", &[("port", port.to_string())]);
+    let mut buf = [0u8; 2048];
+    loop {
+        let Ok((n, src)) = sock.recv_from(&mut buf).await else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_slice::<Value>(&buf[..n]) else {
+            continue;
+        };
+        if v["mentat_announce"].as_u64() != Some(1) {
+            continue;
+        }
+        let Some(http) = v["http"].as_str() else {
+            continue;
+        };
+        let Some((http_ip, http_port)) = http.rsplit_once(':') else {
+            continue;
+        };
+        if http_port.parse::<u16>().map(|p| p == 0).unwrap_or(true) {
+            continue;
+        }
+        let src_ip = src.ip().to_string();
+        if !source_allowed(&shared.cfg, &src_ip) || !source_allowed(&shared.cfg, http_ip) {
+            continue;
+        }
+        ensure_watched(&shared, http.to_string());
+    }
+}
+
 async fn poll_status(shared: &Arc<Shared>, addr: &str) {
     let url = format!("http://{addr}/status");
     match http_get_json(&shared.client, &url, Duration::from_secs(5)).await {
@@ -616,6 +676,10 @@ async fn main() {
     {
         let shared = shared.clone();
         tokio::spawn(async move { prober(shared).await });
+    }
+    {
+        let shared = shared.clone();
+        tokio::spawn(async move { udp_listener(shared).await });
     }
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", shared.cfg.port))

@@ -60,7 +60,8 @@ RUN cargo build --release && ./target/release/mentat-serve --version
 FROM debian:bookworm-slim AS serve
 COPY --from=serve-build /src/target/release/mentat-serve /usr/local/bin/mentat-serve
 RUN mentat-serve --version
-# 6381: OpenAI-compatible /v1 plus the merged /mcp. network_mode: host again,
-# so EXPOSE is documentation.
-EXPOSE 6381
+# 6381: OpenAI-compatible /v1 plus the merged /mcp. 6382/udp: the daemons'
+# announcement port it listens on. network_mode: host again, so EXPOSE is
+# documentation.
+EXPOSE 6381 6382/udp
 ENTRYPOINT ["mentat-serve"]

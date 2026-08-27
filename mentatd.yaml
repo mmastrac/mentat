@@ -44,3 +44,8 @@ services:
       - MENTAT_SLOW_CALL_WARN_MS=${MENTAT_SLOW_CALL_WARN_MS:-}
       - MENTAT_SESSION_REAP_GRACE_MS=${MENTAT_SESSION_REAP_GRACE_MS:-}
       - MENTAT_TCP_DEAD_AFTER_MS=${MENTAT_TCP_DEAD_AFTER_MS:-}
+      # UDP self-announcement for mentat-serve discovery. Empty = broadcast
+      # on port 6382 every 5s; 0 disables. MENTAT_ANNOUNCE_ADDR adds
+      # unicast targets for a listener outside every broadcast domain.
+      - MENTAT_ANNOUNCE_PORT=${MENTAT_ANNOUNCE_PORT:-}
+      - MENTAT_ANNOUNCE_ADDR=${MENTAT_ANNOUNCE_ADDR:-}

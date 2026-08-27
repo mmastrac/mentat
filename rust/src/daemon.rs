@@ -66,6 +66,7 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
 
     crate::http::serve(shared.clone(), opts.http_port);
     crate::mesh::start(shared.clone(), opts.peers, opts.port, opts.http_port);
+    crate::announce::start(shared.clone());
 
     // Lifecycle sweeper: slow-call warnings, the pending-pg timeout, and the
     // agent degrade/give-up windows. A single thread ticking every 200 ms,

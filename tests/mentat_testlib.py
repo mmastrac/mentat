@@ -88,7 +88,14 @@ class Cluster:
                 "--head-json",
                 self.head_json,
             ],
-            env={**os.environ, "MENTAT_NODE_IP": "127.0.0.1", **self.daemon_env},
+            env={
+                **os.environ,
+                "MENTAT_NODE_IP": "127.0.0.1",
+                # A test daemon must never broadcast loopback addresses onto
+                # a real LAN where a production mentat-serve is listening.
+                "MENTAT_ANNOUNCE_PORT": "0",
+                **self.daemon_env,
+            },
         )
         _children.append(p)
         return p
@@ -196,7 +203,14 @@ class Daemon:
                     else []
                 ),
             ],
-            env={**os.environ, **(env or {})},
+            env={
+                **os.environ,
+                # Same reason as Cluster: loopback announcements must stay
+                # off a real LAN. Tests that exercise discovery override
+                # this with an explicit unicast MENTAT_ANNOUNCE_ADDR.
+                "MENTAT_ANNOUNCE_PORT": "0",
+                **(env or {}),
+            },
         )
         _children.append(self.proc)
 

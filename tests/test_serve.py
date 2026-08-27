@@ -429,6 +429,53 @@ def t09_membership_follows_the_mesh():
     assert any(a.endswith(f":{d1.http_port}") for a in daemons), daemons
 
 
+def free_udp_port():
+    import socket as _socket
+
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def t10_udp_announce_replaces_the_seed_list():
+    # A router with MENTAT_DAEMONS set EMPTY has no seeds at all; the only
+    # way it can learn of the daemon is the daemon's own UDP announcement,
+    # sent here as a loopback unicast (broadcast has no meaning on lo).
+    udp_port = free_udp_port()
+    d = Daemon("127.0.0.1", env={
+        "MENTAT_ANNOUNCE_PORT": str(udp_port),
+        "MENTAT_ANNOUNCE_ADDR": f"127.0.0.1:{udp_port}",
+        "MENTAT_ANNOUNCE_INTERVAL_S": "0.3",
+    }).wait_up()
+    state["announce_daemon"] = d
+    port4 = free_port()
+    serve4 = subprocess.Popen(
+        [SERVE_BINARY],
+        env={**os.environ,
+             "MENTAT_DAEMONS": "",
+             "MENTAT_ANNOUNCE_PORT": str(udp_port),
+             "SERVE_PORT": str(port4),
+             "POLL_INTERVAL_S": "1",
+             "ALLOWED_SOURCES": "127."},
+    )
+    tl._children.append(serve4)
+
+    def discovered():
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port4}/status.json", timeout=5
+            ) as r:
+                daemons = json.load(r)["daemons"]
+        except OSError:
+            return False
+        e = daemons.get(f"127.0.0.1:{d.http_port}")
+        return bool(e and e.get("connected"))
+
+    wait_until(discovered, 20, "announcement never reached the seedless router")
+
+
 def main():
     tests = [
         t01_announcement_reaches_status,
@@ -440,6 +487,7 @@ def main():
         t07_actor_death_closes_the_gate,
         t08_dead_endpoint_fails_the_probe,
         t09_membership_follows_the_mesh,
+        t10_udp_announce_replaces_the_seed_list,
     ]
     try:
         for t in tests:
@@ -449,6 +497,8 @@ def main():
         cluster.cleanup()
         for d in state.get("mesh", ()):
             d.cleanup()
+        if "announce_daemon" in state:
+            state["announce_daemon"].cleanup()
 
 
 if __name__ == "__main__":

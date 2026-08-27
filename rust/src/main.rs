@@ -8,6 +8,7 @@
 //! invocations working unchanged.
 
 mod agent;
+mod announce;
 mod config;
 mod daemon;
 mod gpu;

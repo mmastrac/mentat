@@ -10,11 +10,12 @@
 # front door for a pair-hosted model must run on one of the pair (n3
 # cannot reach that subnet).
 #
-# MENTAT_DAEMONS is a seed, and the local daemon (the default) is enough:
-# membership follows the mesh, which replicates every daemon's HTTP address,
-# so mentat-serve finds the others from any one member and picks up boxes
-# added later without a config change. List more seeds only to survive the
-# local daemon being down at start.
+# No .env is required. Daemons are found by their UDP announcements (port
+# 6382), by the MENTAT_DAEMONS seed (the local daemon by default; set it
+# empty for UDP only), and through the mesh's membership once any one
+# daemon is reached. Announcements are unsigned hints: they only add an
+# address to watch, and everything a daemon claims is re-read over TCP and
+# probed.
 #
 # Routing is health-gated: a group is admitted only while it has a running
 # actor and its announced endpoint answers a /models probe. The MCP merge
@@ -29,8 +30,14 @@ services:
     network_mode: host
     restart: unless-stopped
     environment:
+      # The local seed costs nothing beside the UDP path and covers a
+      # listener that missed the first announcements. To the bare binary an
+      # empty (set) value means no seeds at all; compose cannot express
+      # that, since ${VAR:-default} treats empty as unset.
       - MENTAT_DAEMONS=${MENTAT_DAEMONS:-127.0.0.1:6380}
       - SERVE_PORT=${SERVE_PORT:-6381}
+      # The daemons' announcement port. 0 turns the listener off.
+      - MENTAT_ANNOUNCE_PORT=${MENTAT_ANNOUNCE_PORT:-6382}
       # Empty keeps the built-in default: own subnets, loopback, and the
       # docker bridge ranges (a bridge-networked client like OpenWebUI
       # reaching this host keeps its 172.x source).

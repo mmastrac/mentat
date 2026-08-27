@@ -44,7 +44,10 @@ per token; after boot the only recurring call is the health monitor's
   `driver_connected/disconnected`).
   Daemons mesh over `MENTAT_PEERS`, elect a head (lowest node id, 5 s
   hold-down), replicate events, and exchange status so any daemon shows the
-  whole cluster.
+  whole cluster. Each daemon also announces its addresses over UDP
+  (broadcast on port 6382, every 5 s; `MENTAT_ANNOUNCE_PORT=0` disables,
+  `MENTAT_ANNOUNCE_ADDR` adds unicast targets) so mentat-serve finds the
+  cluster with zero config.
 - `mentat` agent (`ray start ...`, same binary), one per model container.
   Registers the container's GPUs under a group and is the only thing that
   spawns actor processes (they must run the container's Python). Actors get
@@ -61,11 +64,17 @@ per token; after boot the only recurring call is the health monitor's
   model name to the right group's API with streaming passed through, and one
   `/mcp` merging every container's management MCP (tools prefixed
   `<group>__`, plus a native `serve_status` tool showing the route table).
-  Discovery comes from the daemon rather than UDP: seeded by
-  `MENTAT_DAEMONS` (the local daemon by default), it follows the mesh's own
-  membership to every other daemon, polling each `/status` and holding each
-  `/events` WebSocket so any cluster event triggers an immediate re-read.
-  This replaces spark-agent's serving proxy.
+  Daemons are discovered three ways, all feeding one watch set: their UDP
+  announcements, the `MENTAT_DAEMONS` seed list (the local daemon by
+  default; set it empty for UDP only), and the mesh's own membership once
+  any one daemon is reached. Each watched daemon is polled for `/status`
+  with its `/events` WebSocket held open, so any cluster event triggers an
+  immediate re-read. Announcements are unsigned hints: they only add an
+  address to watch, everything a daemon claims is re-read over TCP and
+  probed, and both the datagram source and the claimed address must pass
+  the `ALLOWED_SOURCES` prefixes. A future `MENTAT_SECRET` signs them under
+  a bumped `mentat_announce` version. This replaces spark-agent's serving
+  proxy.
 
 ## Service announcement
 
@@ -114,8 +123,9 @@ elected head is a later phase.
 4. `docker compose up` the models -- either node first; ordering stopped
    mattering.
 5. Optional, any box that should answer clients: `mentat-serve.yaml` to
-   `~/compose/mentat-serve/`. No per-node `.env` required: it seeds from the
-   local daemon and follows the mesh membership to the rest.
+   `~/compose/mentat-serve/`. No per-node `.env` required: the daemons'
+   UDP announcements, the local-daemon seed, and mesh membership each find
+   the cluster on their own.
 
 Rollback: point `IMAGE` at the previous (real-ray) image tag. The
 entrypoints kept full `ray` CLI compatibility, the neutralized
