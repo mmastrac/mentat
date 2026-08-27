@@ -23,7 +23,8 @@
 # Both binaries link statically against musl. The artifacts image is COPY'd
 # into model images this repo does not control, and a static binary needs
 # nothing from whatever base those images picked -- no glibc version to
-# match, no loader to find.
+# match, no loader to find. Neither binary needs a package on top of the
+# base: interface enumeration is a libc call, not a call to `ip`.
 ARG RUST_IMAGE=rust:1-alpine
 ARG RUNTIME_IMAGE=alpine:3
 
@@ -64,15 +65,11 @@ COPY --from=wheel /dist/ /out/
 RUN /out/mentatd --version && /out/mentatd-serve --version \
     && ls /out/mentatd-*-py3-none-any.whl
 
-# iproute2 for `ip -o -4 addr show`, which is how the daemon finds the
-# broadcast address of every interface worth announcing on. busybox ships an
-# `ip` applet, but not every flag this parses.
 FROM ${RUNTIME_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="mentatd" \
       org.opencontainers.image.description="Minimal Ray replacement for vLLM multi-node serving" \
       org.opencontainers.image.source="https://github.com/mmastrac/mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
-RUN apk add --no-cache iproute2
 COPY --from=build /src/target/release/mentatd /usr/local/bin/mentatd
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
     && mentatd --version && ray --version
@@ -83,7 +80,6 @@ EXPOSE 6379 6380 6382/udp
 ENTRYPOINT ["mentatd"]
 CMD ["daemon"]
 
-# The router shells out to nothing, so it needs no packages.
 FROM ${RUNTIME_IMAGE} AS serve
 LABEL org.opencontainers.image.title="mentatd-serve" \
       org.opencontainers.image.description="OpenAI-compatible router and merged MCP for a mentat cluster" \
@@ -104,7 +100,6 @@ LABEL org.opencontainers.image.title="mentat" \
       org.opencontainers.image.description="mentatd and mentatd-serve in one image" \
       org.opencontainers.image.source="https://github.com/mmastrac/mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
-RUN apk add --no-cache iproute2
 COPY --from=build /src/target/release/mentatd /usr/local/bin/mentatd
 COPY --from=serve-build /src/target/release/mentatd-serve /usr/local/bin/mentatd-serve
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \

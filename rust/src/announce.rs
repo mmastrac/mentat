@@ -14,6 +14,8 @@
 use std::net::UdpSocket;
 use std::time::Duration;
 
+use getifaddrs::InterfaceFlags;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::logfmt::log;
@@ -124,35 +126,24 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
     }
 }
 
-/// One broadcast address per up IPv4 interface worth announcing on, from
-/// `ip -o -4 addr show`. Docker's own bridges carry no listeners, and lo has
-/// no broadcast, so both are skipped -- same reasoning as spark-agent's
-/// discovery. Empty where `ip` is absent (macOS dev boxes), which leaves
-/// only the explicit MENTAT_ANNOUNCE_ADDR targets.
+/// One broadcast address per IPv4 interface worth announcing on.
+///
+/// Docker's own bridges carry no listeners and would have every node
+/// announcing to itself, so they are skipped by name -- the only part of this
+/// the interface flags cannot express.
 fn broadcast_targets(port: u16) -> Vec<String> {
-    let Ok(out) = std::process::Command::new("ip")
-        .args(["-o", "-4", "addr", "show"])
-        .output()
-    else {
+    let Ok(ifaces) = getifaddrs::InterfaceFilter::new().v4().get() else {
         return Vec::new();
     };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut targets = Vec::new();
-    for line in text.lines() {
-        // "2: eno1    inet 192.168.1.11/24 brd 192.168.1.255 scope ..."
-        let f: Vec<&str> = line.split_whitespace().collect();
-        let Some(ifname) = f.get(1) else { continue };
-        if ["lo", "docker", "veth", "br-", "virbr"]
-            .iter()
-            .any(|p| ifname.starts_with(p))
-        {
-            continue;
-        }
-        if let Some(i) = f.iter().position(|w| *w == "brd") {
-            if let Some(b) = f.get(i + 1) {
-                targets.push(format!("{b}:{port}"));
-            }
-        }
-    }
-    targets
+    let want = InterfaceFlags::UP | InterfaceFlags::BROADCAST;
+    ifaces
+        .filter(|i| i.flags.contains(want) && !i.flags.contains(InterfaceFlags::LOOPBACK))
+        .filter(|i| {
+            !["docker", "veth", "br-", "virbr"]
+                .iter()
+                .any(|p| i.name.starts_with(p))
+        })
+        .filter_map(|i| i.address.associated_address())
+        .map(|b| format!("{b}:{port}"))
+        .collect()
 }
