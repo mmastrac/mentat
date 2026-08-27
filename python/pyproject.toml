@@ -1,0 +1,16 @@
+# The mentat ray shim: a package that installs AS `ray`. Install with
+# `pip install --no-deps` so nothing drags in real ray's dependency tree.
+# The package version is mentat's own; ray.__version__ reports 2.57.0 because
+# vLLM version-checks it (see ray/__init__.py).
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mentat-ray-shim"
+version = "0.1.0"
+description = "mentat's ray-compatible shim for vLLM multi-node serving on unified-memory GB10"
+requires-python = ">=3.9"
+
+[tool.setuptools]
+packages = ["ray", "ray.util", "ray.cloudpickle", "ray._private"]

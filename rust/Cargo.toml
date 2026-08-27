@@ -1,0 +1,16 @@
+[package]
+name = "mentat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+
+[profile.release]
+# The binary is COPY'd into two serving images; small and boring beats fast
+# here -- the daemon's message rate is a handful per minute.
+opt-level = "s"
+strip = true

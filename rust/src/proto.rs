@@ -1,0 +1,334 @@
+//! Wire protocol shared by every mentat connection: client (Python shim /
+//! CLI), agent, actor host (unix socket), and mesh peer.
+//!
+//! Frame layout: u32le header_len | u32le payload_len | JSON header | payload.
+//! The payload carries pickle bytes end-to-end and is never inspected in
+//! Rust -- the Python ends are the only ones that deserialize it.
+
+use std::collections::BTreeMap;
+use std::io::{self, Read, Write};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Hard cap on header+payload. The largest legitimate payload is a pickled
+/// vLLM config (a few MB); 256 MB means a corrupt length prefix fails fast
+/// instead of allocating the unified pool.
+const MAX_FRAME: u32 = 256 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Frame {
+    /// Correlation id. Request/response pairs echo it; unsolicited events use 0.
+    #[serde(default)]
+    pub req: u64,
+    #[serde(flatten)]
+    pub msg: Msg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum Msg {
+    // ---- client -> daemon ----
+    Hello {
+        client_id: String,
+        group: String,
+        /// True for the one connection whose EOF means "this driver is gone".
+        session: bool,
+        kind: String, // "driver" | "cli"
+    },
+    Nodes,
+    ClusterResources,
+    AvailablePerNode,
+    CreatePg {
+        /// GPUs per bundle, e.g. [1.0, 1.0].
+        bundles: Vec<f64>,
+        strategy: String,
+    },
+    PgTable {
+        pg_id: String,
+    },
+    RemovePg {
+        pg_id: String,
+    },
+    CreateActor {
+        name: String,
+        num_gpus: f64,
+        pg_id: String,
+        bundle_index: usize,
+        env: BTreeMap<String, String>,
+        // payload: pickle (cls, args, kwargs)
+    },
+    Call {
+        actor_id: String,
+        method: String,
+        // payload: pickle (args, kwargs)
+    },
+    Get {
+        ref_id: String,
+        /// None = block forever, 0 = immediate poll.
+        timeout_ms: Option<u64>,
+    },
+    Wait {
+        ref_ids: Vec<String>,
+        num_returns: usize,
+        timeout_ms: Option<u64>,
+    },
+    KillActor {
+        actor_id: String,
+    },
+    Status {
+        group: Option<String>,
+    },
+    StopAll {
+        group: Option<String>,
+    },
+
+    // ---- daemon -> client responses ----
+    Ok0,
+    Err {
+        error: String,
+    },
+    HelloOk {
+        node_id: String,
+        node_ip: String,
+        gcs_address: String,
+        head_node_id: String,
+    },
+    NodesOk {
+        nodes: Vec<Value>,
+    },
+    ResourcesOk {
+        resources: BTreeMap<String, f64>,
+    },
+    AvailOk {
+        nodes: BTreeMap<String, BTreeMap<String, f64>>,
+    },
+    CreatePgOk {
+        pg_id: String,
+        ready_ref: String,
+    },
+    PgTableOk {
+        table: Value,
+    },
+    CreateActorOk {
+        actor_id: String,
+        node_id: String,
+        gpu_ids: Vec<u32>,
+    },
+    CallOk {
+        ref_id: String,
+    },
+    GetOk {
+        /// "ok" | "error" | "actor_died" | "timeout"
+        status: String,
+        /// Human-readable death reason when status == actor_died.
+        #[serde(default)]
+        reason: String,
+        // payload: pickle result or pickled exception
+    },
+    WaitOk {
+        ready: Vec<String>,
+    },
+    StatusOk {
+        data: Value,
+    },
+
+    // ---- agent <-> daemon ----
+    AgentRegister {
+        agent_id: String,
+        group: String,
+        node_ip: String,
+        gpus: Vec<u32>,
+        /// Vendor tag for the GPUs above. Always "nvidia" today; recorded per
+        /// agent so the inventory stays honest if that ever changes.
+        #[serde(default = "default_gpu_vendor")]
+        gpu_vendor: String,
+        cpus: u32,
+        container: String,
+        pid: u32,
+        /// Actors still alive from before a reconnect, so the daemon can
+        /// rebuild instead of orphaning them.
+        resume: Vec<ResumeActor>,
+    },
+    AgentRegisterOk {
+        node_id: String,
+    },
+    Spawn {
+        actor_id: String,
+        name: String,
+        env: BTreeMap<String, String>,
+        gpu_ids: Vec<u32>,
+        node_id: String,
+        gcs_address: String,
+        // payload: pickle (cls, args, kwargs)
+    },
+    SpawnResult {
+        actor_id: String,
+        ok: bool,
+        #[serde(default)]
+        error: String,
+    },
+    CallActor {
+        actor_id: String,
+        ref_id: String,
+        method: String,
+        // payload: pickle (args, kwargs)
+    },
+    ActorResult {
+        ref_id: String,
+        ok: bool,
+        /// Set (with empty payload) when the failure originated in mentat
+        /// itself rather than in Python -- there is no exception to pickle.
+        #[serde(default)]
+        error: String,
+        // payload: pickle result or pickled exception
+    },
+    ActorExit {
+        actor_id: String,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    },
+    Kill {
+        actor_id: String,
+    },
+    Ping,
+    Pong,
+
+    // ---- actor host (python) <-> agent, over the per-actor unix socket ----
+    HostHello {
+        actor_id: String,
+    },
+    Ctor,     // payload: pickle (cls, args, kwargs)
+    CtorOk,
+    CtorErr {
+        /// repr() of the exception, so the reason survives into Rust logs
+        /// and the driver's RayActorError message without unpickling.
+        #[serde(default)]
+        error: String,
+        // payload: pickled exception
+    },
+    HostCall {
+        ref_id: String,
+        method: String,
+        // payload: pickle (args, kwargs)
+    },
+    HostResult {
+        ref_id: String,
+        ok: bool,
+        // payload: pickle result or pickled exception
+    },
+}
+
+pub fn default_gpu_vendor() -> String {
+    "nvidia".to_string()
+}
+
+pub fn write_frame<W: Write>(w: &mut W, frame: &Frame, payload: &[u8]) -> io::Result<()> {
+    let header = serde_json::to_vec(frame)?;
+    w.write_all(&(header.len() as u32).to_le_bytes())?;
+    w.write_all(&(payload.len() as u32).to_le_bytes())?;
+    w.write_all(&header)?;
+    w.write_all(payload)?;
+    w.flush()
+}
+
+/// Returns Ok(None) on clean EOF at a frame boundary.
+pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<(Frame, Vec<u8>)>> {
+    let mut lens = [0u8; 8];
+    match read_exact_or_eof(r, &mut lens)? {
+        false => return Ok(None),
+        true => {}
+    }
+    let hlen = u32::from_le_bytes(lens[0..4].try_into().unwrap());
+    let plen = u32::from_le_bytes(lens[4..8].try_into().unwrap());
+    if hlen > MAX_FRAME || plen > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("frame too large: header={hlen} payload={plen}"),
+        ));
+    }
+    let mut header = vec![0u8; hlen as usize];
+    r.read_exact(&mut header)?;
+    let mut payload = vec![0u8; plen as usize];
+    r.read_exact(&mut payload)?;
+    let frame: Frame = serde_json::from_slice(&header).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad frame header: {e}: {}", String::from_utf8_lossy(&header)),
+        )
+    })?;
+    Ok(Some((frame, payload)))
+}
+
+/// read_exact, except a clean EOF before the first byte returns Ok(false).
+fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<bool> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match r.read(&mut buf[filled..]) {
+            Ok(0) if filled == 0 => return Ok(false),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "EOF mid-frame",
+                ))
+            }
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeActor {
+    pub actor_id: String,
+    pub name: String,
+    pub gpu_ids: Vec<u32>,
+    pub pid: u32,
+    /// Ref ids of calls the agent has relayed but not yet answered
+    /// (including the long-lived run() ref).
+    pub pending_refs: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip() {
+        let mut buf: Vec<u8> = Vec::new();
+        let f = Frame {
+            req: 7,
+            msg: Msg::Call {
+                actor_id: "a1".into(),
+                method: "run".into(),
+            },
+        };
+        write_frame(&mut buf, &f, b"PAYLOAD").unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let (g, p) = read_frame(&mut cur).unwrap().unwrap();
+        assert_eq!(g.req, 7);
+        assert_eq!(p, b"PAYLOAD");
+        match g.msg {
+            Msg::Call { actor_id, method } => {
+                assert_eq!(actor_id, "a1");
+                assert_eq!(method, "run");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // Clean EOF at the boundary.
+        assert!(read_frame(&mut cur).unwrap().is_none());
+    }
+
+    #[test]
+    fn eof_mid_frame_is_an_error() {
+        let mut buf: Vec<u8> = Vec::new();
+        let f = Frame { req: 1, msg: Msg::Ping };
+        write_frame(&mut buf, &f, b"").unwrap();
+        buf.truncate(buf.len() - 2);
+        let mut cur = std::io::Cursor::new(buf);
+        // The header is short 2 bytes.
+        assert!(read_frame(&mut cur).is_err());
+    }
+}
