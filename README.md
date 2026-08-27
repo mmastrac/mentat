@@ -61,10 +61,11 @@ per token; after boot the only recurring call is the health monitor's
   model name to the right group's API with streaming passed through, and one
   `/mcp` merging every container's management MCP (tools prefixed
   `<group>__`, plus a native `serve_status` tool showing the route table).
-  Discovery comes from the daemon rather than UDP: it polls each
-  `MENTAT_DAEMONS` entry's `/status` and holds its `/events` WebSocket so
-  any cluster event triggers an immediate re-read. This replaces
-  spark-agent's serving proxy.
+  Discovery comes from the daemon rather than UDP: seeded by
+  `MENTAT_DAEMONS` (the local daemon by default), it follows the mesh's own
+  membership to every other daemon, polling each `/status` and holding each
+  `/events` WebSocket so any cluster event triggers an immediate re-read.
+  This replaces spark-agent's serving proxy.
 
 ## Service announcement
 
@@ -113,9 +114,8 @@ elected head is a later phase.
 4. `docker compose up` the models -- either node first; ordering stopped
    mattering.
 5. Optional, any box that should answer clients: `mentat-serve.yaml` to
-   `~/compose/mentat-serve/` with the per-node `.env` from its comments
-   (list every daemon -- a group registers with one daemon, and peer
-   auto-discovery only finds daemons that dialed inward).
+   `~/compose/mentat-serve/`. No per-node `.env` required: it seeds from the
+   local daemon and follows the mesh membership to the rest.
 
 Rollback: point `IMAGE` at the previous (real-ray) image tag. The
 entrypoints kept full `ray` CLI compatibility, the neutralized

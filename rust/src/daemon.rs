@@ -47,6 +47,7 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
         )),
         cv: std::sync::Condvar::new(),
     });
+    shared.st.lock().unwrap().http_port = opts.http_port;
 
     // Bind before writing head.json so a reader never races an unbound port.
     let listener = TcpListener::bind(("0.0.0.0", opts.port))?;

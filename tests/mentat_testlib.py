@@ -217,7 +217,7 @@ class Daemon:
         with urllib.request.urlopen(url, timeout=5) as r:
             return json.load(r)
 
-    def start_agent(self, group, gpus=1, container="c", tmp=None):
+    def start_agent(self, group, gpus=1, container="c", tmp=None, env_extra=None):
         env = {
             **os.environ,
             "MENTAT_DAEMON": self.address,
@@ -229,6 +229,7 @@ class Daemon:
             "MENTAT_PYTHON": sys.executable,
             "PYTHONPATH": os.pathsep.join([PYTHON_PKG, HERE]),
             "MENTAT_GCS_ADDRESS": self.address,
+            **(env_extra or {}),
         }
         env.pop("CUDA_VISIBLE_DEVICES", None)
         p = subprocess.Popen([BINARY, "start", "--block"], env=env)

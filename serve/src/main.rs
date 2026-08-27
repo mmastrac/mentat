@@ -371,9 +371,10 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) {
     match http_get_json(&shared.client, &url, Duration::from_secs(5)).await {
         Ok(snap) => {
             if shared.cfg.discover_peers {
-                // Best-effort: a peer's http_port is only known when that
-                // peer dialed this daemon (outbound links record 0), which
-                // is why MENTAT_DAEMONS should still list every daemon.
+                // Membership follows the mesh: every peer entry carries its
+                // HTTP address (PeerHello inbound, PeerHelloOk outbound), so
+                // one seed daemon reveals the rest. http_port 0 means the
+                // peer daemon predates the PeerHelloOk address echo.
                 for (_, p) in snap["peers"].as_object().into_iter().flatten() {
                     if let (Some(ip), Some(port)) = (p["node_ip"].as_str(), p["http_port"].as_u64())
                     {

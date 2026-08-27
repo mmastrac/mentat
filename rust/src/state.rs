@@ -197,6 +197,9 @@ pub struct State {
     pub node_ip: String,
     pub hostname: String,
     pub gcs_address: String,
+    /// This daemon's own HTTP side-port, echoed on PeerHelloOk so the
+    /// dialing side records full membership.
+    pub http_port: u16,
     /// Mesh view. Key is the peer's node_id.
     pub peers: HashMap<NodeId, PeerInfo>,
     /// The elected head (lowest node_id among self + live peers, after
@@ -237,6 +240,7 @@ impl State {
             node_ip,
             hostname,
             gcs_address,
+            http_port: 0,
             agents: HashMap::new(),
             actors: HashMap::new(),
             pgs: HashMap::new(),

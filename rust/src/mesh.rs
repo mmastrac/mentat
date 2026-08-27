@@ -106,8 +106,13 @@ fn try_connect(
     let (frame, _) = read_frame(&mut reader)?.ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at peer hello")
     })?;
-    let (peer_id, peer_ip) = match frame.msg {
-        Msg::PeerHelloOk { node_id, node_ip } => (node_id, node_ip),
+    let (peer_id, peer_ip, peer_control, peer_http) = match frame.msg {
+        Msg::PeerHelloOk {
+            node_id,
+            node_ip,
+            control_addr,
+            http_port,
+        } => (node_id, node_ip, control_addr, http_port),
         other => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -119,12 +124,19 @@ fn try_connect(
         // The seed list includes ourselves; harmless, just don't peer.
         return Ok(None);
     }
+    // An old daemon replies without its addresses; the dialed seed is then
+    // the best control address known, and the http port stays unknown.
+    let control = if peer_control.is_empty() {
+        seed.to_string()
+    } else {
+        peer_control
+    };
     if !register_peer(
         shared,
         peer_id.clone(),
         peer_ip,
-        seed.to_string(),
-        0,
+        control,
+        peer_http,
         writer.clone(),
     ) {
         // An alive link to this node already exists (e.g. it dialed us
@@ -151,14 +163,21 @@ pub fn accept_peer(
     else {
         unreachable!()
     };
-    let (my_id, my_ip) = {
+    let (my_id, my_ip, my_control, my_http) = {
         let st = shared.st.lock().unwrap();
-        (st.node_id.clone(), st.node_ip.clone())
+        (
+            st.node_id.clone(),
+            st.node_ip.clone(),
+            st.gcs_address.clone(),
+            st.http_port,
+        )
     };
     let _ = writer.send(
         Msg::PeerHelloOk {
             node_id: my_id.clone(),
             node_ip: my_ip,
+            control_addr: my_control,
+            http_port: my_http,
         },
         hello.0.req,
         &[],

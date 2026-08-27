@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import mentat_testlib as tl  # noqa: E402
-from mentat_testlib import Cluster, free_port, run_ok  # noqa: E402
+from mentat_testlib import Cluster, Daemon, free_port, run_ok  # noqa: E402
 
 SERVE_RUST = os.path.join(tl.ROOT, "serve")
 SERVE_BINARY = os.environ.get("MENTAT_SERVE_TEST_BINARY") or os.path.join(
@@ -241,10 +241,10 @@ def wait_until(fn, timeout, what):
     raise TimeoutError(f"{what}: {detail}")
 
 
-def start_driver(group):
+def start_driver(group, address=None):
     env = {
         **os.environ,
-        "RAY_ADDRESS": cluster.address,
+        "RAY_ADDRESS": address or cluster.address,
         "MENTAT_GROUP": group,
         "PYTHONPATH": os.pathsep.join([tl.PYTHON_PKG, HERE]),
     }
@@ -379,6 +379,56 @@ def t08_dead_endpoint_fails_the_probe():
     assert "probe failed" in body["not_ready"]["gb"], body
 
 
+def t09_membership_follows_the_mesh():
+    # A fresh two-daemon mesh, with the model's whole group on d1. The router
+    # is seeded ONLY with d2, whose record of d1 came over the link d2 dialed
+    # -- the direction whose HTTP address only exists because PeerHelloOk
+    # echoes it. Routing to the model proves the seed list is just a seed.
+    d1 = Daemon("127.0.0.1").wait_up()
+    d2 = Daemon("127.0.0.2", peers=[d1.address]).wait_up()
+    state["mesh"] = (d1, d2)
+    mM = FakeModel("model-m", "tool_m")
+    state["mesh_model"] = mM
+    d1.start_agent("gm", container="cm", env_extra={
+        "MENTAT_OPENAI_API": f"http://127.0.0.1:{mM.port}/v1",
+        "MENTAT_MCP_API": f"http://127.0.0.1:{mM.port}/mcp",
+    })
+
+    def gm_registered():
+        g = d1.status_json().get("groups", {}).get("gm")
+        return bool(g and g.get("gpus_total", 0) >= 1)
+
+    wait_until(gm_registered, 15, "agent gm never registered with d1")
+    start_driver("gm", address=d1.address)
+
+    port2 = free_port()
+    serve2 = subprocess.Popen(
+        [SERVE_BINARY],
+        env={**os.environ,
+             "MENTAT_DAEMONS": f"127.0.0.1:{d2.http_port}",
+             "SERVE_PORT": str(port2),
+             "POLL_INTERVAL_S": "1",
+             "PROBE_INTERVAL_S": "0.5",
+             "ALLOWED_SOURCES": "127."},
+    )
+    tl._children.append(serve2)
+
+    def routed():
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port2}/v1/models", timeout=5
+            ) as r:
+                body = json.load(r)
+        except OSError:
+            return False
+        return [m["id"] for m in body["data"]] == ["model-m"]
+
+    wait_until(routed, 30, "model-m never reached the d2-seeded router")
+    daemons = json.load(urllib.request.urlopen(
+        f"http://127.0.0.1:{port2}/status.json", timeout=5))["daemons"]
+    assert any(a.endswith(f":{d1.http_port}") for a in daemons), daemons
+
+
 def main():
     tests = [
         t01_announcement_reaches_status,
@@ -389,6 +439,7 @@ def main():
         t06_mcp_merge_routes_and_strips_prefix,
         t07_actor_death_closes_the_gate,
         t08_dead_endpoint_fails_the_probe,
+        t09_membership_follows_the_mesh,
     ]
     try:
         for t in tests:
@@ -396,6 +447,8 @@ def main():
         print(f"\nALL {len(tests)} TESTS PASSED")
     finally:
         cluster.cleanup()
+        for d in state.get("mesh", ()):
+            d.cleanup()
 
 
 if __name__ == "__main__":

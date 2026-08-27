@@ -220,6 +220,14 @@ pub enum Msg {
     PeerHelloOk {
         node_id: String,
         node_ip: String,
+        /// The accepting daemon's own addresses, so the dialing side records
+        /// full membership too -- without these an outbound link stored
+        /// http_port 0 and mesh-following consumers (mentat-serve) could not
+        /// reach that daemon's HTTP side. Defaulted for old daemons.
+        #[serde(default)]
+        control_addr: String,
+        #[serde(default)]
+        http_port: u16,
     },
     /// Periodic push of a daemon's own snapshot, so every daemon can serve a
     /// merged cluster view without request forwarding.
