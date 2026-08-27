@@ -38,6 +38,43 @@ inference traffic, so restarting the router leaves models serving.
 - 6381/tcp — mentat-serve HTTP
 - 6382/udp — daemon announcements
 
+## Getting started
+
+Install the binary and build the shim wheel:
+
+```
+cargo install mentatd
+pip wheel --no-deps -w dist ./python
+```
+
+Run a daemon on each box, before any model container:
+
+```
+MENTAT_NODE_IP=10.0.0.1 MENTAT_PEERS=10.0.0.2:6379 mentatd daemon
+```
+
+In the model image, replace Ray with the shim. The wheel installs as `ray` and
+claims the import name:
+
+```
+RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
+ && pip uninstall -y ray \
+ && pip install --no-deps /tmp/mentatd-0.1.0-py3-none-any.whl
+```
+
+The entrypoint keeps its `ray start` and `ray status` calls. Export first:
+
+```
+export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+export RAY_ADDRESS=10.0.0.1:6379
+export MENTAT_GROUP=glm53
+ray start --address=$RAY_ADDRESS
+vllm serve ... --distributed-executor-backend ray -tp 2
+```
+
+[GUIDE.md](GUIDE.md) covers the vLLM audit, the Ray workarounds you can delete,
+and the limits.
+
 ## Deploy
 
 1. `VERSION=<ver> ./build.sh` → `mentat-artifacts:<ver>`, `mentatd:<ver>`, `mentat-serve:<ver>`.
