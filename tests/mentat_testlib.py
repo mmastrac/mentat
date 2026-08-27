@@ -17,13 +17,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 RUST = os.path.join(ROOT, "rust")
 PYTHON_PKG = os.path.join(ROOT, "python")
-BINARY = os.path.join(RUST, "target", "debug", "mentat")
+# MENTAT_TEST_BINARY runs the suites against a prebuilt binary (e.g. the one
+# out of mentat-artifacts, on a box without cargo).
+BINARY = os.environ.get("MENTAT_TEST_BINARY") or os.path.join(
+    RUST, "target", "debug", "mentat"
+)
 
 _children = []
 
 
 def build_binary():
-    subprocess.run(["cargo", "build"], cwd=RUST, check=True)
+    if not os.environ.get("MENTAT_TEST_BINARY"):
+        subprocess.run(["cargo", "build"], cwd=RUST, check=True)
     assert os.path.exists(BINARY), BINARY
     return BINARY
 
