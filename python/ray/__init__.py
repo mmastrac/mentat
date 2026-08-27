@@ -15,6 +15,7 @@ import pickle as _pickle
 
 from ray import _client
 from ray import cloudpickle  # noqa: F401  (attribute must exist: ray.cloudpickle)
+from ray import util  # noqa: F401  (ray.util must resolve without a prior submodule import)
 from ray._refs import ObjectRef
 from ray.actor import ActorClass, ActorHandle  # noqa: F401
 from ray.exceptions import (
@@ -51,7 +52,7 @@ def remote(target=None, **kwargs):
         return wrap
     if isinstance(target, type):
         return ActorClass(target, kwargs)
-    raise NotImplementedError(
+    raise AttributeError(
         "mentat: ray.remote on plain functions (tasks) is not implemented -- "
         "vLLM's executor only uses actor classes"
     )
@@ -142,7 +143,7 @@ def available_resources():
 def __getattr__(name):
     if name.startswith("__"):
         raise AttributeError(name)
-    raise NotImplementedError(
+    raise AttributeError(
         f"mentat: ray.{name} is not implemented -- vLLM's audited ray surface "
         "does not use it; if vLLM changed, re-audit before adding it"
     )

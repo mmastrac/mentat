@@ -38,7 +38,7 @@ def get_node_ip_address():
 def __getattr__(name):
     if name.startswith("__"):
         raise AttributeError(name)
-    raise NotImplementedError(
+    raise AttributeError(
         f"mentat: ray.util.{name} is not implemented -- vLLM's audited ray "
         "surface does not use it; if vLLM changed, re-audit before adding it"
     )

@@ -29,6 +29,21 @@ WORLD_SIZE = 2
 state = {}
 
 
+def t00_unimplemented_surface_probes_cleanly():
+    # torch.compile's inductor probes ray.torch with hasattr during the GLM
+    # boot; real ray (which has no ray.torch either) raises AttributeError, so
+    # the probe returns False and moves on. The tripwire raising
+    # NotImplementedError instead crashed rank compilation at 90% of a
+    # 10-minute weight load on first pair deployment.
+    assert not hasattr(ray, "torch")
+    assert not hasattr(ray.util, "collective")
+    try:
+        ray.dag  # a genuine call still fails, loudly
+        raise AssertionError("unimplemented attribute access must raise")
+    except AttributeError as e:
+        assert "mentat" in str(e)
+
+
 def t01_initialize_ray_cluster():
     # ray_utils.assert_ray_available / initialize_ray_cluster
     assert not ray.is_initialized()
@@ -160,7 +175,12 @@ def t03_monitor_loop_and_shutdown():
 
 
 def main():
-    tests = [t01_initialize_ray_cluster, t02_create_workers, t03_monitor_loop_and_shutdown]
+    tests = [
+        t00_unimplemented_surface_probes_cleanly,
+        t01_initialize_ray_cluster,
+        t02_create_workers,
+        t03_monitor_loop_and_shutdown,
+    ]
     try:
         for t in tests:
             run_ok(t, t.__name__)
