@@ -40,7 +40,8 @@ per token; after boot the only recurring call is the health monitor's
 
 ## Pieces
 
-- `mentatd` (`mentat daemon`), one per box, host-level container
+- `mentatd` (`mentatd daemon`; the crate and wheel are named mentatd
+  because crates.io's mentat is taken), one per box, host-level container
   ([mentatd.yaml](mentatd.yaml)). Control port 6379 (what `RAY_ADDRESS`
   points at), HTTP 6380: `/metrics` (Prometheus), `/status` (JSON),
   `/events` (WebSocket: snapshot on connect, then `node_join/leave`,
@@ -53,7 +54,7 @@ per token; after boot the only recurring call is the health monitor's
   (broadcast on port 6382, every 5 s; `MENTAT_ANNOUNCE_PORT=0` disables,
   `MENTAT_ANNOUNCE_ADDR` adds unicast targets) so mentat-serve finds the
   cluster with zero config.
-- `mentat` agent (`ray start ...`, same binary), one per model container.
+- The agent (`ray start ...`, same binary), one per model container.
   Registers the container's GPUs under a group and is the only thing that
   spawns actor processes (they must run the container's Python). Actors get
   their own process group; kills take the whole tree.
@@ -141,8 +142,8 @@ head-first ordering still documented for exactly that case.
 ## Operating
 
 ```
-mentat status [--group g] [--json]   # group view prints the N.0/M.0 GPU line
-mentat stop [--group g]              # kill actors: the unstick lever
+mentatd status [--group g] [--json]  # group view prints the N.0/M.0 GPU line
+mentatd stop [--group g]             # kill actors: the unstick lever
 curl -s http://<box>:6380/status | jq .
 curl -s http://<box>:6380/metrics
 websocat ws://<box>:6380/events      # snapshot, then live events
@@ -159,7 +160,7 @@ An agent link EOF does not kill actors immediately: the daemon holds them
 through a degrade window (event `agent_degraded` at 30 s, calls issued
 meanwhile are held and drained on reconnect) and gives up at 60 s (event
 `agent_dead`, actors marked dead, run() sentinels resolve, the driver
-restarts). `mentat stop` stays instant. A placement group that never gets
+restarts). `mentatd stop` stays instant. A placement group that never gets
 its agents fails after 10 min instead of pending forever. All of these
 windows are env-tunable -- see Tuning.
 
@@ -197,7 +198,7 @@ warning never fires before the give-up.
 `MENTAT_PEER_STALE_AFTER_MS` (30000) and `MENTAT_PEER_DEAD_AFTER_MS`
 (60000): the same two steps for daemon-to-daemon links, catching a daemon
 that wedges while its socket stays open. Serving traffic never crosses the
-mesh, so these only decide how fast `mentat status` and the head
+mesh, so these only decide how fast `mentatd status` and the head
 designation notice. The heartbeat they judge by is the status push
 (`MENTAT_PEER_STATUS_INTERVAL_MS`, 2000). Keep the stale window several
 pushes wide, or healthy peers flap.

@@ -21,7 +21,7 @@ PYTHON_PKG = os.path.join(ROOT, "python")
 # MENTAT_TEST_BINARY runs the suites against a prebuilt binary (e.g. the one
 # out of mentat-artifacts, on a box without cargo).
 BINARY = os.environ.get("MENTAT_TEST_BINARY") or os.path.join(
-    RUST, "target", "debug", "mentat"
+    RUST, "target", "debug", "mentatd"
 )
 
 _children = []

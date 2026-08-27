@@ -1,9 +1,9 @@
 //! mentat: minimal Ray replacement for vLLM multi-node serving.
 //!
 //! One binary, several roles:
-//!   mentat daemon            -- mentatd, the per-node cluster daemon
-//!   mentat start [...]       -- ray-CLI-compatible agent launcher
-//!   mentat status / stop     -- cluster inspection and kill switch
+//!   mentatd daemon           -- the per-node cluster daemon
+//!   mentatd start [...]      -- ray-CLI-compatible agent launcher
+//!   mentatd status / stop    -- cluster inspection and kill switch
 //! A `ray` symlink keeps the serving entrypoints' `ray start` / `ray status`
 //! invocations working unchanged.
 
@@ -29,7 +29,7 @@ use proto::{read_frame, write_frame, Frame, Msg};
 const RAY_COMPAT_VERSION: &str = "2.57.0";
 
 #[derive(Parser)]
-#[command(name = "mentat", version, disable_version_flag = true)]
+#[command(name = "mentatd", version, disable_version_flag = true)]
 struct Cli {
     #[arg(long, global = true)]
     version: bool,
@@ -110,18 +110,18 @@ fn main() {
     if cli.version {
         if invoked_as_ray {
             println!(
-                "ray, version {RAY_COMPAT_VERSION} (mentat {})",
+                "ray, version {RAY_COMPAT_VERSION} (mentatd {})",
                 env!("CARGO_PKG_VERSION")
             );
         } else {
-            println!("mentat {}", env!("CARGO_PKG_VERSION"));
+            println!("mentatd {}", env!("CARGO_PKG_VERSION"));
         }
         return;
     }
 
     match cli.cmd {
         None => {
-            eprintln!("usage: mentat <daemon|start|status|stop> (see --help)");
+            eprintln!("usage: mentatd <daemon|start|status|stop> (see --help)");
             std::process::exit(2);
         }
         Some(Cmd::Daemon {
@@ -149,7 +149,7 @@ fn main() {
                 head_json,
                 peers,
             }) {
-                eprintln!("mentat daemon failed: {e}");
+                eprintln!("mentatd daemon failed: {e}");
                 std::process::exit(1);
             }
         }
@@ -201,12 +201,12 @@ fn main() {
                             &serde_json::json!({ "pid": c.id(), "group": group }),
                         );
                         println!(
-                            "mentat agent started (group={group}, daemon={daemon_addr}); \
+                            "mentatd agent started (group={group}, daemon={daemon_addr}); \
                              registration retries until the daemon is reachable"
                         );
                     }
                     Err(e) => {
-                        eprintln!("failed to start mentat agent: {e}");
+                        eprintln!("failed to start mentatd agent: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -243,7 +243,7 @@ fn main() {
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("mentat: cannot reach daemon at {addr}: {e}");
+                    eprintln!("mentatd: cannot reach daemon at {addr}: {e}");
                     std::process::exit(1);
                 }
             }
@@ -253,7 +253,7 @@ fn main() {
             match cli_request(&addr, Msg::StopAll { group }) {
                 Ok(_) => println!("stop sent"),
                 Err(e) => {
-                    eprintln!("mentat: cannot reach daemon at {addr}: {e}");
+                    eprintln!("mentatd: cannot reach daemon at {addr}: {e}");
                     std::process::exit(1);
                 }
             }

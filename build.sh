@@ -18,6 +18,6 @@ sudo docker build --target serve     -t "mentat-serve:${VERSION}" .
 # The one property everything downstream depends on: the artifacts image
 # carries the binary and exactly one shim wheel.
 sudo docker run --rm "mentat-artifacts:${VERSION}" sh -c \
-  '/out/mentat --version && ls /out/mentat_ray_shim-*-py3-none-any.whl'
+  '/out/mentatd --version && ls /out/mentatd-*-py3-none-any.whl'
 
 echo "BUILD_EXIT=$? TAGS=mentat-artifacts:${VERSION},mentatd:${VERSION},mentat-serve:${VERSION}"
