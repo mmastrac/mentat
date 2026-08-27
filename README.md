@@ -1,272 +1,265 @@
 # mentat
 
-A minimal Ray replacement for vLLM multi-node serving on the GB10 boxes.
-Rust daemon + CLI, plus a pure-Python `ray` package that satisfies exactly
-the API surface vLLM's `RayExecutorV2` uses. Named after the human computers
-of Dune; it does the thinking Ray was hired for, without the baggage.
+mentat replaces Ray for vLLM multi-node serving: a Rust daemon for placement,
+liveness and reaping, a Rust router for HTTP, and a pure-Python package holding
+the `ray` import name.
 
-This repo is the control plane and router alone. The model deployments that
-consume it -- the glm53 / ds4-flash compose stacks, their entrypoints, and
-the spark-agent host tooling mentioned throughout -- live in the home-infra
-repo under `infra/docker/spark/`.
+No object store, no memory monitor, no dashboard. Registration retries forever.
+Each lifecycle decision is one log line, and an actor's death reason reaches the
+driver.
 
-## Why it exists
+## Components
 
-Ray was in the glm53/ds4-flash images for one reason: `--distributed-executor-
-backend ray` is how TP spans nodes. On unified-memory GB10 it caused real
-damage, all observed on 2026-08-27:
+- `mentatd daemon` — per-node daemon. Control port 6379, HTTP 6380.
+- `mentatd start` — agent, one per model container. `ray` symlink alias.
+- `mentatd status` / `mentatd stop` — inspect, kill actors.
+- `python/ray/` — pure-Python `ray` shim wheel, `pip install --no-deps`. Reports `__version__ == "2.57.0"`.
+- `serve/` — `mentat-serve`, separate crate + container. HTTP 6381.
 
-- Its memory monitor kills workers when the NODE crosses 95% memory. The
-  ~89 GiB of model weights ARE node memory here, so it killed healthy ranks
-  seconds after the engine came up -- and logged why only in the raylet event
-  log.
-- Its object store defaults to ~30% of RAM (~36 GiB on the uncapped worker),
-  taken from the pool the weights and KV cache need, for a model that moves
-  every tensor over NCCL.
-- `ray start --address` does not retry, forcing the head-first stage-file
-  ordering barrier.
-- A hard kill leaves orphaned workers pinning ~88 GB invisible to `ps` RSS.
+One binary is the daemon, the agent and the CLI. The `ray` symlink keeps
+`ray start` and `ray status` working, and `ray --version` names both versions.
 
-mentat has no object store, no memory monitor, no dashboard. Registration
-retries forever. Every lifecycle decision is one structured log line in the
-container log, and an actor death reason (exit code/signal) arrives inside
-the driver's `RayActorError`.
+`mentatd daemon` takes `--port` (6379), `--http-port` (6380), `--node-ip`,
+`--head-json` (`/tmp/mentat/head.json`) and `--peers`. Compose uses the
+environment.
 
-The shim is control-plane only, which is why pure Python costs nothing:
-verified against the image's vLLM (`0.1.dev20051+g487ecf187`),
-`execute_model` runs over vLLM's own MessageQueue + NCCL with zero Ray calls
-per token; after boot the only recurring call is the health monitor's
-`ray.wait` every 5 s.
+The shim reports `2.57.0` because vLLM version-checks Ray, and logs a banner at
+`ray.init`. Pure Python is free: `execute_model` runs over vLLM's MessageQueue
+and NCCL, zero Ray calls per token.
 
-## Pieces
+`mentat-serve` is a separate crate and container. The daemon never touches
+inference traffic, so restarting the router leaves models serving.
 
-- `mentatd` (`mentatd daemon`; the crate and wheel are named mentatd
-  because crates.io's mentat is taken), one per box, host-level container
-  ([mentatd.yaml](mentatd.yaml)). Control port 6379 (what `RAY_ADDRESS`
-  points at), HTTP 6380: `/metrics` (Prometheus), `/status` (JSON),
-  `/events` (WebSocket: snapshot on connect, then `node_join/leave`,
-  `head_change`, `agent_register/lost/degraded/dead`,
-  `pg_created/ready/timeout`, `actor_spawning/running/dead`,
-  `driver_connected/disconnected`).
-  Daemons mesh over `MENTAT_PEERS`, elect a head (lowest node id, 5 s
-  hold-down), replicate events, and exchange status so any daemon shows the
-  whole cluster. Each daemon also announces its addresses over UDP
-  (broadcast on port 6382, every 5 s; `MENTAT_ANNOUNCE_PORT=0` disables,
-  `MENTAT_ANNOUNCE_ADDR` adds unicast targets) so mentat-serve finds the
-  cluster with zero config.
-- The agent (`ray start ...`, same binary), one per model container.
-  Registers the container's GPUs under a group and is the only thing that
-  spawns actor processes (they must run the container's Python). Actors get
-  their own process group; kills take the whole tree.
-- The `ray` shim (`python/ray/`), installed with `pip install --no-deps`,
-  claims the `ray` import name. Reports `__version__ == "2.57.0"` because
-  vLLM version-checks it; logs a mentat banner at `ray.init`. Anything
-  outside the audited surface raises `NotImplementedError` -- silent stubs
-  are how this design would rot.
-- `mentat-serve` (`serve/`, its own tokio+hyper crate so those dependencies
-  stay out of the daemon build), the serving front door in a separate
-  container ([mentat-serve.yaml](mentat-serve.yaml)) -- mentatd never touches
-  inference traffic. HTTP on 6381: an OpenAI-compatible `/v1` that routes by
-  model name to the right group's API with streaming passed through, and one
-  `/mcp` merging every container's management MCP (tools prefixed
-  `<group>__`, plus a native `serve_status` tool showing the route table).
-  Daemons are discovered three ways, all feeding one watch set: their UDP
-  announcements, the `MENTAT_DAEMONS` seed list (the local daemon by
-  default; set it empty for UDP only), and the mesh's own membership once
-  any one daemon is reached. Each watched daemon is polled for `/status`
-  with its `/events` WebSocket held open, so any cluster event triggers an
-  immediate re-read. Announcements are unsigned hints: they only add an
-  address to watch, everything a daemon claims is re-read over TCP and
-  probed, and both the datagram source and the claimed address must pass
-  the `ALLOWED_SOURCES` prefixes. A future `MENTAT_SECRET` signs them under
-  a bumped `mentat_announce` version. This replaces spark-agent's serving
-  proxy.
+## Ports
 
-## Service announcement
+- 6379/tcp — daemon control (`RAY_ADDRESS`)
+- 6380/tcp — daemon HTTP
+- 6381/tcp — mentat-serve HTTP
+- 6382/udp — daemon announcements
 
-Model containers announce their endpoints through the agent registration:
-the entrypoints export `MENTAT_OPENAI_API` (head only -- a TP worker serves
-nothing) and `MENTAT_MCP_API` (every rank; the status server runs on all of
-them) right before `ray start`, the agent carries them on `AgentRegister`,
-and the daemon republishes them in `/status` and the `agent_register` event.
-Everything is optional and additive: an agent without the env vars registers
-exactly as before, and an old daemon ignores the extra field.
+## Deploy
 
-Routing is gated on two facts: the group has a running actor, and the
-announced endpoint answers a `/v1/models` probe (also where served model
-names come from, so `SERVED_NAME` needs no separate announcement). One
-deliberate gap: an engine is admitted as soon as its API answers, which on
-glm53 is during the self-test window. The `/mcp` merge skips the health
-gate: the status server matters most while the engine is loading or wedged.
+1. `VERSION=<ver> ./build.sh` → `mentat-artifacts:<ver>`, `mentatd:<ver>`, `mentat-serve:<ver>`.
+2. [mentatd.yaml](mentatd.yaml) → `~/compose/mentatd/` on each box, per-node `.env`. Before any model container.
+3. Rebuild the model images; they `COPY --from=mentat-artifacts`.
+4. `docker compose up` the models, either node first.
+5. Optional: [mentat-serve.yaml](mentat-serve.yaml) → `~/compose/mentat-serve/`. No `.env` required.
 
-## Groups
+Step 2's ordering saves time. A container that starts first retries until a
+daemon answers.
 
-One mentat cluster, many models. Every driver and agent carries
-`MENTAT_GROUP` (entrypoints default it to `SERVICE_NAME`), and placement,
-`ray.nodes()`, `cluster_resources()`, and `ray status` are all scoped to the
-caller's group -- so the entrypoint's `GPU >= TP` gate means "my workers are
-here" no matter what else is serving. TP=N takes N single-GPU agents (or
-fewer multi-GPU ones); nothing assumes a pair. Running the same model twice =
-two compose stacks with distinct `MENTAT_GROUP` values; a second driver for
-one group is rejected at `ray.init`.
+Set `MENTAT_NODE_IP` to the address the driver sees. Left empty, the daemon
+takes the default route, wrong on a multi-homed box.
 
-Rendezvous today: the driver and ALL of a group's agents must talk to the
-same daemon -- which the entrypoints already arrange (`RAY_ADDRESS` for the
-driver, `ray start --address=$RAY_ADDRESS` for the worker agent, the local
-daemon for the head agent, all landing on the head box's mentatd). The mesh
-is observability + head designation; moving rendezvous authority onto the
-elected head is a later phase.
-
-## Deploy order
-
-1. `./build.sh` on gx10-n3 → `mentat-artifacts:<ver>` + `mentatd:<ver>` +
-   `mentat-serve:<ver>`.
-2. `mentatd.yaml` to `~/compose/mentatd/` on each box with the per-node
-   `.env` from the comments in that file (`MENTAT_NODE_IP` is the CLUSTER
-   address -- `10.100.0.x` on the pair). Up it. **Before any converted model
-   container.**
-3. Rebuild the model images (home-infra's glm53 / ds4-flash; their
-   Dockerfiles `COPY --from=mentat-artifacts`).
-4. `docker compose up` the models -- either node first; ordering stopped
-   mattering.
-5. Optional, any box that should answer clients: `mentat-serve.yaml` to
-   `~/compose/mentat-serve/`. No per-node `.env` required: the daemons'
-   UDP announcements, the local-daemon seed, and mesh membership each find
-   the cluster on their own.
-
-Rollback: point `IMAGE` at the previous (real-ray) image tag. The
-entrypoints kept full `ray` CLI compatibility, the neutralized
-`RAY_OBJECT_STORE_MEMORY` / `RAY_memory_monitor_refresh_ms` knobs, and the
-head-first ordering still documented for exactly that case.
+Rollback: point `IMAGE` at the previous real-ray image tag.
 
 ## Operating
 
 ```
-mentatd status [--group g] [--json]  # group view prints the N.0/M.0 GPU line
-mentatd stop [--group g]             # kill actors: the unstick lever
+mentatd status [--group g] [--json]
+mentatd stop [--group g]
 curl -s http://<box>:6380/status | jq .
 curl -s http://<box>:6380/metrics
-websocat ws://<box>:6380/events      # snapshot, then live events
-curl -s http://<box>:6381/v1/models  # what mentat-serve will route right now
-curl -s http://<box>:6381/status.json | jq .   # and why (health per group)
+websocat ws://<box>:6380/events
+curl -s http://<box>:6381/v1/models
+curl -s http://<box>:6381/status.json | jq .
 ```
 
-If a rank dies, the reason is in the container log (`event=actor_exit`
-pid/signal) and in vLLM's own exception text. If the head-box daemon
-restarts mid-serve, agents reconnect and the daemon kills the now-ownerless
-actors; vLLM exits and the stack restarts clean -- nothing leaks.
+Run `mentatd status` first. With `--group` it prints the ray-compatible
+`N.0/M.0 GPU` line the entrypoints grep for.
 
-An agent link EOF does not kill actors immediately: the daemon holds them
-through a degrade window (event `agent_degraded` at 30 s, calls issued
-meanwhile are held and drained on reconnect) and gives up at 60 s (event
-`agent_dead`, actors marked dead, run() sentinels resolve, the driver
-restarts). `mentatd stop` stays instant. A placement group that never gets
-its agents fails after 10 min instead of pending forever. All of these
-windows are env-tunable -- see Tuning.
+`mentatd stop` kills actors and the driver restarts on the dead refs. It runs
+immediately, whatever degrade window an agent is inside.
 
-## Tuning
+Rank death shows as `event=actor_exit` with pid and signal, and in vLLM's
+exception text.
 
-Every lifecycle window is a MENTAT_* env var in milliseconds, read once at
-process start. The daemon reads the cluster-level ones (mentatd's per-node
-`.env`), the agent reads the container-level ones (the model container's
-env). Defaults sit on the `Cfg` struct in [config.rs](rust/src/config.rs),
-where each is read, and an unparsable value logs `bad_env_ms` and uses the
-default. The defaults fit the serving pair. Change a knob when a measured
-time disagrees with it, and change it to that measurement plus margin.
+## Daemon HTTP (6380)
 
-`MENTAT_PG_PENDING_TIMEOUT_MS` (600000 = 10 min): the clock on "my workers
-never showed up". A placement group still waiting for GPUs after this fails,
-and the driver gets an error instead of hanging forever. Time your slowest
-expected cold start end to end -- image pull, weight mount, container boot,
-agent registration -- and keep this above it. Lower it if you would rather
-learn about a wedged worker box in two minutes than ten. vLLM's own wait
-loop tolerates the full window.
+- `/metrics` — Prometheus
+- `/status` — JSON
+- `/events` — WebSocket; snapshot on connect, then `node_join`, `node_leave`, `head_change`, `agent_register`, `agent_lost`, `agent_degraded`, `agent_dead`, `pg_created`, `pg_ready`, `pg_timeout`, `actor_spawning`, `actor_running`, `actor_dead`, `driver_connected`, `driver_disconnected`
 
-`MENTAT_AGENT_DEGRADED_AFTER_MS` (30000) and `MENTAT_AGENT_DEAD_AFTER_MS`
-(60000): what happens when a model container loses its daemon link. Nothing
-dies right away. The agent reconnects on its own, and calls made during the
-outage are held and delivered when it does. At the degraded mark an
-`agent_degraded` event fires, so set that to "how long before I want to
-hear about it". At the dead mark the daemon gives up: actors are marked
-dead, vLLM's monitor sees its run() refs resolve, and the stack restarts.
-Set that to the point where restarting beats waiting. A restart costs the
-~9 min model boot, so if your outages are switch reboots that heal in two
-minutes, raise it well past two minutes. If a lost link always means a dead
-container, lower it and restart sooner. Keep degraded below dead, or the
-warning never fires before the give-up.
+`/events` sends a snapshot first, so a late client starts whole. `mentat-serve`
+holds the socket open and re-reads `/status` on any event.
 
-`MENTAT_PEER_STALE_AFTER_MS` (30000) and `MENTAT_PEER_DEAD_AFTER_MS`
-(60000): the same two steps for daemon-to-daemon links, catching a daemon
-that wedges while its socket stays open. Serving traffic never crosses the
-mesh, so these only decide how fast `mentatd status` and the head
-designation notice. The heartbeat they judge by is the status push
-(`MENTAT_PEER_STATUS_INTERVAL_MS`, 2000). Keep the stale window several
-pushes wide, or healthy peers flap.
+## mentat-serve HTTP (6381)
 
-`MENTAT_ELECTION_HOLD_DOWN_MS` (5000): how long the would-be head must stay
-stable before `head_change` commits. Raise it if a flapping link churns the
-designation. The tests shorten it. Production has no reason to.
+- `/v1` — OpenAI-compatible, routed by model name, streaming passed through
+- `/mcp` — merged per-container MCP, tools prefixed `<group>__`, plus native `serve_status`
+- `/status.json` — route table and per-group health
+- `/v1/models` — currently routable models
 
-`MENTAT_SLOW_CALL_WARN_MS` (15000): warning only, one `call_pending_long`
-log line per slow call. It exists to catch a future vLLM issuing a call
-behind a blocking one. Boot-time calls like `wait_for_init` legitimately
-pend for minutes and draw the line once per boot -- expected. The same line
-at steady state is a bug report. Raise it if the boot-time line bothers
-you.
+`/`, `/healthz` and `/status.json` return the same document.
 
-`MENTAT_SESSION_REAP_GRACE_MS` (0): how long a dead vLLM's workers linger
-before the daemon kills them. Keep 0. A restarting vLLM needs the old
-actors' names and GPUs back, so every second of grace is a second added to
-the restart. Set it briefly only to inspect workers after a driver crash.
+`/status.json` says why a model is missing from `/v1/models`. Each group
+carries `healthy` and a `why_not`: no endpoint, no running actors, unprobed,
+probe failed, or probe stale.
 
-Container-side:
+Model names come from probing the group's own `/v1/models`.
 
-`MENTAT_HOST_CONNECT_TIMEOUT_MS` (60000): how long the agent waits for a
-freshly spawned actor process to dial back. This covers python starting and
-importing the small host module only -- the heavy vLLM import happens after
-the handshake -- so it fires only when python itself cannot start. Leave it.
+## Daemon env vars
 
-`MENTAT_AGENT_PING_INTERVAL_MS` (2000): how often the agent pings the
-daemon, which bounds how fast a dead daemon is noticed. Cheap either way.
+| Var | Default | Meaning |
+| --- | --- | --- |
+| `MENTAT_NODE_IP` | default route | This node's cluster identity |
+| `MENTAT_PEERS` | empty | Comma-separated peer control addresses |
+| `MENTAT_ANNOUNCE_PORT` | 6382 | UDP announce port; 0 disables |
+| `MENTAT_ANNOUNCE_ADDR` | empty | Extra unicast announce targets |
+| `MENTAT_ANNOUNCE_INTERVAL_S` | 5 | Announce interval |
+| `MENTAT_PG_PENDING_TIMEOUT_MS` | 600000 | Placement group PENDING → fail |
+| `MENTAT_AGENT_DEGRADED_AFTER_MS` | 30000 | Disconnected agent → `agent_degraded` |
+| `MENTAT_AGENT_DEAD_AFTER_MS` | 60000 | Disconnected agent → actors dead |
+| `MENTAT_PEER_STALE_AFTER_MS` | 30000 | Silent peer → stale |
+| `MENTAT_PEER_DEAD_AFTER_MS` | 60000 | Silent peer → `node_leave` |
+| `MENTAT_PEER_STATUS_INTERVAL_MS` | 2000 | Peer status push / heartbeat |
+| `MENTAT_ELECTION_HOLD_DOWN_MS` | 5000 | Head candidate stability before `head_change` |
+| `MENTAT_SLOW_CALL_WARN_MS` | 15000 | Pending call → one `call_pending_long` |
+| `MENTAT_SESSION_REAP_GRACE_MS` | 0 | Driver EOF → actor reap delay |
+| `MENTAT_TCP_DEAD_AFTER_MS` | 75000 | TCP keepalive target (Linux only) |
+| `MENTAT_GPUS` | detected | GPU count override |
 
-`MENTAT_TCP_DEAD_AFTER_MS` (75000), read by both sides: the Linux TCP
-keepalive target for a peer that wedges while its connection stays open (a
-hard power-off, a hung box). The kernel-level backstop behind every window
-above. Rarely worth touching.
+`MENTAT_NODE_IP` and `MENTAT_PEERS` are the two you set.
 
-## Testing
+`MENTAT_PG_PENDING_TIMEOUT_MS` times the rendezvous, from the placement group
+request to the agents and GPUs arriving. Ten minutes covers a cold box. Lower
+it and the driver restarts into the same wait.
 
-GPU-free, self-contained (daemon + agents as subprocesses, fake GPUs):
+`MENTAT_AGENT_DEGRADED_AFTER_MS` and `MENTAT_AGENT_DEAD_AFTER_MS` both time how
+long an agent's link has been EOF. Calls are held until the first. At 30s the
+agent is degraded, a warning. At 60s its actors are dead and the container
+restarts. The gap allows for short periods of disconnection.
 
-```
-python3 tests/test_e2e_local.py   # audited behaviors incl. kill -9 liveness,
-                                  # pg timeout, degrade window, give-up
-python3 tests/test_groups.py      # TP=4, parallel groups, same model twice
-python3 tests/test_vllm_shape.py  # call-for-call replay of RayExecutorV2
-python3 tests/test_multinode.py   # 3-daemon mesh: election, head death,
-                                  # peer staleness (short MENTAT_* windows)
-python3 tests/test_serve.py       # mentat-serve: routing, gating, MCP merge
-cargo test                        # framing, WS handshake, the status-line grep contract
-```
+`MENTAT_PEER_STALE_AFTER_MS` and `MENTAT_PEER_DEAD_AFTER_MS` are the mesh
+version, timed against status pushes. Keep `MENTAT_PEER_STATUS_INTERVAL_MS`
+well under them. Fifteen missed pushes means stale.
 
-`test_serve.py` builds and runs the real router binary against real
-daemon+agents with fake endpoints (`MENTAT_SERVE_TEST_BINARY` skips the
-cargo build, like `MENTAT_TEST_BINARY`), and proves pass-through streaming
-by timing the gap between SSE frames.
+`MENTAT_ELECTION_HOLD_DOWN_MS` damps flapping. A candidate must stay best this
+long before the designation moves. Raise it if `head_change` streams, and head
+changes lag by as much.
 
-On-hardware gate before touching the serving pair: build the glm53 image on
-n3, run the entrypoint's exact `ray start`/`ray status` incantations in it,
-then a small model with `vllm serve -tp 1 --distributed-executor-backend ray`
-(TP=1 exercises the whole executor path: pg, RayWorkerProc, MQ handle,
-monitor loop).
+`MENTAT_SLOW_CALL_WARN_MS` sets when `call_pending_long` fires. A call pending
+15s is queued behind a blocking method or stuck on a wedged worker.
 
-## Sharp edges to keep in mind
+Keep `MENTAT_SESSION_REAP_GRACE_MS` at 0. A restarting vLLM needs the old
+actors' names and GPUs freed, so a grace delays recovery.
 
-- Actors are serial, like real ray: a method call issued after `run()` queues
-  forever. vLLM never does this (shutdown is `ray.kill`); the daemon logs
-  `call_pending_long` if anything else ever does.
-- The shim covers this vLLM's audited surface. On a base-image bump, re-audit
-  (`grep -rn 'ray\.' <site-packages>/vllm/v1/executor/`) before rebuilding --
-  the Dockerfile layers say the same thing.
-- `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1` is pinned in both entrypoints; the
-  legacy executor's compiled-DAG surface is deliberately not implemented.
+`MENTAT_TCP_DEAD_AFTER_MS` targets how fast keepalive notices a wedged peer,
+via `TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`. Linux only.
+
+`MENTAT_GPUS` lets the tests run without GPUs. Otherwise the agent counts with
+`nvidia-smi`.
+
+UDP announcement is how `mentat-serve` finds daemons. `MENTAT_ANNOUNCE_ADDR`
+adds unicast targets outside the broadcast domain. `MENTAT_ANNOUNCE_PORT=0`
+turns it off.
+
+## Agent / container env vars
+
+| Var | Default | Meaning |
+| --- | --- | --- |
+| `RAY_ADDRESS` | `head.json`, then localhost | Daemon the driver and agents rendezvous on |
+| `MENTAT_GROUP` | — | Group scope for driver and agents |
+| `MENTAT_DAEMON` | `RAY_ADDRESS` | Daemon address override |
+| `MENTAT_OPENAI_API` | unset | Announced OpenAI endpoint (head rank only) |
+| `MENTAT_MCP_API` | unset | Announced MCP endpoint (every rank) |
+| `MENTAT_HOST_CONNECT_TIMEOUT_MS` | 60000 | Wait for a spawned actor host to dial back |
+| `MENTAT_AGENT_PING_INTERVAL_MS` | 2000 | Agent → daemon ping interval |
+| `MENTAT_TCP_DEAD_AFTER_MS` | 75000 | TCP keepalive target (Linux only) |
+| `MENTAT_PYTHON` | `python3` | Interpreter used to spawn actors |
+| `MENTAT_SOCK_DIR` | `/tmp/mentat` | Actor unix socket directory |
+| `MENTAT_DEBUG` | unset | Log ignored `ray` shim kwargs |
+
+`MENTAT_GROUP` scopes placement, `ray.nodes()`, `cluster_resources()` and
+`ray status`, so two models on one box never count each other's GPUs. It falls
+back to `SERVICE_NAME`, then `default`.
+
+`RAY_ADDRESS` resolves in order: the `--address` flag, the environment,
+`head.json`, localhost. The CLI and the agent share it.
+
+The API variables are announced at `ray start` and read once, so export them
+first. Head-rank-only `MENTAT_OPENAI_API` is an entrypoint convention. The
+agent announces whatever is set, and `mentat-serve` takes the lexically first
+of several.
+
+`MENTAT_HOST_CONNECT_TIMEOUT_MS` covers process start only. The actor host
+dials back before importing anything heavy, so this times python starting up.
+Leave it alone.
+
+`MENTAT_AGENT_PING_INTERVAL_MS` bounds how fast an agent notices a dead daemon.
+
+`MENTAT_PYTHON` and `MENTAT_SOCK_DIR` exist for the tests, which run fake nodes
+on one machine. `MENTAT_DEBUG` logs the `ray` kwargs the shim ignored.
+
+Set on each actor process: `MENTAT_ACTOR_ID`, `MENTAT_NODE_ID`,
+`MENTAT_GPU_IDS` and `MENTAT_GCS_ADDRESS` from the daemon, plus
+`MENTAT_AGENT_PID` from the agent.
+
+## mentat-serve env vars
+
+| Var | Default | Meaning |
+| --- | --- | --- |
+| `SERVE_PORT` | 6381 | HTTP port |
+| `MENTAT_DAEMONS` | `127.0.0.1:6380` | Seed daemon list; empty = UDP only |
+| `MENTAT_ANNOUNCE_PORT` | 6382 | UDP listen port; 0 disables |
+| `ALLOWED_SOURCES` | `10.100.0.,192.168.1.,127.0.0.1,::1,172.` | Address prefixes accepted for announcements |
+| `SERVING_TIMEOUT_S` | 1800 | Upstream request timeout |
+| `MENTAT_SECRET` | unimplemented | Reserved: announcement signing |
+
+Unset, `MENTAT_DAEMONS` seeds the local daemon. Set empty, UDP is the only
+path. Compose cannot express empty, since `${VAR:-default}` reads it as unset.
+
+`ALLOWED_SOURCES` applies to both the datagram's source and the address it
+claims. `172.` covers bridge-networked clients, which keep a `172.x` source.
+
+`SERVING_TIMEOUT_S` caps one upstream request, and a non-streaming answer
+arrives when generation ends. A 198K prefill took 144.7s to first byte, so
+1800s leaves headroom. Lower it and long generations get cut first.
+
+`mentat-serve` also reads `POLL_INTERVAL_S`, `PROBE_INTERVAL_S`,
+`PROBE_TIMEOUT_S`, `PROBE_FRESH_S`, `MCP_TIMEOUT_S`, `TOOLS_TTL_S` and
+`DISCOVER_PEERS`. The defaults derive from each other: `PROBE_FRESH_S` is three
+probe intervals plus a timeout. Setting one alone makes groups flap.
+
+Unparsable `*_MS` values log `bad_env_ms` and use the default. Defaults live on
+`Cfg` in [config.rs](rust/src/config.rs).
+
+## Behavior
+
+- Registration retries forever.
+- Head election: lowest node id, `MENTAT_ELECTION_HOLD_DOWN_MS` hold-down.
+- Daemons mesh over `MENTAT_PEERS`; replicate events, exchange status.
+- Groups scope placement, `ray.nodes()`, `cluster_resources()`, and `ray status`.
+- TP=N takes N single-GPU agents or fewer multi-GPU ones.
+- A second driver for one group is rejected at `ray.init`.
+- Driver and all of a group's agents must reach the same daemon.
+- Actors run in their own process group; kills take the tree.
+- Actors are serial: a call issued after `run()` queues forever.
+- Agent link EOF: calls held, drained on reconnect; degrade at 30s, give up at 60s.
+- mentat-serve discovers daemons by UDP announcement, the `MENTAT_DAEMONS` seed, and mesh membership. Each watched daemon is polled on `/status` with `/events` held open.
+- Announcements are unsigned. Both datagram source and claimed address must match `ALLOWED_SOURCES`, and everything claimed is re-read over TCP and probed.
+- `/v1` routing gate: group has a running actor and its announced endpoint answers `/v1/models`, which is also the source of served model names. `/mcp` merge is ungated.
+- Engines are admitted as soon as their API answers, which can be during a model's self-test.
+- Shim covers only vLLM's audited surface. Anything else raises `AttributeError` naming the attribute.
+- The entrypoints pin `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1`. The legacy compiled-DAG surface is unimplemented.
+- Verified against vLLM `0.1.dev20051+g487ecf187`. After boot the only recurring Ray call is `ray.wait` every 5s.
+- `ray start --head`, `--object_store_memory`, `RAY_OBJECT_STORE_MEMORY`, `RAY_memory_monitor_refresh_ms` accepted and ignored.
+
+One daemon owns each group's state and the rest carry replicas. When views
+disagree, `mentat-serve` takes the one with more running actors.
+
+Actors get their own process group because vLLM workers fork helpers and a kill
+must take the tree. A survivor holds its memory outside `ps` RSS.
+
+Serial actors match real Ray. `run()` never returns for a vLLM worker, so any
+call after it queues forever. `call_pending_long` in the log means that
+happened.
+
+Announcements are unsigned because the control port already accepts
+unauthenticated connections from the same network, so signing datagrams adds no
+boundary. Every claim is re-read over TCP anyway. `MENTAT_SECRET` changes that
+when the control plane gets authentication.
+
+## Tests
+
+GPU-free, no hardware needed. See [tests/README.md](tests/README.md).
