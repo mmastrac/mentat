@@ -51,13 +51,17 @@ pub fn run(opts: AgentOpts) -> ! {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(crate::daemon::hostname);
-    let agent_id = format!("{}@{}", opts.group, container);
     let node_ip = std::env::var("MENTAT_NODE_IP")
         .ok()
         .or_else(|| std::env::var("VLLM_HOST_IP").ok())
         .filter(|s| !s.is_empty())
         .or_else(|| local_ip_toward(&opts.daemon_addr))
         .unwrap_or_default();
+    // The node ip is part of the identity: both ranks of a TP pair run a
+    // container named the same thing (glm53 on both boxes), and identical
+    // agent ids made their registrations replace each other in a loop on
+    // first deployment.
+    let agent_id = format!("{}@{}@{}", opts.group, container, node_ip);
     let gpus = detect_gpus();
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get() as u32)

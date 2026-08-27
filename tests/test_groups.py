@@ -18,8 +18,11 @@ from mentat_testlib import Cluster, fresh_shim, run_ok  # noqa: E402
 
 cluster = Cluster()
 # TP=4: four single-GPU agents on four "nodes" -- nothing may assume a pair.
+# Same container name on every node ON PURPOSE: that is the real deployment
+# shape (both ranks' containers are named glm53), and identical agent ids
+# once made the registrations replace each other in a loop.
 for i in range(4):
-    cluster.start_agent("tp4", gpus=1, container=f"t{i}", node_ip=f"127.0.0.{i + 1}")
+    cluster.start_agent("tp4", gpus=1, container="tp4c", node_ip=f"127.0.0.{i + 1}")
 cluster.wait_group_gpus("tp4", 4)
 
 ray = fresh_shim(cluster.address, "tp4")
