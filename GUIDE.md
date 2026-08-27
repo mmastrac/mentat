@@ -46,7 +46,13 @@ git clone https://github.com/mmastrac/mentat && cd mentat
 pip wheel --no-deps -w dist ./python
 ```
 
-Or build both in Docker, as the compose deployment does:
+Or pull the published images, which carry both binaries and the wheel:
+
+```bash
+docker pull mmastrac/mentat-artifacts:0.2.0
+```
+
+Or build them yourself, as the compose deployment does:
 
 ```bash
 VERSION=0.2.0 ./build.sh
@@ -79,8 +85,8 @@ Replace real Ray with the shim. The wheel installs as `ray` and claims the
 import name:
 
 ```dockerfile
-COPY --from=mentat-artifacts:0.2.0 /out/mentatd /usr/local/bin/mentatd
-COPY --from=mentat-artifacts:0.2.0 /out/mentatd-0.2.0-py3-none-any.whl /tmp/
+COPY --from=mmastrac/mentat-artifacts:0.2.0 /out/mentatd /usr/local/bin/mentatd
+COPY --from=mmastrac/mentat-artifacts:0.2.0 /out/mentatd-0.2.0-py3-none-any.whl /tmp/
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
  && pip install --no-deps /tmp/mentatd-0.2.0-py3-none-any.whl

@@ -16,9 +16,9 @@
 #   --target all        ->  mentat:<ver>
 #       Both binaries in one image, so `mentatd serve` resolves.
 #
-# Build all with ./build.sh. The serving images hard-reference
-# mentat-artifacts:<ver>, so build.sh must run on the same box first --
-# there is no registry in this fleet.
+# Build all with ./build.sh, or pull mmastrac/mentat-artifacts:<ver> from
+# Docker Hub. A model image referencing a local tag needs build.sh to have run
+# on that box first; one referencing the published tag does not.
 
 # Both binaries link statically against musl. The artifacts image is COPY'd
 # into model images this repo does not control, and a static binary needs

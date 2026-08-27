@@ -7,8 +7,8 @@ set -euo pipefail
 #   DOCKER=docker ./build.sh          # if your daemon needs no sudo
 #   REGISTRY=ghcr.io/mmastrac ./build.sh   # also tag for a registry
 #
-# Model images COPY --from mentat-artifacts:<ver>, so this must run on the
-# same box before those builds where there is no registry to pull from.
+# Model images COPY --from mentat-artifacts:<ver>. Run this before those
+# builds, or point them at mmastrac/mentat-artifacts:<ver> and skip it.
 cd "$(dirname "$0")"
 VERSION="${VERSION:-0.2.0}"
 DOCKER="${DOCKER:-sudo docker}"

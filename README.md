@@ -63,6 +63,12 @@ cargo install mentatd
 pip wheel --no-deps -w dist ./python
 ```
 
+Or take both from the published image:
+
+```
+docker pull mmastrac/mentatd:0.2.0
+```
+
 Run a daemon on each box, before any model container:
 
 ```
