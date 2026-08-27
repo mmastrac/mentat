@@ -300,7 +300,7 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
     match first.0.msg {
         Msg::Hello { .. } => client_conn(shared, reader, writer, peer_ip, first.0),
         Msg::AgentRegister { .. } => agent_conn(shared, reader, writer, peer_ip, first),
-        Msg::PeerHello { .. } => crate::mesh::accept_peer(shared, reader, writer, first),
+        Msg::PeerHello { .. } => crate::mesh::accept_peer(shared, reader, writer, peer_ip, first),
         other => {
             let _ = writer.send(
                 Msg::Err {

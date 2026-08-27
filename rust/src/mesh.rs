@@ -131,10 +131,15 @@ fn try_connect(
     } else {
         peer_control
     };
+    let link_ip = seed
+        .rsplit_once(':')
+        .map(|(h, _)| h.to_string())
+        .unwrap_or_else(|| seed.to_string());
     if !register_peer(
         shared,
         peer_id.clone(),
         peer_ip,
+        link_ip,
         control,
         peer_http,
         writer.clone(),
@@ -152,6 +157,7 @@ pub fn accept_peer(
     shared: SharedRef,
     reader: BufReader<TcpStream>,
     writer: FrameWriter,
+    link_ip: String,
     hello: (Frame, Vec<u8>),
 ) {
     let Msg::PeerHello {
@@ -189,6 +195,7 @@ pub fn accept_peer(
         &shared,
         node_id.clone(),
         node_ip,
+        link_ip,
         control_addr,
         http_port,
         writer.clone(),
@@ -205,6 +212,7 @@ fn register_peer(
     shared: &SharedRef,
     node_id: String,
     node_ip: String,
+    link_ip: String,
     control_addr: String,
     http_port: u16,
     writer: FrameWriter,
@@ -220,6 +228,7 @@ fn register_peer(
         PeerInfo {
             node_id: node_id.clone(),
             node_ip: node_ip.clone(),
+            link_ip,
             control_addr,
             http_port,
             writer,

@@ -182,6 +182,11 @@ pub struct Counters {
 pub struct PeerInfo {
     pub node_id: NodeId,
     pub node_ip: String,
+    /// The address this link actually uses: the socket's peer address
+    /// inbound, the address we dialed outbound. node_ip is what the peer
+    /// calls itself, which on a multi-homed box is a subnet a third party
+    /// may not route to. This one carried a working connection.
+    pub link_ip: String,
     pub control_addr: String,
     pub http_port: u16,
     pub writer: FrameWriter,

@@ -141,6 +141,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                 p.node_id.clone(),
                 json!({
                     "node_ip": p.node_ip,
+                    "link_ip": p.link_ip,
                     "control_addr": p.control_addr,
                     "http_port": p.http_port,
                     "alive": p.alive,

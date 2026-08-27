@@ -416,6 +416,9 @@ async fn udp_listener(shared: Arc<Shared>) {
     // Sources already complained about, so a 5s broadcast cannot flood the
     // log with the same misconfiguration.
     let mut warned: HashSet<String> = HashSet::new();
+    // Sources whose advertised address has already been reported as
+    // unroutable-looking, so the note lands once rather than every round.
+    let mut noted: HashSet<String> = HashSet::new();
     let universe = secret::universe();
     let mut buf = [0u8; 2048];
     loop {
@@ -509,7 +512,24 @@ async fn udp_listener(shared: Arc<Shared>) {
         if !source_allowed(&shared.cfg, &src_ip) || !source_allowed(&shared.cfg, http_ip) {
             continue;
         }
-        ensure_watched(&shared, http.to_string());
+        // Watch the address the datagram arrived from, not the one it
+        // advertises. The advertised IP is the daemon's cluster identity, so
+        // on a multi-homed box it names the subnet the cluster talks on --
+        // which a listener off that subnet cannot route to. The source
+        // address just carried a packet here, which is the proof that
+        // matters. The port still comes from the announcement, since only
+        // the daemon knows which port its HTTP server is on.
+        if http_ip != src_ip && noted.insert(src_ip.clone()) {
+            log(
+                "announce_addr_mismatch",
+                &[
+                    ("src", src_ip.clone()),
+                    ("advertised", http.to_string()),
+                    ("watching", format!("{src_ip}:{http_port}")),
+                ],
+            );
+        }
+        ensure_watched(&shared, format!("{src_ip}:{http_port}"));
     }
 }
 
@@ -523,11 +543,21 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) {
                 // one seed daemon reveals the rest. http_port 0 means the
                 // peer daemon predates the PeerHelloOk address echo.
                 for (_, p) in snap["peers"].as_object().into_iter().flatten() {
-                    if let (Some(ip), Some(port)) = (p["node_ip"].as_str(), p["http_port"].as_u64())
-                    {
-                        if port != 0 {
-                            ensure_watched(shared, format!("{ip}:{port}"));
-                        }
+                    let Some(port) = p["http_port"].as_u64() else {
+                        continue;
+                    };
+                    if port == 0 {
+                        continue;
+                    }
+                    // link_ip is the address that carried the mesh link, so
+                    // something reached the peer there. node_ip is only what
+                    // the peer calls itself. Old daemons send no link_ip.
+                    let ip = p["link_ip"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| p["node_ip"].as_str());
+                    if let Some(ip) = ip {
+                        ensure_watched(shared, format!("{ip}:{port}"));
                     }
                 }
             }
