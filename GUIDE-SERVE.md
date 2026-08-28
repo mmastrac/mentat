@@ -75,6 +75,12 @@ connections, uvicorn among them, and a probe landing on one gets an error
 indistinguishable from a dead endpoint. Without the retry a healthy model
 drops out of the route table.
 
+Only the probe and the status poll retry, because only they are idempotent
+GETs. A proxied request is sent once: retrying would re-send work the engine
+may already be doing, and would double the wait on one that accepts a
+connection and never answers. A client that fails fast can decide for
+itself.
+
 Requests split three ways. A known model routes and streams through, frame by
 frame with backpressure, so time to first token survives the hop. A model whose
 group exists but is ungated returns 503 with the reason. A name nothing claims

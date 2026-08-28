@@ -230,10 +230,11 @@ Router, port 6381:
 A `/v1` request naming a known but ungated model returns 503 with the gate it
 failed. An unknown name returns 404. Bodies over 128 MiB are refused.
 
-A request to an upstream, probe or proxy, is retried once on a fresh
-connection when the first attempt fails on an established one. A server that
-closed an idle keep-alive connection is indistinguishable from one that is
-down, and only the retry separates them. A refused connection is not retried.
+An idempotent GET to an upstream, meaning the probe and the status poll, is
+retried once on a fresh connection when the first attempt fails on an
+established one. A server that closed an idle keep-alive connection is
+indistinguishable from one that is down, and only the retry separates them. A
+refused connection gets no retry, and neither does any POST.
 
 ## Versioning
 

@@ -95,9 +95,23 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
     // and for a non-streaming call it is the whole generation, which is why
     // the default is generation-sized. The streamed body itself is unbounded.
     // A client hangup closes the upstream connection too.
+    let up = match build_up() {
+        Ok(r) => r,
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                &json!({"error": format!("building upstream request: {e}")}),
+            )
+        }
+    };
+    // Sent once. A retry would re-send work the upstream may already be
+    // doing, and would double the wait on an engine that accepts a
+    // connection and then never answers, which is a real failure here. A
+    // client that fails fast can decide for itself; one inside a doubled
+    // timeout can do nothing until it expires.
     let resp = match shared
         .client
-        .send(build_up, shared.cfg.serving_timeout)
+        .send_once(up, shared.cfg.serving_timeout)
         .await
     {
         Ok(r) => r,

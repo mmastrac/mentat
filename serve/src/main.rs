@@ -72,15 +72,39 @@ impl HttpClients {
         }
     }
 
+    /// Send `req` once, over the pool.
+    ///
+    /// Anything that is not an idempotent GET goes through here. A retry
+    /// would re-send a request the upstream may already be working on, and
+    /// on this hardware a partially-done prefill is minutes of compute and
+    /// the headroom that keeps the node alive.
+    async fn send_once(
+        &self,
+        req: Request<Full<Bytes>>,
+        t: Duration,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, String> {
+        tokio::time::timeout(t, self.pooled.request(req))
+            .await
+            .map_err(|_| format!("timeout after {:.1}s", t.as_secs_f64()))?
+            .map_err(|e| e.to_string())
+    }
+
     /// Send `req`, retrying once on a fresh connection if the first attempt
     /// established a connection and then failed on it.
+    ///
+    /// Only for idempotent GETs: the probe and the status poll, whose only
+    /// consumer is the health gate. They are synthetic, short, and safe to
+    /// repeat, which is what makes the retry obviously worth it there and
+    /// not elsewhere. A proxied completion may legitimately run for minutes,
+    /// and a second timeout window is a user-visible hang with nothing to
+    /// show for it -- a client that fails fast can decide for itself, one
+    /// inside a doubled timeout can do nothing until it expires.
     ///
     /// `is_connect` is the discriminator. A refused connection never got
     /// anywhere, so a retry would only fail the same way. Anything else got
     /// far enough to have been a live socket, which is the case worth a
     /// second look. The request is rebuilt rather than cloned because it was
-    /// consumed, and it is safe to send twice: a SendRequest failure means
-    /// the server never saw the first one.
+    /// consumed.
     async fn send(
         &self,
         build: impl Fn() -> Result<Request<Full<Bytes>>, String>,
@@ -848,19 +872,13 @@ pub async fn http_post_json(
     body: &Value,
     t: Duration,
 ) -> Result<Value, String> {
-    http_json(
-        client,
-        || {
-            Request::builder()
-                .method(Method::POST)
-                .uri(url)
-                .header(hyper::header::CONTENT_TYPE, "application/json")
-                .body(Full::new(Bytes::from(body.to_string())))
-                .map_err(|e| e.to_string())
-        },
-        t,
-    )
-    .await
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(url)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(body.to_string())))
+        .map_err(|e| e.to_string())?;
+    read_json(client.send_once(req, t).await?, t).await
 }
 
 async fn http_json(
@@ -868,7 +886,13 @@ async fn http_json(
     build: impl Fn() -> Result<Request<Full<Bytes>>, String>,
     t: Duration,
 ) -> Result<Value, String> {
-    let resp = client.send(build, t).await?;
+    read_json(client.send(build, t).await?, t).await
+}
+
+async fn read_json(
+    resp: hyper::Response<hyper::body::Incoming>,
+    t: Duration,
+) -> Result<Value, String> {
     let status = resp.status();
     let body = tokio::time::timeout(t, resp.into_body().collect())
         .await
@@ -1075,6 +1099,28 @@ mod tests {
         assert!(
             second.is_ok(),
             "probe over a stale pooled connection: {second:?}"
+        );
+    }
+
+    /// A POST is not replayed. Re-sending one would duplicate work the
+    /// upstream may already be doing: an MCP tools/call has side effects, and
+    /// a completion is minutes of compute on this hardware.
+    #[tokio::test]
+    async fn a_post_is_not_retried() {
+        let addr = serves_once_per_connection().await;
+        let url = format!("http://{addr}/mcp");
+        let t = Duration::from_secs(5);
+        let clients = HttpClients::new();
+        let body = serde_json::json!({"jsonrpc": "2.0", "method": "tools/list"});
+
+        assert!(
+            http_post_json(&clients, &url, &body, t).await.is_ok(),
+            "first post"
+        );
+        let second = http_post_json(&clients, &url, &body, t).await;
+        assert!(
+            second.is_err(),
+            "a POST over a stale connection fails rather than replaying: {second:?}"
         );
     }
 
