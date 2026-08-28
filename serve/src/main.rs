@@ -43,6 +43,67 @@ pub type BoxedBody =
     http_body_util::combinators::BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 pub type HttpClient = Client<HttpConnector, Full<Bytes>>;
 
+/// A pooled client and one that never reuses a connection.
+///
+/// Keep-alive is worth having: the prober and the status poller hit the same
+/// hosts every couple of seconds. It also introduces one failure the pool
+/// cannot see. A server may close an idle connection at any time, and if it
+/// does so between checkout and send, hyper reports a SendRequest failure
+/// that reads exactly like a dead endpoint. uvicorn closes idle connections
+/// by default, so a probe interval longer than its keep-alive timeout meets
+/// this on every round: the endpoint serves perfectly and the probe fails
+/// perfectly.
+///
+/// `fresh` exists to answer that. One retry over a new connection separates
+/// a stale socket from an endpoint that is actually gone.
+#[derive(Clone)]
+pub struct HttpClients {
+    pooled: HttpClient,
+    fresh: HttpClient,
+}
+
+impl HttpClients {
+    fn new() -> Self {
+        HttpClients {
+            pooled: Client::builder(TokioExecutor::new()).build_http(),
+            fresh: Client::builder(TokioExecutor::new())
+                .pool_max_idle_per_host(0)
+                .build_http(),
+        }
+    }
+
+    /// Send `req`, retrying once on a fresh connection if the first attempt
+    /// established a connection and then failed on it.
+    ///
+    /// `is_connect` is the discriminator. A refused connection never got
+    /// anywhere, so a retry would only fail the same way. Anything else got
+    /// far enough to have been a live socket, which is the case worth a
+    /// second look. The request is rebuilt rather than cloned because it was
+    /// consumed, and it is safe to send twice: a SendRequest failure means
+    /// the server never saw the first one.
+    async fn send(
+        &self,
+        build: impl Fn() -> Result<Request<Full<Bytes>>, String>,
+        t: Duration,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, String> {
+        let first = tokio::time::timeout(t, self.pooled.request(build()?))
+            .await
+            .map_err(|_| format!("timeout after {:.1}s", t.as_secs_f64()))?;
+        let e = match first {
+            Ok(r) => return Ok(r),
+            Err(e) if e.is_connect() => return Err(e.to_string()),
+            Err(e) => e,
+        };
+        match tokio::time::timeout(t, self.fresh.request(build()?)).await {
+            Err(_) => Err(format!("timeout after {:.1}s", t.as_secs_f64())),
+            Ok(Ok(r)) => Ok(r),
+            // Report the retry's error: it is the one with no stale
+            // connection behind it.
+            Ok(Err(retry)) => Err(format!("{retry} (first attempt: {e})")),
+        }
+    }
+}
+
 pub struct Config {
     pub daemons: Vec<String>,
     pub port: u16,
@@ -136,7 +197,7 @@ pub struct ProbeResult {
 
 pub struct Shared {
     pub cfg: Config,
-    pub client: HttpClient,
+    pub client: HttpClients,
     /// One entry per daemon HTTP address being watched.
     pub daemons: Mutex<HashMap<String, DaemonView>>,
     pub watched: Mutex<HashSet<String>>,
@@ -766,39 +827,48 @@ pub fn json_response(status: StatusCode, v: &Value) -> Response<BoxedBody> {
         .expect("static response")
 }
 
-pub async fn http_get_json(client: &HttpClient, url: &str, t: Duration) -> Result<Value, String> {
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(url)
-        .body(Full::new(Bytes::new()))
-        .map_err(|e| e.to_string())?;
-    http_json(client, req, t).await
+pub async fn http_get_json(client: &HttpClients, url: &str, t: Duration) -> Result<Value, String> {
+    http_json(
+        client,
+        || {
+            Request::builder()
+                .method(Method::GET)
+                .uri(url)
+                .body(Full::new(Bytes::new()))
+                .map_err(|e| e.to_string())
+        },
+        t,
+    )
+    .await
 }
 
 pub async fn http_post_json(
-    client: &HttpClient,
+    client: &HttpClients,
     url: &str,
     body: &Value,
     t: Duration,
 ) -> Result<Value, String> {
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri(url)
-        .header(hyper::header::CONTENT_TYPE, "application/json")
-        .body(Full::new(Bytes::from(body.to_string())))
-        .map_err(|e| e.to_string())?;
-    http_json(client, req, t).await
+    http_json(
+        client,
+        || {
+            Request::builder()
+                .method(Method::POST)
+                .uri(url)
+                .header(hyper::header::CONTENT_TYPE, "application/json")
+                .body(Full::new(Bytes::from(body.to_string())))
+                .map_err(|e| e.to_string())
+        },
+        t,
+    )
+    .await
 }
 
 async fn http_json(
-    client: &HttpClient,
-    req: Request<Full<Bytes>>,
+    client: &HttpClients,
+    build: impl Fn() -> Result<Request<Full<Bytes>>, String>,
     t: Duration,
 ) -> Result<Value, String> {
-    let resp = tokio::time::timeout(t, client.request(req))
-        .await
-        .map_err(|_| format!("timeout after {:.1}s", t.as_secs_f64()))?
-        .map_err(|e| e.to_string())?;
+    let resp = client.send(build, t).await?;
     let status = resp.status();
     let body = tokio::time::timeout(t, resp.into_body().collect())
         .await
@@ -862,7 +932,7 @@ async fn main() {
 
     let cfg = Config::from_env();
     let shared = Arc::new(Shared {
-        client: Client::builder(TokioExecutor::new()).build_http(),
+        client: HttpClients::new(),
         daemons: Mutex::new(HashMap::new()),
         watched: Mutex::new(HashSet::new()),
         probes: Mutex::new(HashMap::new()),
@@ -922,6 +992,107 @@ mod tests {
             (u32::from(Ipv4Addr::new(10, 0, 0, 0)), mask),
             (u32::from(Ipv4Addr::new(192, 168, 1, 0)), mask),
         ]
+    }
+
+    /// A server that serves one request per connection and then abandons the
+    /// socket without closing it politely, which is the state an idle-timed-out
+    /// keep-alive connection is in when a client still holds it: the client
+    /// believes the connection is usable and the server will not serve it.
+    async fn serves_once_per_connection() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    if sock.read(&mut buf).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let body = b"{\"data\":[]}";
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.flush().await;
+                    let _ = sock.write_all(body).await;
+                    let _ = sock.flush().await;
+                    // A second request on this connection goes unanswered.
+                    let _ = sock.read(&mut buf).await;
+                });
+            }
+        });
+        addr
+    }
+
+    fn get(url: &str) -> Request<Full<Bytes>> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(url)
+            .body(Full::new(Bytes::new()))
+            .unwrap()
+    }
+
+    /// Proof the case below is real: with no retry, reusing the pooled
+    /// connection fails, and not as a connect error. This is the failure that
+    /// drops a healthy group out of the route table.
+    #[tokio::test]
+    async fn without_a_retry_a_reused_connection_fails() {
+        let addr = serves_once_per_connection().await;
+        let url = format!("http://{addr}/v1/models");
+        let pooled: HttpClient = Client::builder(TokioExecutor::new()).build_http();
+
+        let first = pooled.request(get(&url)).await;
+        assert!(first.is_ok(), "first request: {first:?}");
+        drop(first.unwrap().into_body());
+        let second = pooled.request(get(&url)).await;
+        let e = second
+            .err()
+            .expect("reusing the dead connection should fail");
+        assert!(
+            !e.is_connect(),
+            "the endpoint is up, so this must not read as a connect failure: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_pooled_connection_retries_instead_of_failing() {
+        let addr = serves_once_per_connection().await;
+        let url = format!("http://{addr}/v1/models");
+        let t = Duration::from_secs(5);
+        let clients = HttpClients::new();
+
+        assert!(
+            http_get_json(&clients, &url, t).await.is_ok(),
+            "first probe"
+        );
+        let second = http_get_json(&clients, &url, t).await;
+        assert!(
+            second.is_ok(),
+            "probe over a stale pooled connection: {second:?}"
+        );
+    }
+
+    /// The retry must not make everything look healthy. An endpoint that is
+    /// actually gone still fails, so the health gate still closes.
+    #[tokio::test]
+    async fn a_dead_endpoint_still_fails() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l);
+        let clients = HttpClients::new();
+        let r = http_get_json(
+            &clients,
+            &format!("http://{addr}/v1/models"),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(r.is_err(), "a closed port must still fail");
     }
 
     #[test]

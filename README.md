@@ -66,7 +66,7 @@ pip wheel --no-deps -w dist ./python
 Or take both from the published image:
 
 ```
-docker pull mmastrac/mentatd:0.2.0
+docker pull mmastrac/mentatd:0.2.1
 ```
 
 Run a daemon on each box, before any model container:
@@ -81,7 +81,7 @@ claims the import name:
 ```
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
- && pip install --no-deps /tmp/mentatd-0.2.0-py3-none-any.whl
+ && pip install --no-deps /tmp/mentatd-0.2.1-py3-none-any.whl
 ```
 
 The entrypoint keeps its `ray start` and `ray status` calls. Export first:
@@ -231,9 +231,9 @@ wrong. Its order is a preference: list the fast link first and a consumer
 that can reach both takes it. An entry may carry tags for a consumer to route
 on, `enp1s0f0np0=connectx+rdma,eno1=lan`, which nothing reads yet.
 
-A listener watches the address a datagram arrived from, not the one it
-advertises: `node_ip` is the node's cluster identity, so on a multi-homed box
-it names a subnet the listener may not route to. [PROTOCOL.md](PROTOCOL.md)
+A listener watches the address a datagram arrived from. `node_ip` is the
+node's cluster identity, so on a multi-homed box it names a subnet the
+listener may not route to. [PROTOCOL.md](PROTOCOL.md)
 has the selection order.
 
 ## Agent / container env vars

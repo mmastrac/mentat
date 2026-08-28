@@ -181,7 +181,7 @@ A daemon reports three kinds of address. They are not interchangeable:
 | `node_ip` | What the node calls itself. Its cluster identity |
 | `link_ip` | The address a mesh link uses: the socket peer address inbound, the dialed address outbound |
 | `addrs` | Every address the node answers on, most preferred first |
-| `addr_tags` | Operator tags per address. Carried, never interpreted |
+| `addr_tags` | Operator tags per address. Carried for consumers to read |
 
 `node_ip` is not an address a third party can necessarily reach. On a
 multi-homed node it names the subnet the cluster talks on, which a host off
@@ -229,6 +229,11 @@ Router, port 6381:
 
 A `/v1` request naming a known but ungated model returns 503 with the gate it
 failed. An unknown name returns 404. Bodies over 128 MiB are refused.
+
+A request to an upstream, probe or proxy, is retried once on a fresh
+connection when the first attempt fails on an established one. A server that
+closed an idle keep-alive connection is indistinguishable from one that is
+down, and only the retry separates them. A refused connection is not retried.
 
 ## Versioning
 

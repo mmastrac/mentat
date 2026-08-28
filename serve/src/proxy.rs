@@ -74,25 +74,20 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
     let tail = tail.strip_prefix("/v1").unwrap_or(tail);
     let url = format!("{}{}", base.trim_end_matches('/'), tail);
 
-    let mut up = Request::builder().method(Method::POST).uri(&url).header(
-        CONTENT_TYPE,
-        parts
-            .headers
-            .get(CONTENT_TYPE)
-            .cloned()
-            .unwrap_or_else(|| hyper::header::HeaderValue::from_static("application/json")),
-    );
-    if let Some(a) = parts.headers.get(ACCEPT) {
-        up = up.header(ACCEPT, a.clone());
-    }
-    let up = match up.body(Full::new(bytes)) {
-        Ok(r) => r,
-        Err(e) => {
-            return json_response(
-                StatusCode::BAD_GATEWAY,
-                &json!({"error": format!("building upstream request: {e}")}),
-            )
+    // Rebuilt per attempt rather than cloned, since the retry needs its own.
+    let build_up = || {
+        let mut up = Request::builder().method(Method::POST).uri(&url).header(
+            CONTENT_TYPE,
+            parts
+                .headers
+                .get(CONTENT_TYPE)
+                .cloned()
+                .unwrap_or_else(|| hyper::header::HeaderValue::from_static("application/json")),
+        );
+        if let Some(a) = parts.headers.get(ACCEPT) {
+            up = up.header(ACCEPT, a.clone());
         }
+        up.body(Full::new(bytes.clone())).map_err(|e| e.to_string())
     };
 
     // The timeout bounds time to response headers. For a stream that is
@@ -100,25 +95,28 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
     // and for a non-streaming call it is the whole generation, which is why
     // the default is generation-sized. The streamed body itself is unbounded.
     // A client hangup closes the upstream connection too.
-    let resp =
-        match tokio::time::timeout(shared.cfg.serving_timeout, shared.client.request(up)).await {
-            Err(_) => {
-                return json_response(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    &json!({"error": format!(
-                        "{group} gave no response within {:.0}s",
-                        shared.cfg.serving_timeout.as_secs_f64()
-                    )}),
-                )
-            }
-            Ok(Err(e)) => {
-                return json_response(
-                    StatusCode::BAD_GATEWAY,
-                    &json!({"error": format!("{group} upstream error: {e}")}),
-                )
-            }
-            Ok(Ok(r)) => r,
-        };
+    let resp = match shared
+        .client
+        .send(build_up, shared.cfg.serving_timeout)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.starts_with("timeout after") => {
+            return json_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                &json!({"error": format!(
+                    "{group} gave no response within {:.0}s",
+                    shared.cfg.serving_timeout.as_secs_f64()
+                )}),
+            )
+        }
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                &json!({"error": format!("{group} upstream error: {e}")}),
+            )
+        }
+    };
 
     let mut builder = Response::builder().status(resp.status());
     if let Some(ct) = resp.headers().get(CONTENT_TYPE) {

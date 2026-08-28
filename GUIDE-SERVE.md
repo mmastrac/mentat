@@ -69,6 +69,12 @@ during the self-test window.
 and, when false, a `why_not` naming the failed gate: no endpoint, no running
 actors, unprobed, probe failed, or probe stale.
 
+A probe that fails on a reused connection is retried once on a fresh one
+before the group is marked unhealthy. Servers close idle keep-alive
+connections, uvicorn among them, and a probe landing on one gets an error
+indistinguishable from a dead endpoint. Without the retry a healthy model
+drops out of the route table.
+
 Requests split three ways. A known model routes and streams through, frame by
 frame with backpressure, so time to first token survives the hop. A model whose
 group exists but is ungated returns 503 with the reason. A name nothing claims
