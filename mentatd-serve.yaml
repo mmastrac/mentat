@@ -23,7 +23,7 @@
 # or wedged.
 services:
   mentatd-serve:
-    image: ${IMAGE:-mentatd-serve:0.2.2}
+    image: ${IMAGE:-mentatd-serve:0.2.3}
     container_name: mentatd-serve
     # Host networking: the announced endpoints live on host/cluster
     # addresses (10.100.0.x on the pair) that bridge networking cannot reach.

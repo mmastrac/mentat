@@ -166,8 +166,10 @@ Receiver rules, in order:
 2. With a key configured, require version 2 and a valid signature. Reject
    version 1. Without a key, accept version 1 and drop version 2.
 3. Check `t` and `seq`.
-4. Check the source address and the advertised address against
-   `ALLOWED_SOURCES`.
+4. Check the source address against `ALLOWED_SOURCES`, and each advertised
+   address before choosing it. The address the announcement calls its own is
+   not checked, because nothing acts on it. A rejected source is logged once,
+   naming the configured prefixes.
 
 An announcement is a hint. It adds one address to watch, and every claim in
 it is re-read over TCP and probed before it affects routing.

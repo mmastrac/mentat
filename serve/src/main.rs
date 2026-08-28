@@ -598,8 +598,26 @@ async fn udp_listener(shared: Arc<Shared>) {
         if http_port.parse::<u16>().map(|p| p == 0).unwrap_or(true) {
             continue;
         }
+        // ALLOWED_SOURCES gates what gets acted on, and nothing else. The
+        // source address can become the address watched, so it is checked
+        // here; so is any advertised address before it is chosen, further
+        // down. The advertised address itself is not, because nothing acts
+        // on it any more -- gating a field the router only reads would fail
+        // discovery closed over a subnet the operator has no reason to be
+        // thinking about, and say nothing about why.
         let src_ip = src.ip().to_string();
-        if !source_allowed(&shared.cfg, &src_ip) || !source_allowed(&shared.cfg, http_ip) {
+        if !source_allowed(&shared.cfg, &src_ip) {
+            // Named once per source. A dropped announcement is otherwise an
+            // empty cluster with no stated cause.
+            if warned.insert(src_ip.clone()) {
+                log(
+                    "announce_source_not_allowed",
+                    &[
+                        ("src", src_ip.clone()),
+                        ("allowed_sources", shared.cfg.allowed_sources.join(",")),
+                    ],
+                );
+            }
             continue;
         }
         // One watch per node. A node with two links broadcasts on both, and
@@ -619,16 +637,12 @@ async fn udp_listener(shared: Arc<Shared>) {
             .filter_map(|a| a.as_str())
             .map(str::to_string)
             .collect();
-        // An advertised address is a claim, so it passes the same allowlist
-        // the source did. Without this an announcement could name any host
-        // and have this process connect to it.
-        let subnets = local_subnets();
-        let pick = ranked
-            .iter()
-            .filter(|a| source_allowed(&shared.cfg, a))
-            .find(|a| on_local_subnet(a, &subnets))
-            .cloned()
-            .unwrap_or_else(|| src_ip.clone());
+        let pick = announce_address(
+            &ranked,
+            &src_ip,
+            &shared.cfg.allowed_sources,
+            &local_subnets(),
+        );
         if pick != src_ip && noted.insert(src_ip.clone()) {
             log(
                 "announce_preferred_addr",
@@ -679,6 +693,31 @@ fn on_local_subnet(ip: &str, subnets: &[(u32, u32)]) -> bool {
     };
     let a = u32::from(v4);
     subnets.iter().any(|(net, mask)| a & mask == *net)
+}
+
+/// Which address to watch for a node that just announced itself.
+///
+/// The source address is proof: it carried this datagram here. An advertised
+/// address is only a claim, so it wins only when the node ranked it higher
+/// and this box is on its subnet, and only after passing the same allowlist
+/// the source did -- otherwise an announcement could name any host and have
+/// this process connect to it.
+///
+/// The address the announcement calls its own is not consulted. Nothing acts
+/// on it, so gating it would fail discovery closed over a subnet that decides
+/// nothing.
+fn announce_address(
+    ranked: &[String],
+    src_ip: &str,
+    allowed: &[String],
+    subnets: &[(u32, u32)],
+) -> String {
+    ranked
+        .iter()
+        .filter(|a| prefix_allowed(allowed, a))
+        .find(|a| on_local_subnet(a, subnets))
+        .cloned()
+        .unwrap_or_else(|| src_ip.to_string())
 }
 
 /// Which address to reach a peer on, given what a daemon reports about it.
@@ -1099,6 +1138,38 @@ mod tests {
         assert!(
             second.is_ok(),
             "probe over a stale pooled connection: {second:?}"
+        );
+    }
+
+    /// The reported trap: ALLOWED_SOURCES lists where packets come from, the
+    /// node calls itself something on another subnet, and discovery used to
+    /// die on a field nothing acts on. The source still carries the day.
+    #[test]
+    fn an_unlisted_identity_subnet_does_not_block_discovery() {
+        let allowed = vec!["192.168.1.".to_string()];
+        let subnets = subnets();
+        // Nothing advertised is both allowed and local, so the source stands.
+        assert_eq!(
+            announce_address(&["10.100.0.2".into()], "192.168.1.77", &allowed, &subnets),
+            "192.168.1.77"
+        );
+    }
+
+    /// An advertised address still passes the allowlist before it is used,
+    /// since this one does get connected to.
+    #[test]
+    fn an_advertised_candidate_is_still_gated() {
+        let subnets = subnets();
+        let allowed = vec!["10.0.0.".to_string()];
+        assert_eq!(
+            announce_address(&["10.0.0.7".into()], "10.0.0.1", &allowed, &subnets),
+            "10.0.0.7",
+            "allowed and local, so it is preferred"
+        );
+        assert_eq!(
+            announce_address(&["192.168.1.13".into()], "10.0.0.1", &allowed, &subnets),
+            "10.0.0.1",
+            "local but not allowed, so the source stands"
         );
     }
 

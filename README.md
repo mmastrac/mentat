@@ -66,7 +66,7 @@ pip wheel --no-deps -w dist ./python
 Or take both from the published image:
 
 ```
-docker pull mmastrac/mentatd:0.2.2
+docker pull mmastrac/mentatd:0.2.3
 ```
 
 Run a daemon on each box, before any model container:
@@ -81,7 +81,7 @@ claims the import name:
 ```
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
- && pip install --no-deps /tmp/mentatd-0.2.2-py3-none-any.whl
+ && pip install --no-deps /tmp/mentatd-0.2.3-py3-none-any.whl
 ```
 
 The entrypoint keeps its `ray start` and `ray status` calls. Export first:
@@ -293,8 +293,12 @@ Set on each actor process: `MENTAT_ACTOR_ID`, `MENTAT_NODE_ID`,
 Unset, `MENTAT_DAEMONS` seeds the local daemon. Set empty, UDP is the only
 path. Compose cannot express empty, since `${VAR:-default}` reads it as unset.
 
-`ALLOWED_SOURCES` applies to both the datagram's source and the address it
-claims. `172.` covers bridge-networked clients, which keep a `172.x` source.
+`ALLOWED_SOURCES` applies to the datagram's source and to any advertised
+address before it is watched, which is to say to every address acted on. The
+address a node calls its own is not checked, since nothing acts on it. `172.`
+covers bridge-networked clients, which keep a `172.x` source. A rejected
+source logs `announce_source_not_allowed` once, naming the prefixes in
+force.
 
 Set `MENTAT_SECRET` on the daemons and here alike. A keyed router takes signed
 announcements only, so a half-applied rollout stops discovery until the seed

@@ -21,7 +21,7 @@
 # ordering only delays them, never kills them).
 services:
   mentatd:
-    image: ${IMAGE:-mentatd:0.2.2}
+    image: ${IMAGE:-mentatd:0.2.3}
     container_name: mentatd
     # Host networking on purpose: the control port must be reachable both at
     # 127.0.0.1:6379 (agents in host-network model containers) and on the

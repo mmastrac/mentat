@@ -76,10 +76,9 @@ indistinguishable from a dead endpoint. Without the retry a healthy model
 drops out of the route table.
 
 Only the probe and the status poll retry, because only they are idempotent
-GETs. A proxied request is sent once: retrying would re-send work the engine
-may already be doing, and would double the wait on one that accepts a
-connection and never answers. A client that fails fast can decide for
-itself.
+GETs. A proxied request is sent once: retrying would re-send work the engine may
+already be doing, and would double the wait on one that accepts a connection
+then stays silent. A client that fails fast can decide for itself.
 
 Requests split three ways. A known model routes and streams through, frame by
 frame with backpressure, so time to first token survives the hop. A model whose
@@ -114,9 +113,12 @@ curl -s http://<box>:6381/status.json | jq . # and why, per group
 answer only arrives when generation ends. Lower it and long generations get cut
 before any hung request does.
 
-`ALLOWED_SOURCES` applies to both an announcement's source address and the
-address it claims. The default covers the local subnets, loopback and the
-docker bridge ranges, since a bridge-networked client keeps a `172.x` source.
+`ALLOWED_SOURCES` applies to an announcement's source address and to any
+address it advertises before that address is watched. It does not apply to
+the address a node calls its own, which nothing acts on. The default covers
+the local subnets, loopback and the docker bridge ranges, since a
+bridge-networked client keeps a `172.x` source. A rejected source logs
+`announce_source_not_allowed` once.
 
 `MENTAT_SECRET` must match the daemons'. `MENTAT_UNIVERSE` (default
 `default`) separates clusters sharing a broadcast domain, dropping foreign
