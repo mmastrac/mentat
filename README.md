@@ -66,7 +66,7 @@ pip wheel --no-deps -w dist ./python
 Or take both from the published image:
 
 ```
-docker pull mmastrac/mentatd:0.2.3
+docker pull mmastrac/mentatd:0.2.4
 ```
 
 Run a daemon on each box, before any model container:
@@ -81,7 +81,7 @@ claims the import name:
 ```
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
- && pip install --no-deps /tmp/mentatd-0.2.3-py3-none-any.whl
+ && pip install --no-deps /tmp/mentatd-0.2.4-py3-none-any.whl
 ```
 
 The entrypoint keeps its `ray start` and `ray status` calls. Export first:
@@ -158,6 +158,7 @@ holds the socket open and re-reads `/status` on any event.
 ## mentatd-serve HTTP (6381)
 
 - `/v1` — OpenAI-compatible, routed by model name, streaming passed through
+- any other POST — routed by model name too, for root-level endpoints like `/tokenize`
 - `/mcp` — merged per-container MCP, tools prefixed `<group>__`, plus native `serve_status`
 - `/status.json` — route table and per-group health
 - `/v1/models` — currently routable models

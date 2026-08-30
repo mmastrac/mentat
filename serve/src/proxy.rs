@@ -17,6 +17,25 @@ use crate::{json_response, model_table, not_ready, BoxedBody, Shared};
 /// client bug from ballooning this process.
 const MAX_BODY: usize = 128 * 1024 * 1024;
 
+/// Where a request path lands on the upstream.
+///
+/// The announced base ends in `/v1`, since that is what an OpenAI client is
+/// handed. vLLM serves some endpoints there and others at the root:
+/// `/tokenize` and `/detokenize` are root-level, so concatenating them onto
+/// the base would ask for `/v1/tokenize` and get a 404. A root-level path is
+/// resolved against the base with its `/v1` removed.
+///
+/// A base that does not end in `/v1` is used as given, since then it is
+/// already the root a caller meant.
+fn upstream_url(base: &str, tail: &str) -> String {
+    let base = base.trim_end_matches('/');
+    match (base.strip_suffix("/v1"), tail.strip_prefix("/v1")) {
+        (Some(_), Some(rest)) => format!("{base}{rest}"),
+        (Some(root), None) => format!("{root}{tail}"),
+        (None, _) => format!("{base}{tail}"),
+    }
+}
+
 pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<BoxedBody> {
     let (parts, body) = req.into_parts();
     let bytes = match Limited::new(body, MAX_BODY).collect().await {
@@ -71,8 +90,7 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or_else(|| parts.uri.path());
-    let tail = tail.strip_prefix("/v1").unwrap_or(tail);
-    let url = format!("{}{}", base.trim_end_matches('/'), tail);
+    let url = upstream_url(base, tail);
 
     // Rebuilt per attempt rather than cloned, since the retry needs its own.
     let build_up = || {
@@ -146,5 +164,59 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
             StatusCode::BAD_GATEWAY,
             &json!({"error": format!("relaying upstream response: {e}")}),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upstream_url;
+
+    /// vLLM splits its endpoints: chat and completions live under /v1, while
+    /// tokenize and detokenize are at the root. The announced base is the /v1
+    /// one, so the root-level paths have to climb out of it.
+    #[test]
+    fn root_and_v1_endpoints_both_resolve() {
+        let base = "http://10.0.0.1:8000/v1";
+        assert_eq!(
+            upstream_url(base, "/v1/chat/completions"),
+            "http://10.0.0.1:8000/v1/chat/completions"
+        );
+        assert_eq!(
+            upstream_url(base, "/tokenize"),
+            "http://10.0.0.1:8000/tokenize"
+        );
+        assert_eq!(
+            upstream_url(base, "/detokenize"),
+            "http://10.0.0.1:8000/detokenize"
+        );
+    }
+
+    #[test]
+    fn a_query_string_survives() {
+        assert_eq!(
+            upstream_url("http://h:8000/v1", "/v1/completions?stream=true"),
+            "http://h:8000/v1/completions?stream=true"
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_double() {
+        assert_eq!(
+            upstream_url("http://h:8000/v1/", "/tokenize"),
+            "http://h:8000/tokenize"
+        );
+    }
+
+    /// A base announced without /v1 is already the root.
+    #[test]
+    fn a_base_without_v1_is_used_as_given() {
+        assert_eq!(
+            upstream_url("http://h:8000", "/v1/chat/completions"),
+            "http://h:8000/v1/chat/completions"
+        );
+        assert_eq!(
+            upstream_url("http://h:8000", "/tokenize"),
+            "http://h:8000/tokenize"
+        );
     }
 }

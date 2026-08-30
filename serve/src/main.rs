@@ -979,7 +979,12 @@ async fn handle(
             json_response(StatusCode::OK, &json!({"object": "list", "data": data}))
         }
         (Method::POST, "/mcp") => mcp::handle(&shared, req).await,
-        (Method::POST, p) if p.starts_with("/v1/") => proxy::forward(&shared, req).await,
+        // Anything else posted is routed by the model in its body. vLLM's
+        // endpoint set moves between versions and a pinned list would rot,
+        // so the contract is the one the router actually implements: a body
+        // naming a model goes to whoever serves it. A body without one is
+        // rejected there.
+        (Method::POST, _) => proxy::forward(&shared, req).await,
         _ => json_response(StatusCode::NOT_FOUND, &json!({"error": "not found"})),
     }
 }
@@ -1112,7 +1117,12 @@ mod tests {
 
         let first = pooled.request(get(&url)).await;
         assert!(first.is_ok(), "first request: {first:?}");
-        drop(first.unwrap().into_body());
+        let _ = first.unwrap().into_body().collect().await;
+        // hyper returns a connection to the pool asynchronously once the
+        // body is done. Without this wait the next call may open a new
+        // connection, so the reuse under test would not happen and the
+        // assertion below would hold for the wrong reason.
+        tokio::time::sleep(Duration::from_millis(150)).await;
         let second = pooled.request(get(&url)).await;
         let e = second
             .err()
@@ -1134,6 +1144,11 @@ mod tests {
             http_get_json(&clients, &url, t).await.is_ok(),
             "first probe"
         );
+        // hyper returns a connection to the pool asynchronously once the
+        // body is done. Without this wait the next call may open a new
+        // connection, so the reuse under test would not happen and the
+        // assertion below would hold for the wrong reason.
+        tokio::time::sleep(Duration::from_millis(150)).await;
         let second = http_get_json(&clients, &url, t).await;
         assert!(
             second.is_ok(),
@@ -1188,6 +1203,11 @@ mod tests {
             http_post_json(&clients, &url, &body, t).await.is_ok(),
             "first post"
         );
+        // hyper returns a connection to the pool asynchronously once the
+        // body is done. Without this wait the next call may open a new
+        // connection, so the reuse under test would not happen and the
+        // assertion below would hold for the wrong reason.
+        tokio::time::sleep(Duration::from_millis(150)).await;
         let second = http_post_json(&clients, &url, &body, t).await;
         assert!(
             second.is_err(),

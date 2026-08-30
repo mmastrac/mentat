@@ -80,6 +80,17 @@ GETs. A proxied request is sent once: retrying would re-send work the engine may
 already be doing, and would double the wait on one that accepts a connection
 then stays silent. A client that fails fast can decide for itself.
 
+Any POST carrying a `model` is routed to whoever serves it, so `/v1` and the
+root-level endpoints both work: `/v1/chat/completions`, `/tokenize`,
+`/detokenize` and whatever else the engine exposes. vLLM's endpoint set moves
+between versions, and the router follows the contract it can actually check
+rather than a list that would go stale. A body with no `model` is refused,
+which is what the management endpoints get.
+
+The announced base ends in `/v1`, and a root-level path is resolved against
+it with the `/v1` removed. Appending `/tokenize` to the base would ask for
+`/v1/tokenize`, which does not exist.
+
 Requests split three ways. A known model routes and streams through, frame by
 frame with backpressure, so time to first token survives the hop. A model whose
 group exists but is ungated returns 503 with the reason. A name nothing claims

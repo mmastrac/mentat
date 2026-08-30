@@ -4,7 +4,7 @@
 # only this binary pays for it.
 [package]
 name = "mentatd-serve"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "OpenAI-compatible router and merged MCP for a mentat cluster"
 license = "MIT OR Apache-2.0"

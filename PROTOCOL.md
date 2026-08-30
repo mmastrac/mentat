@@ -226,6 +226,7 @@ Router, port 6381:
 | Path | Returns |
 | --- | --- |
 | `/v1/*` | OpenAI-compatible, routed by request `model`, streamed through |
+| any other POST | Routed by request `model`, for root-level endpoints such as `/tokenize` |
 | `/mcp` | Merged MCP, tools prefixed `<group>__` |
 | `/status.json`, `/healthz`, `/` | Route table and per-group health |
 

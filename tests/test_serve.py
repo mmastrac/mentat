@@ -88,6 +88,12 @@ class FakeModel:
                         self._json(200, {"model": outer.model, "choices": [
                             {"message":
                              {"content": f"hello from {outer.model}"}}]})
+                elif path == "/tokenize":
+                    # Root-level on purpose: vLLM serves /tokenize outside
+                    # /v1, so a router that appends to the announced base
+                    # would ask for /v1/tokenize and miss.
+                    outer.requests.append(body)
+                    self._json(200, {"count": 3, "tokens": [1, 2, 3]})
                 elif path == "/mcp":
                     self._mcp(body)
                 else:
@@ -321,6 +327,23 @@ def t04_routing_by_model_name():
     assert code == 404 and body["available"] == ["model-a", "model-b"], body
 
 
+def t04b_root_level_endpoints_route():
+    """vLLM serves /tokenize outside /v1. The announced base ends in /v1, so
+    a router that just appends would ask the model server for /v1/tokenize
+    and get a 404."""
+    before = len(mA.requests)
+    code, body = serve_post("/tokenize",
+                            {"model": "model-a", "prompt": "hi"})
+    assert code == 200 and body["count"] == 3, (code, body)
+    assert len(mA.requests) == before + 1, "the request never reached model-a"
+    # Still routed by model name, so an unknown one is refused here.
+    code, body = serve_post("/tokenize", {"model": "nope", "prompt": "hi"})
+    assert code == 404, (code, body)
+    # And a body with no model cannot be routed at all.
+    code, body = serve_post("/tokenize", {"prompt": "hi"})
+    assert code == 400, (code, body)
+
+
 def t05_streaming_passes_through():
     req = urllib.request.Request(
         f"http://127.0.0.1:{serve_port}/v1/chat/completions",
@@ -482,6 +505,7 @@ def main():
         t02_no_actors_no_route_but_mcp_merged,
         t03_admit_on_running_actor,
         t04_routing_by_model_name,
+        t04b_root_level_endpoints_route,
         t05_streaming_passes_through,
         t06_mcp_merge_routes_and_strips_prefix,
         t07_actor_death_closes_the_gate,
