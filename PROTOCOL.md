@@ -80,6 +80,7 @@ the session and reaps that group's actors.
 | Direction | Message | Purpose |
 | --- | --- | --- |
 | Agent → daemon | `agent_register` | GPUs, container, pid, announced service endpoints, actors to resume, unacked ref ids |
+| Agent → daemon | `service_note` | A finding about an already-announced service |
 | Daemon → agent | `agent_register_ok` | Assigned node id |
 | Daemon → agent | `spawn` | Start an actor process |
 | Agent → daemon | `spawn_result` | Pid or error |
@@ -89,9 +90,26 @@ the session and reaps that group's actors.
 | Daemon → agent | `kill` | Terminate an actor |
 | Both | `ping` / `pong` | Liveness |
 
-`services` maps a name to a URL (`openai`, `mcp`), taken from `MENTAT_*_API`
-in the container environment. The daemon stores and republishes it without
-interpreting it.
+A service endpoint is announced in one of two forms, both read from
+`MENTAT_*_API` in the container environment.
+
+| Field | Form | Meaning |
+| --- | --- | --- |
+| `services` | `{"openai": "http://10.0.0.1:8000/v1"}` | One URL, used verbatim |
+| `services_ports` | `{"openai": {"port": 8000, "path": "/v1"}}` | Host left open; the consumer resolves it |
+
+`MENTAT_OPENAI_API=http://0.0.0.0:8000/v1` and `MENTAT_OPENAI_API=8000/v1`
+both produce the second form. Any other value produces the first, unparsed.
+
+The daemon stores and republishes both without interpreting either. Only the
+consumer knows which of the node's links it shares, so only the consumer can
+resolve a host. See "Address selection".
+
+`service_notes` maps a service name to what the agent noticed about it after
+announcing — today, that its server bound one address rather than all of
+them. It is carried on `agent_register` and updated in flight by
+`service_note`, whose empty `note` clears one. Advisory: it explains a failed
+probe, it never causes one.
 
 An agent reconnects with `resume` listing actors still alive, so a link
 outage does not orphan them.
@@ -104,16 +122,47 @@ outage does not orphan them.
 | `peer_hello_ok` | Accepter replies in kind |
 | `peer_status` | Periodic snapshot push |
 | `peer_event` | One replicated event. The receiver does not re-forward it |
+| `probe` | Reachability probe. First frame of its own connection |
+| `probe_ok` | The answer, carrying the responder's `node_id` |
 
-Both hellos carry `node_id`, `node_ip`, `control_addr`, `http_port`, `addrs`
-and `addr_tags`. `control_addr`, `http_port`, `addrs` and `addr_tags` default
-to empty for daemons that predate them.
+Both hellos carry `node_id`, `node_ip`, `control_addr`, `http_port`, `addrs`,
+`addr_tags` and `probes`. Every field but `node_id` and `node_ip` defaults to
+empty or false for daemons that predate it.
+
+`probes` is a capability bit: true means this daemon answers `probe`. A
+daemon never probes a peer whose hello did not set it, so an older peer
+receives no frame it would log as unknown.
 
 Links are keep-first: if a live link to that `node_id` exists, the new one is
 refused. Two daemons dialing each other under different addresses would
 otherwise churn links.
 
 The head is the lowest node id currently visible, after a hold-down.
+
+### Probes
+
+A probe is not sent over the mesh link. It opens its own TCP connection, and
+that connection is the answer:
+
+1. The prober binds one of its own addresses, then connects to one of the
+   peer's addresses at the peer's control port.
+2. It sends `probe` with its `node_id` and the address it bound.
+3. The peer answers `probe_ok` with its own `node_id`.
+4. The connection closes.
+
+Success requires the reply to carry the expected `node_id`. Both fabrics in a
+multi-pair cluster may be numbered out of one subnet, so an address that
+answers is not by itself evidence that the intended node answered.
+
+The local bind is the point. Without it the kernel picks a source address by
+routing table, and the result reports that table's preference rather than the
+cabling. Reachability is therefore a property of an address *pair* rather
+than of a remote address.
+
+One probe per (own address × peer address) pair, every
+`MENTAT_PROBE_INTERVAL_MS`, bounded by `MENTAT_PROBE_TIMEOUT_MS`. Results are
+published per peer under `probes` in `/status` (see "HTTP"). A pair with no
+entry has not been tried, which is not the same as a pair that failed.
 
 ## Host messages
 
@@ -133,6 +182,27 @@ UDP, port 6382, broadcast on every selected interface plus any
 `MENTAT_ANNOUNCE_ADDR` unicast target. Interfaces come from
 `MENTAT_ANNOUNCE_IFACES`, or every up non-loopback IPv4 interface except
 container bridges.
+
+`MENTAT_ANNOUNCE_IFACES` is a comma-separated list of `name` or
+`name=tag+tag`. A name is an fnmatch-style pattern over interface names, with
+`*` and `?` only: no character classes, no negation, no regex. A pattern with
+no wildcard is an exact name, so every configuration written before patterns
+existed keeps its meaning — `en` does not match `eno1`.
+
+    MENTAT_ANNOUNCE_IFACES=en*f*np*=connectx+rdma,en*=lan
+
+The first entry a name matches decides its rank and its tags. Interfaces
+matching one entry rank together at that entry's position, in kernel order.
+List order is preference order.
+
+`MENTAT_ANNOUNCE_ADDRS` takes the same syntax with addresses in place of
+names, and replaces what the node says it answers on:
+
+    MENTAT_ANNOUNCE_ADDRS=192.168.1.11=lan,10.100.0.1=connectx+rdma
+
+It is for a node whose advertisable address is on no interface of its own.
+It does not change where broadcast goes, which still follows the selected
+interfaces.
 
 Unsigned (version 1):
 
@@ -194,8 +264,13 @@ can rank its own links, since a consumer that can reach both sees no
 difference between them. The order comes from `MENTAT_ANNOUNCE_IFACES`.
 
 `addr_tags` maps an address to operator-defined tags, e.g.
-`{"10.100.0.1": ["connectx", "rdma"]}`. Nothing reads them yet. They exist so
-a consumer can route classes of traffic over different links.
+`{"10.100.0.1": ["connectx", "rdma"]}`. One tag is interpreted: `rdma` means
+the operator cabled this address into a fabric. Placement acts on it once a
+probe over that address has succeeded (see "Placement"). The rest are carried
+for consumers to read.
+
+A tag on its own admits nothing. A link that fails its probes stays out of
+placement however it is tagged.
 
 A consumer picks one address per node, in this order:
 
@@ -206,19 +281,98 @@ A consumer picks one address per node, in this order:
 One watch per `node_id`. A node with two links broadcasts on both, and the
 datagrams differ only in source address.
 
+### Resolving a port-announced service
+
+A service announced under `services_ports` has no host. The consumer forms
+`http://<host>:<port><path>` once per candidate host, best first:
+
+1. Candidate hosts are the announcing node's `addrs`. An agent is joined to
+   its node by matching its `node_ip` against every address that identifies a
+   node in the consumer's view — `node_ip`, `link_ip`, and each entry of
+   `addrs`. This is why a box's daemon and its containers must agree on
+   `MENTAT_NODE_IP`.
+2. Every candidate is checked against the consumer's own allowlist
+   (`ALLOWED_SOURCES` in `mentatd-serve`). These are addresses the consumer
+   derived and will connect to, which is what that list is for. A verbatim
+   `services` URL passes no check and is used exactly as written, because the
+   operator named a host.
+3. Candidates on one of the consumer's own subnets sort first, preserving the
+   node's own order within each half. The node ranks its links by speed
+   because only it can; the consumer ranks by shared wire because only it
+   can.
+
+The consumer then probes candidates in order, keeps whichever answers, falls
+through to the next when it stops answering, and periodically re-tries the
+higher-ranked ones so a repaired link is taken back automatically.
+
+## Placement
+
+A placement group of more than one bundle is placed inside one fabric island.
+
+An island is a set of nodes that all reach each other over addresses tagged
+`rdma`, with a successful probe behind every pair. Each daemon derives islands
+for itself, from its own probe table plus the tables its peers publish in
+`peer_status`. Soft consistency is sufficient: one daemon decides a given
+placement group, the one its driver rendezvoused with.
+
+Derivation, in order:
+
+1. Nodes X and Y are fabric neighbours when some address of X tagged `rdma`
+   and some address of Y tagged `rdma` have a probe-ok pair between them.
+2. Connected components of that graph are pruned, least-connected node first,
+   until every member reaches every other. A group must fit a set whose
+   members can all talk; a component alone does not guarantee that.
+3. A change in membership is committed only after
+   `MENTAT_ISLAND_HOLD_DOWN_MS` of stability, so a flapping cable cannot send
+   consecutive placements to different islands.
+
+The graph is over ports — one node's one address — rather than over nodes,
+because a rank binds one address and every other rank has to reach that one.
+A node with two fabric ports on separate links joins through whichever port
+reaches all of the island, or through neither.
+
+Islands are published under `islands` in `/status`, each with the address
+every member answers on inside it. Every pair of those addresses answered a
+probe.
+
+Placement then:
+
+- A group of one bundle is unconstrained.
+- A group is unconstrained unless one of its own alive agents sits on a node
+  carrying an `rdma` tag. Opting in is per group, so a tagged pair does not
+  constrain a deployment on an untagged one. `MENTAT_ISLAND_PLACEMENT=off`
+  disables the constraint for a whole daemon.
+- A node belongs to its island, or stands as an island of one. A group whose
+  bundles all fit on one node crosses no fabric.
+- Candidate islands are those with enough free GPUs in the group. The
+  driver's island is tried first, then the smallest sufficient one.
+- Nothing spills onto the LAN. A group that fits no island stays PENDING and
+  fails at `MENTAT_PG_PENDING_TIMEOUT_MS`, naming the constraint and what the
+  best island offered. `pending_reason` in `/status` says the same while
+  there is still time to act.
+
+Each rank of a group placed on an island is spawned with `MENTAT_FABRIC_IP`
+set to that node's address on that island. The `ray` shim resolves
+`get_node_ip_address()` as `VLLM_HOST_IP` → `MENTAT_FABRIC_IP` →
+`MENTAT_NODE_IP` → a UDP-socket guess, so a hand-set `VLLM_HOST_IP` always
+wins and removing it is how a deployment opts in.
+
 ## HTTP
 
 Daemon, port 6380:
 
 | Path | Returns |
 | --- | --- |
-| `/status` | JSON snapshot: node, peers, groups, counters |
+| `/status` | JSON snapshot: node, peers, islands, groups, counters |
 | `/metrics` | Prometheus text |
 | `/events` | WebSocket: a snapshot, then events |
 
-Events: `node_join`, `node_leave`, `head_change`, `agent_register`,
-`agent_lost`, `agent_degraded`, `agent_dead`, `pg_created`, `pg_ready`,
-`pg_timeout`, `actor_spawning`, `actor_running`, `actor_dead`,
+Each peer entry carries `probes`: probed pairs keyed local address then
+remote address, each `{ok, rtt_ms, last_ok_ms, error}`. Absent means untried.
+
+Events: `node_join`, `node_leave`, `head_change`, `islands_changed`,
+`agent_register`, `agent_lost`, `agent_degraded`, `agent_dead`, `pg_created`,
+`pg_ready`, `pg_timeout`, `actor_spawning`, `actor_running`, `actor_dead`,
 `driver_connected`, `driver_disconnected`.
 
 Router, port 6381:
@@ -228,10 +382,14 @@ Router, port 6381:
 | `/v1/*` | OpenAI-compatible, routed by request `model`, streamed through |
 | any other POST | Routed by request `model`, for root-level endpoints such as `/tokenize` |
 | `/mcp` | Merged MCP, tools prefixed `<group>__` |
-| `/status.json`, `/healthz`, `/` | Route table, per-group health, and `uptime_s` |
+| `/status.json`, `/healthz`, `/` | Route table, per-group health and selected endpoint, and `uptime_s` |
 
 A `/v1` request naming a known but ungated model returns 503 with the gate it
 failed. An unknown name returns 404. Bodies over 128 MiB are refused.
+
+Each group carries `openai` (the candidate currently routed to),
+`openai_candidates` (every candidate, best first) and `openai_note` (what the
+announcing agent reported about its own bind, when it reported anything).
 
 An idempotent GET to an upstream, meaning the probe and the status poll, is
 retried once on a fresh connection when the first attempt fails on an

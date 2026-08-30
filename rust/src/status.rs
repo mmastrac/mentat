@@ -9,7 +9,35 @@
 
 use serde_json::{json, Value};
 
-use crate::state::{ActorState, PgState, State};
+use crate::state::{ActorState, PeerInfo, PgState, State};
+
+/// One peer's probed pairs as JSON, keyed local address then remote. A
+/// pair the prober has not tried yet has no entry, which readers must not
+/// confuse with a pair that failed.
+fn probe_table(p: &PeerInfo) -> Value {
+    Value::Object(
+        p.probe_pairs
+            .iter()
+            .map(|(local, remotes)| {
+                let row: serde_json::Map<String, Value> = remotes
+                    .iter()
+                    .map(|(remote, r)| {
+                        (
+                            remote.clone(),
+                            json!({
+                                "ok": r.ok,
+                                "rtt_ms": r.rtt_ms,
+                                "last_ok_ms": r.last_ok_ms,
+                                "error": r.error,
+                            }),
+                        )
+                    })
+                    .collect();
+                (local.clone(), Value::Object(row))
+            })
+            .collect(),
+    )
+}
 
 pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
     let mut groups: Vec<String> = st
@@ -47,6 +75,8 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                     "cpus": a.cpus,
                     "pid": a.pid,
                     "services": a.services,
+                    "services_ports": a.services_ports,
+                    "service_notes": a.service_notes,
                 })
             })
             .collect();
@@ -84,6 +114,11 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                         PgState::Created => "CREATED",
                         PgState::Removed => "REMOVED",
                     },
+                    // What the last placement attempt could not find. The
+                    // pending timeout says the same thing minutes later;
+                    // this says it while there is still time to act.
+                    "pending_reason": p.pending_reason,
+                    "island_nodes": p.island.as_ref().map(|i| i.nodes.len()),
                 })
             })
             .collect();
@@ -144,6 +179,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                     "link_ip": p.link_ip,
                     "addrs": p.addrs,
                     "addr_tags": p.addr_tags,
+                    "probes": probe_table(p),
                     "control_addr": p.control_addr,
                     "http_port": p.http_port,
                     "alive": p.alive,
@@ -164,6 +200,12 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
         "gcs_address": st.gcs_address,
         "head_node_id": st.head_node_id,
         "head_generation": st.head_generation,
+        // Derived from probes rather than configuration: these are the sets a
+        // multi-bundle placement group may be placed inside.
+        "islands": st.fabrics.islands.iter().map(|i| json!({
+            "nodes": i.nodes,
+            "addrs": i.addr,
+        })).collect::<Vec<_>>(),
         "peers": peers,
         "groups": out_groups,
         "counters": {
@@ -215,6 +257,42 @@ pub fn render(data: &Value, scoped: bool) -> String {
                 ""
             },
         ));
+        // The reachability matrix, one row per local address. This
+        // is the line to read against the patch panel: a pair the operator
+        // cabled and that reads fail is a cabling or tagging mistake, and a
+        // pair that reads ok on a link nothing was cabled on is the other.
+        for (local, row) in p["probes"].as_object().into_iter().flatten() {
+            let cells: Vec<String> = row
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(remote, r)| {
+                    if r["ok"].as_bool().unwrap_or(false) {
+                        format!("{remote}=ok/{}ms", r["rtt_ms"].as_u64().unwrap_or(0))
+                    } else {
+                        format!("{remote}=fail")
+                    }
+                })
+                .collect();
+            out.push_str(&format!("  reach from {local}: {}\n", cells.join(" ")));
+        }
+    }
+
+    // Members by fabric address, which is what an operator compares against
+    // the cabling. Node ids are useless here: every mentat one starts with
+    // the hex of "mentat:", so a truncated id identifies nothing.
+    for (i, isl) in data["islands"].as_array().into_iter().flatten().enumerate() {
+        let members: Vec<String> = isl["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|n| n.as_str())
+            .map(|n| match isl["addrs"][n].as_str() {
+                Some(a) => a.to_string(),
+                None => crate::state::node_ip_of(n).unwrap_or_else(|| n.to_string()),
+            })
+            .collect();
+        out.push_str(&format!("fabric {i}: {}\n", members.join(" ")));
     }
 
     for (name, g) in groups {

@@ -402,6 +402,112 @@ def t08_dead_endpoint_fails_the_probe():
     assert "probe failed" in body["not_ready"]["gb"], body
 
 
+def t08b_port_announcement_resolves_and_falls_through():
+    """A container that announces a port instead of a URL leaves the host to
+    the router. The trap it removes: an endpoint announced on one address is
+    reachable only from that link, and across two fabrics no single address
+    reaches every router.
+
+    Covered here: the daemon stores the port form without resolving it, the
+    router turns it into one candidate per node address with the wire it
+    shares first, the MCP merge resolves the same way, and a group with no
+    candidate left names each one it tried. The ordered walk between
+    candidates is exercised in the router's own unit tests, which can stand
+    up two servers on two addresses; one loopback box cannot."""
+    d = Daemon("127.0.0.1", env={
+        # The node claims two addresses. Only the first answers on the
+        # announced port, so resolution has something to choose between.
+        "MENTAT_ANNOUNCE_ADDRS": "127.0.0.1=lan,10.255.255.2=connectx+rdma",
+    }).wait_up()
+    state["port_daemon"] = d
+    mP = FakeModel("model-p", "tool_p")
+    state["port_model"] = mP
+    d.start_agent("gp", container="cp", env_extra={
+        # Port-only form: no host anywhere in the announcement.
+        "MENTAT_OPENAI_API": f"{mP.port}/v1",
+        "MENTAT_MCP_API": f"http://0.0.0.0:{mP.port}/mcp",
+    })
+
+    def registered():
+        g = d.status_json().get("groups", {}).get("gp")
+        return bool(g and g.get("gpus_total", 0) >= 1)
+
+    wait_until(registered, 15, "agent gp never registered")
+    # The daemon stores the port form and does not resolve it: only the
+    # router knows which of the node's links it shares.
+    agent = d.status_json()["groups"]["gp"]["agents"][0]
+    assert agent["services"] == {}, agent
+    assert agent["services_ports"]["openai"] == {"port": mP.port, "path": "/v1"}, agent
+    assert agent["services_ports"]["mcp"] == {"port": mP.port, "path": "/mcp"}, agent
+
+    start_driver("gp", address=d.address)
+    port5 = free_port()
+    serve5 = subprocess.Popen(
+        [SERVE_BINARY],
+        env={**os.environ,
+             "MENTAT_DAEMONS": f"127.0.0.1:{d.http_port}",
+             "SERVE_PORT": str(port5),
+             "POLL_INTERVAL_S": "1",
+             "PROBE_INTERVAL_S": "0.5",
+             "PROBE_PROMOTE_S": "1",
+             # One unreachable candidate costs a whole timeout per round,
+             # so the freshness window has to clear a round that walks both.
+             "PROBE_TIMEOUT_S": "1",
+             "PROBE_FRESH_S": "8",
+             "ALLOWED_SOURCES": "127.,10.255."},
+    )
+    tl._children.append(serve5)
+
+    def view():
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port5}/status.json", timeout=5
+        ) as r:
+            return json.load(r)
+
+    def routed():
+        try:
+            return [m["id"] for m in view()["models"]] == ["model-p"] \
+                if isinstance(view()["models"], list) else \
+                list(view()["models"]) == ["model-p"]
+        except OSError:
+            return False
+
+    wait_until(routed, 30, "model-p never routed from its port announcement")
+    g = view()["groups"]["gp"]
+    # Both of the node's addresses became candidates, loopback first because
+    # the router shares that wire.
+    assert g["openai_candidates"] == [
+        f"http://127.0.0.1:{mP.port}/v1",
+        f"http://10.255.255.2:{mP.port}/v1",
+    ], g
+    assert g["openai"] == f"http://127.0.0.1:{mP.port}/v1", g
+    assert g["mcp"] == f"http://127.0.0.1:{mP.port}/mcp", g
+    # The MCP merge resolved the same way, and it is ungated so it works
+    # without a probe.
+    r = json.loads(urllib.request.urlopen(urllib.request.Request(
+        f"http://127.0.0.1:{port5}/mcp",
+        data=json.dumps({"jsonrpc": "2.0", "id": 1,
+                         "method": "tools/list"}).encode(),
+        headers={"Content-Type": "application/json"}), timeout=10).read())
+    assert any(t["name"] == "gp__tool_p" for t in r["result"]["tools"]), r
+
+    # Kill the only address that answers: no candidate is left, so the group
+    # closes and says which addresses it tried.
+    mP.stop()
+
+    def closed():
+        try:
+            g = view()["groups"]["gp"]
+        except OSError:
+            return False
+        return not g["healthy"] and "probe failed" in (g["why_not"] or "")
+
+    wait_until(closed, 25, "gp still healthy after its endpoint died")
+    why = view()["groups"]["gp"]["why_not"]
+    assert f"http://10.255.255.2:{mP.port}/v1" in why, why
+    assert f"http://127.0.0.1:{mP.port}/v1" in why, why
+
+
 def t09_membership_follows_the_mesh():
     # A fresh two-daemon mesh, with the model's whole group on d1. The router
     # is seeded ONLY with d2, whose record of d1 came over the link d2 dialed
@@ -510,6 +616,7 @@ def main():
         t06_mcp_merge_routes_and_strips_prefix,
         t07_actor_death_closes_the_gate,
         t08_dead_endpoint_fails_the_probe,
+        t08b_port_announcement_resolves_and_falls_through,
         t09_membership_follows_the_mesh,
         t10_udp_announce_replaces_the_seed_list,
     ]
@@ -521,6 +628,8 @@ def main():
         cluster.cleanup()
         for d in state.get("mesh", ()):
             d.cleanup()
+        if "port_daemon" in state:
+            state["port_daemon"].cleanup()
         if "announce_daemon" in state:
             state["announce_daemon"].cleanup()
 

@@ -153,6 +153,20 @@ pub enum Msg {
         /// agent and a new daemon (or the reverse) interoperating.
         #[serde(default)]
         services: BTreeMap<String, String>,
+        /// Services announced as a port and path rather than a whole URL,
+        /// meaning "resolve the host against my node's addresses". The
+        /// router does that resolving, because only it knows which of the
+        /// node's links it shares. Old daemons ignore the field, and an
+        /// agent that only ever announces URLs never sends it.
+        #[serde(default)]
+        services_ports: BTreeMap<String, ServicePort>,
+        /// What the agent found out about a service after announcing it,
+        /// keyed by service name -- today, that the server bound one address
+        /// rather than every address. Advisory: it explains a probe failure,
+        /// it never causes one. Also carried on a re-register so a daemon
+        /// restart does not lose the finding.
+        #[serde(default)]
+        service_notes: BTreeMap<String, String>,
         /// Actors still alive from before a reconnect, so the daemon can
         /// rebuild instead of orphaning them.
         resume: Vec<ResumeActor>,
@@ -207,6 +221,14 @@ pub enum Msg {
     Kill {
         actor_id: String,
     },
+    /// A finding about an already-announced service, sent when the agent
+    /// learns it after registering -- the API server binds its socket
+    /// minutes after `ray start` returns, so there is nothing to report at
+    /// register time. Empty `note` clears one.
+    ServiceNote {
+        service: String,
+        note: String,
+    },
     Ping,
     Pong,
 
@@ -225,6 +247,11 @@ pub enum Msg {
         /// traffic over different links. Carried, never interpreted here.
         #[serde(default)]
         addr_tags: BTreeMap<String, Vec<String>>,
+        /// True when this daemon answers `probe` on its control port. A
+        /// daemon that predates probing defaults to false and is never
+        /// probed, so it never logs a peer_unexpected_msg per pair.
+        #[serde(default)]
+        probes: bool,
     },
     PeerHelloOk {
         node_id: String,
@@ -241,6 +268,26 @@ pub enum Msg {
         addrs: Vec<String>,
         #[serde(default)]
         addr_tags: BTreeMap<String, Vec<String>>,
+        #[serde(default)]
+        probes: bool,
+    },
+    /// Reachability probe, sent as the FIRST frame of its own short-lived
+    /// connection rather than over the mesh link. The point is the socket
+    /// underneath it: the prober binds one of its own addresses before
+    /// connecting, so an answer proves that one address pair carries
+    /// traffic. Nothing about the mesh link would prove that.
+    Probe {
+        /// The prober's node id, so a mistargeted probe is visible.
+        node_id: String,
+        /// The address the prober bound locally. Carried for the answering
+        /// daemon's logs. It does not act on it.
+        local_addr: String,
+    },
+    /// The answer, carrying the responder's identity. That is the part worth
+    /// having: it says the address reached belongs to the expected node,
+    /// rather than to whatever else answers on that port.
+    ProbeOk {
+        node_id: String,
     },
     /// Periodic push of a daemon's own snapshot, so every daemon can serve a
     /// merged cluster view without request forwarding.
@@ -340,6 +387,19 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<bool> {
         }
     }
     Ok(true)
+}
+
+/// A service announced as a port and a path, with the host left open.
+///
+/// The announcing container knows which port it serves on. It does not know
+/// which of its node's addresses the consumer can reach, and hard-coding one
+/// is what makes an endpoint unroutable from off that link. `path` is empty
+/// or starts with `/`, and the consumer forms `http://<host>:<port><path>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServicePort {
+    pub port: u16,
+    #[serde(default)]
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

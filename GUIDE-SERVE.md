@@ -26,13 +26,45 @@ Model containers announce through agent registration. The entrypoint exports
 these before `ray start`, and the agent reads them once:
 
 ```bash
-export MENTAT_OPENAI_API=http://10.0.0.1:8000/v1   # rank serving the API
-export MENTAT_MCP_API=http://10.0.0.1:9000/mcp     # every rank
+export MENTAT_OPENAI_API=8000/v1   # rank serving the API
+export MENTAT_MCP_API=9000/mcp     # every rank
 ray start --address=$RAY_ADDRESS
 ```
 
 Both are optional and additive. An agent without them registers as before, and
 a daemon that predates the field ignores it.
+
+### Which form to use
+
+A value takes one of two forms:
+
+| Value | Meaning |
+| --- | --- |
+| `8000/v1`, or `http://0.0.0.0:8000/v1` | Every address this node answers on |
+| `http://10.0.0.1:8000/v1` | That address, and only that address |
+
+Prefer the port form. An endpoint announced on one address is reachable only
+from that link, so a router off it can never route to the model however
+healthy the model is. The port form leaves the host to the router, which
+resolves it against every address the node announces and picks by probing —
+so the same container image serves a router on the LAN and one on the fabric,
+and a group stays routable when a fabric cable drops.
+
+The port form assumes the API server binds the wildcard address, which is
+what `--host 0.0.0.0` does and what vLLM does by default. A server bound to
+one address breaks that promise, and the symptom — an endpoint that probes
+fine from one box and refuses from another — reads like a network fault. The
+agent watches its own `/proc/net/tcp` for the announced port and, if the bind
+is narrow, logs `service_bind_narrow` and attaches the finding to the
+announcement, so `/status.json` says `bound to 10.100.0.1 only` next to the
+failed probe. It only warns. The router's probe stays the only thing that
+admits an endpoint.
+
+The URL form stays supported and is not deprecated. It is the escape hatch
+for a server the port form cannot describe — a different host, a reverse
+proxy, a port published out of a bridge network. A URL is used exactly as
+written. `ALLOWED_SOURCES` does not apply to it: that list covers addresses
+the router derived for itself.
 
 Only the rank running the API server sets `MENTAT_OPENAI_API`, since only that
 rank answers inference. Nothing enforces this: the agent announces whatever is
@@ -67,7 +99,24 @@ during the self-test window.
 
 `/status.json` says why a model is missing. Each group carries a `healthy` flag
 and, when false, a `why_not` naming the failed gate: no endpoint, no running
-actors, unprobed, probe failed, or probe stale.
+actors, unprobed, probe failed, or probe stale. A probe failure quotes every
+candidate address it tried, and appends the agent's own bind finding when
+there is one.
+
+### Several addresses for one endpoint
+
+A port announcement resolves to one candidate URL per address of the
+announcing node, best first: addresses on a subnet the router is attached to
+lead, and the node's own ranking orders each half. Every derived candidate is
+checked against `ALLOWED_SOURCES` first.
+
+The prober walks that list and then stays put. Once an address answers it is
+kept, so live traffic is never moved by a re-decision. When it stops
+answering the router falls through to the next candidate, and every
+`PROBE_PROMOTE_S` it re-tries the addresses ranked above the one in use, so a
+repaired link is taken back with no operator involved. `/status.json` shows
+`openai` (in use) beside `openai_candidates` (all of them), which is how a
+dropped cable looks from the router.
 
 A probe that fails on a reused connection is retried once on a fresh one
 before the group is marked unhealthy. Servers close idle keep-alive
@@ -129,6 +178,14 @@ earlier one.
 answer only arrives when generation ends. Lower it and long generations get cut
 before any hung request does.
 
+A router that shares no wire with a fabric should leave that fabric's prefix
+out of `ALLOWED_SOURCES`. Candidate addresses sort own-subnet first, and a
+router on a third subnet sees no candidate as local, so the node's own
+ranking decides and it ranks the fabric first. The router then waits a whole
+`PROBE_TIMEOUT_S` per round reaching for an address it can never use. It
+recovers by falling through, and leaving the prefix out skips the round trip
+entirely.
+
 `ALLOWED_SOURCES` applies to an announcement's source address and to any
 address it advertises before that address is watched. It does not apply to
 the address a node calls its own, which nothing acts on. The default covers
@@ -155,9 +212,10 @@ of the route table.
 - `MENTAT_SECRET` signs announcements, and a keyed router refuses unsigned
   ones. The control port still has no authentication, so every claim is
   re-read over TCP before it affects routing.
-- The router must reach both every daemon's HTTP port and every announced
-  endpoint. On a cluster whose models live on a private subnet, it has to run
-  on a box attached to that subnet.
+- The router must reach every daemon's HTTP port, and at least one candidate
+  address of every announced endpoint. With the port form that is any link it
+  shares with the model's node; with the URL form it is the one address the
+  announcement names.
 - Admission tracks the probe. A model that answers `/models` while still
   warming up is routable.
 - Health is per group. A group with one wedged rank reads healthy while its

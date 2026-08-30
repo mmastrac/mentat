@@ -103,7 +103,11 @@ async fn merged_tools(shared: &Arc<Shared>) -> Vec<Value> {
         "inputSchema": {"type": "object", "properties": {}},
     })];
     for e in group_table(shared).values() {
-        let Some(url) = e.mcp.clone() else { continue };
+        // Ungated, so there is no probe to choose among candidates with:
+        // the best-ranked one is the answer. See Endpoint::best.
+        let Some(url) = e.mcp.as_ref().and_then(|m| m.best()).map(str::to_string) else {
+            continue;
+        };
         for t in group_tools(shared, &e.group, &url).await {
             let name = t["name"].as_str().unwrap_or("?");
             let schema = if t["inputSchema"].is_object() {
@@ -190,7 +194,12 @@ async fn call(shared: &Arc<Shared>, rid: Value, params: Value) -> Value {
         );
     };
     let table = group_table(shared);
-    let Some(url) = table.get(group).and_then(|e| e.mcp.clone()) else {
+    let Some(url) = table
+        .get(group)
+        .and_then(|e| e.mcp.as_ref())
+        .and_then(|m| m.best())
+        .map(str::to_string)
+    else {
         return tool_err(
             &rid,
             format!(

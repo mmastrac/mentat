@@ -1,8 +1,8 @@
 //! Lifecycle tuning knobs, read once from MENTAT_* environment variables at
 //! process start (daemon and agent alike -- matching how the fleet configures
-//! everything else). All values are durations in milliseconds; an unset or
-//! empty variable means the default, and an unparsable value logs `bad_env_ms`
-//! and falls back to the default rather than refusing to start.
+//! everything else). Everything named `*_MS` is a duration in milliseconds.
+//! An unset or empty variable means the default, and an unparsable value logs
+//! `bad_env_ms` and falls back to the default rather than refusing to start.
 //!
 //! The defaults are sized for the serving pair: model boot legitimately takes
 //! minutes (weights, container pulls), while an agent link blip should heal in
@@ -42,6 +42,28 @@ pub struct Cfg {
     /// must be stable before the designation changes, so a flapping link
     /// cannot thrash head_change events.
     pub election_hold_down_ms: u64,
+    /// MENTAT_PROBE_INTERVAL_MS, default 15_000. How often each daemon
+    /// re-probes reachability to every live peer, one probe per (own
+    /// address x peer address) pair. Slow on purpose: the table answers
+    /// "is this cable up", which changes on the timescale of cables.
+    pub probe_interval_ms: u64,
+    /// MENTAT_PROBE_TIMEOUT_MS, default 2_000. How long one probe waits for
+    /// the connect and the reply before the pair is recorded failed. A pair
+    /// with no route usually fails immediately. This bounds the case where
+    /// the SYN is dropped instead, which the kernel would otherwise retry
+    /// for minutes.
+    pub probe_timeout_ms: u64,
+    /// MENTAT_ISLAND_PLACEMENT, default on. Set to `off` or `0` to place
+    /// multi-bundle groups without the one-fabric constraint. The escape
+    /// hatch for a cluster whose probes disagree with its cabling under
+    /// pressure: it takes one variable and a daemon restart, where the
+    /// alternative is untagging every node.
+    pub island_placement: bool,
+    /// MENTAT_ISLAND_HOLD_DOWN_MS, default 5_000. How long the fabric island
+    /// membership must hold still before placement acts on the change --
+    /// the election hold-down's argument applied to cables, so a flapping
+    /// QSFP link cannot send consecutive placements to different islands.
+    pub island_hold_down_ms: u64,
     /// MENTAT_HOST_CONNECT_TIMEOUT_MS, default 60_000. How long the agent
     /// waits for a freshly spawned actor host to connect to its unix socket.
     /// The host connects before importing anything heavy, so this covers
@@ -95,6 +117,30 @@ fn env_ms(name: &str, default: u64) -> u64 {
     }
 }
 
+/// `off`, `no`, `false` and `0` turn a switch off, and `on`, `yes`, `true`
+/// and `1` turn one on. Unset or empty leaves the default. An unrecognised
+/// value logs `bad_env_flag` and keeps the default, matching env_ms.
+fn env_on(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(v) if !v.trim().is_empty() => match v.trim().to_ascii_lowercase().as_str() {
+            "off" | "no" | "false" | "0" => false,
+            "on" | "yes" | "true" | "1" => true,
+            _ => {
+                log(
+                    "bad_env_flag",
+                    &[
+                        ("var", name.to_string()),
+                        ("value", v),
+                        ("default", default.to_string()),
+                    ],
+                );
+                default
+            }
+        },
+        _ => default,
+    }
+}
+
 /// The process-wide config, read from the environment on first use.
 pub fn cfg() -> &'static Cfg {
     static CFG: OnceLock<Cfg> = OnceLock::new();
@@ -105,6 +151,10 @@ pub fn cfg() -> &'static Cfg {
         peer_stale_after_ms: env_ms("MENTAT_PEER_STALE_AFTER_MS", 30_000),
         peer_dead_after_ms: env_ms("MENTAT_PEER_DEAD_AFTER_MS", 60_000),
         election_hold_down_ms: env_ms("MENTAT_ELECTION_HOLD_DOWN_MS", 5_000),
+        probe_interval_ms: env_ms("MENTAT_PROBE_INTERVAL_MS", 15_000),
+        probe_timeout_ms: env_ms("MENTAT_PROBE_TIMEOUT_MS", 2_000),
+        island_placement: env_on("MENTAT_ISLAND_PLACEMENT", true),
+        island_hold_down_ms: env_ms("MENTAT_ISLAND_HOLD_DOWN_MS", 5_000),
         host_connect_timeout_ms: env_ms("MENTAT_HOST_CONNECT_TIMEOUT_MS", 60_000),
         slow_call_warn_ms: env_ms("MENTAT_SLOW_CALL_WARN_MS", 15_000),
         agent_ping_interval_ms: env_ms("MENTAT_AGENT_PING_INTERVAL_MS", 2_000),

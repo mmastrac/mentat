@@ -13,6 +13,7 @@ mod config;
 mod daemon;
 mod gpu;
 mod http;
+mod island;
 mod logfmt;
 mod mesh;
 mod proto;

@@ -49,13 +49,13 @@ pip wheel --no-deps -w dist ./python
 Or pull the published images, which carry both binaries and the wheel:
 
 ```bash
-docker pull mmastrac/mentat-artifacts:0.2.5
+docker pull mmastrac/mentat-artifacts:0.3.0
 ```
 
 Or build them yourself, as the compose deployment does:
 
 ```bash
-VERSION=0.2.5 ./build.sh
+VERSION=0.3.0 ./build.sh
 ```
 
 That produces `mentat-artifacts:<ver>` (binary plus wheel, for `COPY --from`),
@@ -85,17 +85,17 @@ Replace real Ray with the shim. The wheel installs as `ray` and claims the
 import name:
 
 ```dockerfile
-COPY --from=mmastrac/mentat-artifacts:0.2.5 /out/mentatd /usr/local/bin/mentatd
-COPY --from=mmastrac/mentat-artifacts:0.2.5 /out/mentatd-0.2.5-py3-none-any.whl /tmp/
+COPY --from=mmastrac/mentat-artifacts:0.3.0 /out/mentatd /usr/local/bin/mentatd
+COPY --from=mmastrac/mentat-artifacts:0.3.0 /out/mentatd-0.3.0-py3-none-any.whl /tmp/
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
- && pip install --no-deps /tmp/mentatd-0.2.5-py3-none-any.whl
+ && pip install --no-deps /tmp/mentatd-0.3.0-py3-none-any.whl
 ```
 
 `--no-deps` keeps pip from resolving Ray's dependencies. The shim has none.
 
 The symlink keeps `ray start` and `ray status` working in your existing
-entrypoint. `ray --version` reports `ray, version 2.57.0 (mentatd 0.2.5)`, and
+entrypoint. `ray --version` reports `ray, version 2.57.0 (mentatd 0.3.0)`, and
 the shim reports `__version__ == "2.57.0"` because vLLM version-checks it.
 
 ## 4. Adjust the entrypoint
@@ -112,6 +112,11 @@ ray start --address=$RAY_ADDRESS      # detaches, agent runs beside vllm
 ray status | grep -oE '[0-9.]+/[0-9.]+ GPU' | cut -d/ -f2 | cut -d. -f1
 vllm serve ... --distributed-executor-backend ray -tp 2
 ```
+
+`VLLM_HOST_IP` is per rank and per container, which is fine at two nodes on
+one fabric and stops being fine past that: it has to be hand-matched to the
+box, and a wrong value is a hang at NCCL rendezvous rather than an error.
+[Fabrics](#7-fabrics-optional) covers letting the daemon choose it.
 
 `ray start --head` is accepted and ignored. Both nodes can come up in either
 order, and a container that starts before its daemon retries until one
@@ -142,7 +147,59 @@ All of these become unnecessary:
 | Head-first startup ordering | Registration retries forever. |
 | `ray stop` cleanup between runs | Actors get their own process group and kills take the whole tree. |
 
-## 6. Verify
+## 6. Fabrics (optional)
+
+Skip this at two nodes on one fabric. It matters when the cluster has more
+than one RDMA fabric — two cabled pairs, say. Both fabrics are then numbered
+out of the same subnet, so only a probe can say who can talk to whom, and a
+hand-set `VLLM_HOST_IP` becomes one more thing to get wrong per box.
+
+Tag the links on every box, fastest first:
+
+```bash
+MENTAT_ANNOUNCE_IFACES=en*f*np*=connectx+rdma,en*=lan
+```
+
+One line serves the fleet: names are `*`/`?` patterns, and the first entry a
+name matches decides its rank and tags. The daemons then probe every (own
+address × peer address) pair with the source address bound, which is the only
+thing that separates a cabled pair from two boxes that merely share a subnet.
+
+Check the result against the patch panel before relying on it:
+
+```bash
+mentatd status          # `reach from <addr>: <addr>=ok/0ms ...` per peer
+                        # `fabric 0: <addr> <addr> ...` per island
+```
+
+A pair you cabled that reads `fail` is a cable or a tag on the wrong
+interface; the daemon also logs `fabric_addr_unverified` for a tagged address
+no probe has ever confirmed. A pair that reads `ok` on a link nothing was
+cabled on is the other mistake.
+
+Once the islands match the cabling, placement uses them: a placement group of
+more than one bundle is placed inside one island. Nothing spills across
+fabrics. A group that fits nowhere stays PENDING and says why, in
+`pending_reason` and again at the pending timeout. Each rank is spawned with
+`MENTAT_FABRIC_IP` set to its address on the island it landed on.
+
+Migration is per deployment and needs no flag day. A group whose nodes carry
+no `rdma` tag is placed exactly as before, so tagging one pair first — the
+cautious order — leaves the other pair booting normally. Within a tagged
+pair, nothing changes until a container stops exporting `VLLM_HOST_IP`, which
+is that deployment opting in: `VLLM_HOST_IP` beats `MENTAT_FABRIC_IP` for
+that reason. Once every deployment has opted in, the per-node
+`VLLM_HOST_IP` bookkeeping goes away.
+
+`MENTAT_ISLAND_PLACEMENT=off` on a daemon places multi-bundle groups without
+the constraint, for a cluster whose probes disagree with its cabling and no
+time to work out why.
+
+Islands are derived over node ids, and an agent joins its node by
+`MENTAT_NODE_IP`. A box's daemon and its containers must therefore agree on
+that value — the same requirement `ray.nodes()` already has.
+
+## 7. Verify
 
 ```bash
 mentatd status --group glm53          # the N.0/M.0 GPU line the gate greps
@@ -180,5 +237,10 @@ because the entrypoint keeps full `ray` CLI compatibility either way.
 - The control port has no authentication and accepts connections from anyone
   who can reach it. Announcement datagrams are unsigned hints, re-read over TCP
   before they affect routing.
+- Fabric islands are derived from probes between addresses tagged `rdma`.
+  Opting in is per group: a group none of whose nodes carry an `rdma` tag
+  places exactly as it did before, so tagging one pair cannot strand a
+  deployment on the other. `MENTAT_ISLAND_PLACEMENT=off` turns the
+  constraint off outright.
 - Tested on one pair of boxes at TP=1 through TP=4, with GPU-free suites for
   the lifecycle behaviour. Your hardware is not in that sample.

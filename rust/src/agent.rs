@@ -18,7 +18,7 @@ use crate::config::cfg;
 use crate::daemon::set_keepalive;
 use crate::gpu::detect_gpus;
 use crate::logfmt::log;
-use crate::proto::{read_frame, Msg, ResumeActor};
+use crate::proto::{read_frame, Msg, ResumeActor, ServicePort};
 use crate::state::{local_ip_toward, FrameWriter, UnixFrameWriter};
 
 pub struct AgentOpts {
@@ -41,10 +41,20 @@ struct HostActor {
     kill_requested: bool,
 }
 
+/// What this container announces: whole URLs, and ports whose host the
+/// consumer resolves.
+struct Services {
+    urls: BTreeMap<String, String>,
+    ports: BTreeMap<String, ServicePort>,
+}
+
 struct AgentShared {
     daemon: Mutex<Option<FrameWriter>>,
     actors: Mutex<HashMap<String, HostActor>>,
     sock_dir: String,
+    /// Findings about announced services, carried on every register so a
+    /// reconnect does not lose them.
+    service_notes: Mutex<BTreeMap<String, String>>,
     /// Daemon-bound messages (results, exits) that could not be delivered
     /// while the daemon link was down. Drained in order right after the next
     /// successful register so nothing from an outage is silently lost.
@@ -84,7 +94,8 @@ pub fn run(opts: AgentOpts) -> ! {
         .unwrap_or(1);
     let sock_dir = std::env::var("MENTAT_SOCK_DIR").unwrap_or_else(|_| "/tmp/mentat".into());
     let _ = std::fs::create_dir_all(&sock_dir);
-    let services = announced_services();
+    let (urls, ports) = announced_services();
+    let services = Services { urls, ports };
 
     log(
         "agent_start",
@@ -94,7 +105,8 @@ pub fn run(opts: AgentOpts) -> ! {
             ("daemon", opts.daemon_addr.clone()),
             ("node_ip", node_ip.clone()),
             ("gpus", format!("{gpus:?}")),
-            ("services", format!("{services:?}")),
+            ("services", format!("{:?}", services.urls)),
+            ("service_ports", format!("{:?}", services.ports)),
         ],
     );
 
@@ -102,8 +114,10 @@ pub fn run(opts: AgentOpts) -> ! {
         daemon: Mutex::new(None),
         actors: Mutex::new(HashMap::new()),
         sock_dir,
+        service_notes: Mutex::new(BTreeMap::new()),
         unsent: Mutex::new(Vec::new()),
     });
+    watch_service_binds(&shared, &services);
 
     let mut attempt: u64 = 0;
     loop {
@@ -131,19 +145,245 @@ pub fn run(opts: AgentOpts) -> ! {
     }
 }
 
+/// One MENTAT_*_API value, in either of the two forms it may take.
+#[derive(Debug, Clone, PartialEq)]
+enum Announcement {
+    /// A whole URL, used exactly as written. The operator named a host, so
+    /// that host is the answer and nothing re-derives it.
+    Url(String),
+    /// A port and a path with the host left open, for the consumer to
+    /// resolve against this node's addresses.
+    Port { port: u16, path: String },
+}
+
+/// Read one MENTAT_*_API value.
+///
+///     http://10.0.0.1:8000/v1   one address, verbatim
+///     http://0.0.0.0:8000/v1    every address this node answers on
+///     8000/v1                   the same, said shorter
+///
+/// The wildcard host is what the API server was told to bind, so writing it
+/// here says the same thing to the router that `--host 0.0.0.0` says to
+/// uvicorn. Anything that parses as neither is passed through verbatim: a
+/// value this function does not understand is still the operator's, and
+/// refusing it would drop an endpoint that used to announce.
+fn parse_announcement(v: &str) -> Announcement {
+    let verbatim = || Announcement::Url(v.to_string());
+    let split_path = |rest: &str| -> Option<(u16, String)> {
+        let (port, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, ""),
+        };
+        Some((port.parse().ok()?, path.to_string()))
+    };
+    if let Some(rest) = v.strip_prefix("http://") {
+        let Some(rest) = rest.strip_prefix("0.0.0.0:") else {
+            return verbatim();
+        };
+        return match split_path(rest) {
+            Some((port, path)) => Announcement::Port { port, path },
+            None => verbatim(),
+        };
+    }
+    if v.contains("://") {
+        return verbatim();
+    }
+    match split_path(v) {
+        Some((port, path)) => Announcement::Port { port, path },
+        None => verbatim(),
+    }
+}
+
 /// Service endpoints this container announces, read once at agent start.
 /// The entrypoints export these right before `ray start`. An agent without
 /// them registers exactly as before.
-fn announced_services() -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
+fn announced_services() -> (BTreeMap<String, String>, BTreeMap<String, ServicePort>) {
+    let (mut urls, mut ports) = (BTreeMap::new(), BTreeMap::new());
     for (var, key) in [("MENTAT_OPENAI_API", "openai"), ("MENTAT_MCP_API", "mcp")] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.is_empty() {
-                out.insert(key.to_string(), v);
+        let Ok(v) = std::env::var(var) else { continue };
+        if v.is_empty() {
+            continue;
+        }
+        match parse_announcement(&v) {
+            Announcement::Url(u) => {
+                urls.insert(key.to_string(), u);
+            }
+            Announcement::Port { port, path } => {
+                ports.insert(key.to_string(), ServicePort { port, path });
             }
         }
     }
+    (urls, ports)
+}
+
+/// Watch each port-announced service until its server binds, then say so
+/// once if it bound narrowly.
+///
+/// The port-only form promises the router that every one of this node's
+/// addresses reaches the service, which holds only while the API server
+/// listens on the wildcard address. A server started with `--host
+/// 10.100.0.1` breaks that promise, and the symptom -- an endpoint that
+/// probes fine from one box and refuses from another -- reads like a
+/// network fault. This turns it into a sentence.
+///
+/// It only warns. The router's probe stays the only thing that admits an
+/// endpoint, so a finding here can explain a failure but never cause one.
+/// Verbatim URLs are skipped: naming a host is the operator saying which
+/// address to use.
+fn watch_service_binds(shared: &Arc<AgentShared>, services: &Services) {
+    for (name, sp) in &services.ports {
+        let (shared, name, port) = (shared.clone(), name.clone(), sp.port);
+        std::thread::spawn(move || {
+            // The API server binds minutes after `ray start` returns, so
+            // this waits rather than sampling once. Ten minutes covers a
+            // cold weight load. Past that the container has a bigger
+            // problem than its bind address.
+            let give_up = Instant::now() + Duration::from_secs(600);
+            let mut ever_listened = false;
+            let mut reported: Option<String> = None;
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                let bound = listening_addrs_for(port);
+                if bound.is_empty() {
+                    if !ever_listened && Instant::now() > give_up {
+                        log(
+                            "service_never_listened",
+                            &[("service", name.clone()), ("port", port.to_string())],
+                        );
+                        return;
+                    }
+                    // A server that stopped listening says nothing about how
+                    // it will bind when it comes back, so the last finding
+                    // stands until a new bind contradicts it.
+                    continue;
+                }
+                ever_listened = true;
+                // Any wildcard listener keeps the promise, whatever else is
+                // also bound.
+                let wide = bound.iter().any(|a| a == "0.0.0.0" || a == "::");
+                let note = (!wide).then(|| format!("bound to {} only", bound.join(",")));
+                if note == reported {
+                    continue;
+                }
+                // The watch outlives the first answer: a server that
+                // restarts onto the wildcard address must stop carrying
+                // "bound to 10.100.0.1 only" into every later probe failure.
+                if let Some(n) = &note {
+                    log(
+                        "service_bind_narrow",
+                        &[
+                            ("service", name.clone()),
+                            ("port", port.to_string()),
+                            ("bound", bound.join(",")),
+                            (
+                                "hint",
+                                "announced as a port, so every address of this node \
+                                 was promised. Bind 0.0.0.0 or announce the URL"
+                                    .to_string(),
+                            ),
+                        ],
+                    );
+                    shared
+                        .service_notes
+                        .lock()
+                        .unwrap()
+                        .insert(name.clone(), n.clone());
+                } else {
+                    log(
+                        "service_bind_widened",
+                        &[("service", name.clone()), ("port", port.to_string())],
+                    );
+                    shared.service_notes.lock().unwrap().remove(&name);
+                }
+                send_daemon(
+                    &shared,
+                    Msg::ServiceNote {
+                        service: name.clone(),
+                        note: note.clone().unwrap_or_default(),
+                    },
+                    &[],
+                );
+                reported = note;
+            }
+        });
+    }
+}
+
+/// Addresses listening on `port`, from the kernel's own table.
+///
+/// The agent shares the container's network namespace with the API server,
+/// which is what makes /proc/net/tcp the right place to ask. Connecting to
+/// the port would only answer that something listens.
+/// Empty means nothing listens yet, or the table could not be read (the
+/// dev boxes are macOS, which has no procfs -- there the check silently
+/// does nothing, which is correct for a warning).
+fn listening_addrs_for(port: u16) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (path, v6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
+        if let Ok(table) = std::fs::read_to_string(path) {
+            out.extend(listening_addrs(&table, v6, port));
+        }
+    }
+    out.sort();
+    out.dedup();
     out
+}
+
+/// Parse one /proc/net/tcp table: the local addresses in LISTEN state on
+/// `port`.
+///
+/// The `local_address` column is `HEX:HEX`, the address in host byte order
+/// per 32-bit word -- little-endian on every machine this runs on, which is
+/// why the bytes come back reversed. `st` is 0A for TCP_LISTEN.
+fn listening_addrs(table: &str, v6: bool, port: u16) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in table.lines().skip(1) {
+        let mut f = line.split_whitespace();
+        let (_, local, _, st) = match (f.next(), f.next(), f.next(), f.next()) {
+            (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
+            _ => continue,
+        };
+        if st != "0A" {
+            continue;
+        }
+        let Some((addr, p)) = local.split_once(':') else {
+            continue;
+        };
+        if u16::from_str_radix(p, 16).ok() != Some(port) {
+            continue;
+        }
+        let Some(a) = parse_proc_addr(addr, v6) else {
+            continue;
+        };
+        out.push(a);
+    }
+    out
+}
+
+/// One hex `local_address` field as an address string.
+fn parse_proc_addr(hex: &str, v6: bool) -> Option<String> {
+    let want = if v6 { 32 } else { 8 };
+    if hex.len() != want {
+        return None;
+    }
+    // Each 32-bit word is little-endian. Reversing its four bytes gives the
+    // network order the address is written in.
+    let mut bytes = Vec::with_capacity(want / 2);
+    for word in hex.as_bytes().chunks(8) {
+        let mut w = [0u8; 4];
+        for (i, b) in word.chunks(2).enumerate() {
+            w[i] = u8::from_str_radix(std::str::from_utf8(b).ok()?, 16).ok()?;
+        }
+        w.reverse();
+        bytes.extend_from_slice(&w);
+    }
+    if v6 {
+        let octets: [u8; 16] = bytes.try_into().ok()?;
+        Some(std::net::Ipv6Addr::from(octets).to_string())
+    } else {
+        let octets: [u8; 4] = bytes.try_into().ok()?;
+        Some(std::net::Ipv4Addr::from(octets).to_string())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -155,7 +395,7 @@ fn serve_once(
     node_ip: &str,
     gpus: &[u32],
     cpus: u32,
-    services: &BTreeMap<String, String>,
+    services: &Services,
 ) -> std::io::Result<()> {
     let stream = TcpStream::connect(&opts.daemon_addr)?;
     set_keepalive(&stream);
@@ -199,7 +439,9 @@ fn serve_once(
             cpus,
             container: container.to_string(),
             pid: std::process::id(),
-            services: services.clone(),
+            services: services.urls.clone(),
+            services_ports: services.ports.clone(),
+            service_notes: shared.service_notes.lock().unwrap().clone(),
             resume,
             unacked_refs,
         },
@@ -659,5 +901,93 @@ fn kill_actor_process(shared: &Arc<AgentShared>, actor_id: &str) {
         // Whole process group; the reaper reports the exit.
         libc::kill(-(pid as i32), libc::SIGKILL);
         libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The form every existing deployment uses. It must keep meaning
+    /// exactly one address, because that is the escape hatch for a server
+    /// the port form cannot describe.
+    #[test]
+    fn a_url_with_a_host_is_used_verbatim() {
+        for v in [
+            "http://10.100.0.1:8000/v1",
+            "https://models.example:8443/v1",
+            "http://localhost:9000/mcp",
+        ] {
+            assert_eq!(parse_announcement(v), Announcement::Url(v.to_string()));
+        }
+    }
+
+    #[test]
+    fn a_wildcard_host_and_a_bare_port_mean_the_same_thing() {
+        let want = Announcement::Port {
+            port: 8000,
+            path: "/v1".into(),
+        };
+        assert_eq!(parse_announcement("http://0.0.0.0:8000/v1"), want);
+        assert_eq!(parse_announcement("8000/v1"), want);
+        assert_eq!(
+            parse_announcement("9000"),
+            Announcement::Port {
+                port: 9000,
+                path: String::new()
+            },
+        );
+    }
+
+    /// A value this parser does not understand is still the operator's.
+    /// Refusing it would drop an endpoint that announced fine before.
+    #[test]
+    fn an_unparsable_value_passes_through() {
+        for v in ["not a url", "http://0.0.0.0:notaport/v1", "/v1"] {
+            assert_eq!(parse_announcement(v), Announcement::Url(v.to_string()));
+        }
+    }
+
+    /// A real /proc/net/tcp, trimmed to the columns the parser reads. Row 1
+    /// is a wildcard listener on 8000, row 2 is one bound to 10.100.0.1 on
+    /// 9000, row 3 is an established connection on 8000 that must not be
+    /// mistaken for a bind.
+    const TCP4: &str = "\
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:1F40 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1
+   1: 0100640A:2328 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2
+   2: 0100640A:1F40 0200640A:C350 01 00000000:00000000 00:00000000 00000000     0        0 3
+";
+
+    #[test]
+    fn a_wildcard_bind_is_read_as_wildcard() {
+        assert_eq!(listening_addrs(TCP4, false, 8000), vec!["0.0.0.0"]);
+    }
+
+    /// The finding the warning exists for: the server answers on one address
+    /// of a multi-homed node, so the port announcement promised more than
+    /// the socket delivers.
+    #[test]
+    fn a_narrow_bind_is_read_as_its_address() {
+        assert_eq!(listening_addrs(TCP4, false, 9000), vec!["10.100.0.1"]);
+    }
+
+    /// An established connection on the port is not a listener. Without the
+    /// state check every busy port would read as bound.
+    #[test]
+    fn only_listening_rows_count() {
+        assert!(listening_addrs(TCP4, false, 50000).is_empty());
+        assert!(listening_addrs("", false, 8000).is_empty());
+    }
+
+    #[test]
+    fn ipv6_rows_decode_too() {
+        let tcp6 = "\
+  sl  local_address                         rem_address                        st
+   0: 00000000000000000000000000000000:1F40 00000000000000000000000000000000:0000 0A
+   1: 0000000000000000FFFF00000100640A:2328 00000000000000000000000000000000:0000 0A
+";
+        assert_eq!(listening_addrs(tcp6, true, 8000), vec!["::"]);
+        assert_eq!(listening_addrs(tcp6, true, 9000), vec!["::ffff:10.100.0.1"]);
     }
 }

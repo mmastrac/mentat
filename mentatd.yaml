@@ -16,12 +16,18 @@
 # its cluster identity, and it must dial the pair by their LAN addresses --
 # the mesh dedupes by node id, not by the address a link happened to use.
 #
+# The hand-matching above is what MENTAT_ANNOUNCE_IFACES retires. Tag the
+# links on every box, let the daemons probe which ones are really cabled
+# together, and each rank is handed MENTAT_FABRIC_IP for the fabric its
+# group was placed on. This block stays until every deployment has dropped
+# its VLLM_HOST_IP. See GUIDE.md "Fabrics".
+#
 # Must be running before any converted model container starts: the containers'
 # `ray start` registers with this daemon on 127.0.0.1:6379 (retrying, so
 # ordering only delays them, never kills them).
 services:
   mentatd:
-    image: ${IMAGE:-mentatd:0.2.5}
+    image: ${IMAGE:-mentatd:0.3.0}
     container_name: mentatd
     # Host networking on purpose: the control port must be reachable both at
     # 127.0.0.1:6379 (agents in host-network model containers) and on the
@@ -54,9 +60,30 @@ services:
       # unicast targets for a listener outside every broadcast domain.
       - MENTAT_ANNOUNCE_PORT=${MENTAT_ANNOUNCE_PORT:-}
       - MENTAT_ANNOUNCE_ADDR=${MENTAT_ANNOUNCE_ADDR:-}
-      # Interfaces to announce on. Empty picks every up non-loopback
-      # interface except the container bridges.
+      # Interfaces to announce on, preferred first, with optional tags.
+      # Empty picks every up non-loopback interface except the container
+      # bridges, in kernel order and untagged. Names are `*`/`?` patterns,
+      # so one line serves every box:
+      #
+      #   MENTAT_ANNOUNCE_IFACES=en*f*np*=connectx+rdma,en*=lan
+      #
+      # The `rdma` tag is a claim that this link is cabled into a fabric.
+      # The daemons probe it before placement acts on it. A tag on the wrong
+      # interface fails its probes and is logged. Placement never uses it.
       - MENTAT_ANNOUNCE_IFACES=${MENTAT_ANNOUNCE_IFACES:-}
+      # Addresses to announce instead of deriving them from interfaces,
+      # same syntax. For a box whose advertisable address is on none of its
+      # own interfaces.
+      - MENTAT_ANNOUNCE_ADDRS=${MENTAT_ANNOUNCE_ADDRS:-}
+      # Reachability probing and the fabric-island hold-down. Empty uses the
+      # defaults (15 s cadence, 2 s per probe, 5 s hold-down).
+      - MENTAT_PROBE_INTERVAL_MS=${MENTAT_PROBE_INTERVAL_MS:-}
+      - MENTAT_PROBE_TIMEOUT_MS=${MENTAT_PROBE_TIMEOUT_MS:-}
+      - MENTAT_ISLAND_HOLD_DOWN_MS=${MENTAT_ISLAND_HOLD_DOWN_MS:-}
+      # `off` places multi-bundle groups without the one-fabric constraint.
+      # Groups opt in one at a time by carrying an rdma tag, so this is only
+      # for a cluster whose probes disagree with its cabling.
+      - MENTAT_ISLAND_PLACEMENT=${MENTAT_ISLAND_PLACEMENT:-}
       # HMAC key for announcements, matching spark-agent's mesh discovery.
       # Unset leaves them unsigned. A file keeps the key out of the
       # environment.

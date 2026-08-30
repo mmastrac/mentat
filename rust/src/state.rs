@@ -106,6 +106,13 @@ pub struct AgentInfo {
     /// Announced service endpoints ("openai", "mcp" -> URL). Stored and
     /// republished verbatim for mentatd-serve.
     pub services: std::collections::BTreeMap<String, String>,
+    /// The same, for services announced as a port with the host left open.
+    /// The daemon does not resolve them: it does not know which links the
+    /// router shares with this node, and the router does.
+    pub services_ports: std::collections::BTreeMap<String, crate::proto::ServicePort>,
+    /// What the agent noticed about a service after announcing it, keyed by
+    /// service name. Republished so the router can say why a probe failed.
+    pub service_notes: std::collections::BTreeMap<String, String>,
     pub writer: FrameWriter,
     pub alive: bool,
     /// When the agent link EOFed (degrade window start). None while
@@ -143,6 +150,13 @@ pub struct PgInfo {
     /// Why a Removed pg failed (pending timeout etc.); surfaced as the
     /// RayActorError reason when the driver gets the ready ref.
     pub fail_reason: Option<String>,
+    /// The fabric island this group was placed inside, when placement had
+    /// to pick one. None for a single-bundle group, for a group that fits
+    /// on one node, and on a cluster with no derived islands.
+    pub island: Option<crate::island::Island>,
+    /// Why the last placement attempt did not fit, kept so the pending
+    /// timeout can name the constraint rather than guess at it.
+    pub pending_reason: Option<String>,
 }
 
 pub enum RefState {
@@ -179,6 +193,28 @@ pub struct Counters {
     pub agents_registered: u64,
 }
 
+/// One probed (local address -> peer address) pair.
+///
+/// Reachability is a property of the pair. The same peer address answers
+/// from one of this node's links and refuses from another, which is why the
+/// prober binds a local address before connecting and why this table is two
+/// levels deep.
+#[derive(Clone)]
+pub struct PairProbe {
+    pub ok: bool,
+    /// Round trip of the last successful probe: connect, frame, reply.
+    pub rtt_ms: u64,
+    /// When the pair last answered. 0 means it never has.
+    pub last_ok_ms: u64,
+    /// Why the last attempt failed. Empty while ok.
+    pub error: String,
+}
+
+/// Probed pairs, keyed local address then remote address. An address pair
+/// with no entry has not been tried yet. A pair that failed has an entry.
+pub type ProbeTable =
+    std::collections::BTreeMap<String, std::collections::BTreeMap<String, PairProbe>>;
+
 pub struct PeerInfo {
     pub node_id: NodeId,
     pub node_ip: String,
@@ -190,8 +226,15 @@ pub struct PeerInfo {
     /// Every address the peer says it answers on, for a consumer that can
     /// reach none of node_ip or link_ip.
     pub addrs: Vec<String>,
-    /// Operator tags per address, carried for consumers, never read here.
+    /// Operator tags per address. Read here for one purpose: an `rdma` tag
+    /// on both ends of a probe-ok pair is what makes two nodes fabric
+    /// neighbours (see island::islands).
     pub addr_tags: std::collections::BTreeMap<String, Vec<String>>,
+    /// True when this peer answers probes. False for a daemon that predates
+    /// them, which is never probed.
+    pub probes: bool,
+    /// What probing this peer has found, keyed local then remote address.
+    pub probe_pairs: ProbeTable,
     pub control_addr: String,
     pub http_port: u16,
     pub writer: FrameWriter,
@@ -212,6 +255,11 @@ pub struct State {
     pub http_port: u16,
     /// Mesh view. Key is the peer's node_id.
     pub peers: HashMap<NodeId, PeerInfo>,
+    /// Fabric islands and the nodes that claim one, committed after the
+    /// island hold-down. A group none of whose nodes are tagged is placed
+    /// without the constraint, so a deployment that has not opted in keeps
+    /// placing exactly as it did before islands existed.
+    pub fabrics: crate::island::Fabrics,
     /// The elected head (lowest node_id among self + live peers, after
     /// hold-down). Starts as self.
     pub head_node_id: NodeId,
@@ -245,6 +293,7 @@ impl State {
         State {
             head_node_id: node_id.clone(),
             head_generation: 0,
+            fabrics: crate::island::Fabrics::default(),
             peers: HashMap::new(),
             node_id,
             node_ip,
@@ -339,6 +388,7 @@ impl State {
 /// Stable node id derived from the node's cluster IP: hex of "mentat:<ip>",
 /// zero-padded to ray's 56-hex-char shape. vLLM only ever compares these for
 /// equality and uses them as dict keys, so shape is all that matters.
+/// node_ip_of reverses it.
 pub fn node_id_for(ip: &str) -> NodeId {
     let mut hex = String::with_capacity(56);
     for b in format!("mentat:{ip}").bytes() {
@@ -349,6 +399,20 @@ pub fn node_id_for(ip: &str) -> NodeId {
         hex.push('0');
     }
     hex
+}
+
+/// The IP a node id was built from, or None if it was not built by
+/// node_id_for. The inverse exists because the id is the only handle some
+/// views carry, and a truncated one identifies nothing: every mentat node id
+/// starts with the hex of "mentat:".
+pub fn node_ip_of(node_id: &str) -> Option<String> {
+    let bytes: Vec<u8> = node_id
+        .as_bytes()
+        .chunks(2)
+        .map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok())
+        .collect::<Option<_>>()?;
+    let text = String::from_utf8(bytes.into_iter().take_while(|b| *b != 0).collect()).ok()?;
+    text.strip_prefix("mentat:").map(str::to_string)
 }
 
 /// Random 32-hex actor/pg/client ids, ray-shaped.

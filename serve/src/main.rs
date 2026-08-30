@@ -136,6 +136,7 @@ pub struct Config {
     pub probe_interval: Duration,
     pub probe_timeout: Duration,
     pub probe_fresh: Duration,
+    pub probe_promote: Duration,
     pub serving_timeout: Duration,
     pub mcp_timeout: Duration,
     pub tools_ttl: Duration,
@@ -187,6 +188,12 @@ impl Config {
                 "PROBE_FRESH_S",
                 (probe_interval * 3 + probe_timeout).as_secs_f64(),
             ),
+            // How often a group that fell through to a lower-ranked address
+            // re-tries the address its node ranked higher. Rare on purpose:
+            // the fall-through is already serving, so this only pays for
+            // getting back onto the preferred link, and every attempt while
+            // the preferred link is down is a wasted connect.
+            probe_promote: env_secs("PROBE_PROMOTE_S", (probe_interval * 6).as_secs_f64()),
             // A non-streaming answer arrives only when generation ends, so
             // this is sized for generation rather than for a hung request.
             serving_timeout: env_secs("SERVING_TIMEOUT_S", 1800.0),
@@ -217,6 +224,13 @@ pub struct ProbeResult {
     pub models: Vec<String>,
     pub seen: Instant,
     pub error: Option<String>,
+    /// The candidate this group is currently routed to. Sticky: once an
+    /// address answers, the router keeps using it rather than re-deciding
+    /// every round, so a flapping preferred link cannot move live traffic
+    /// between addresses on every probe.
+    pub selected: Option<String>,
+    /// When a higher-ranked candidate was last re-tried.
+    pub promoted_at: Instant,
 }
 
 pub struct Shared {
@@ -244,6 +258,32 @@ pub struct Shared {
     pub refresh: tokio::sync::Notify,
 }
 
+/// One announced service, resolved into the base URLs that could serve it.
+#[derive(Clone)]
+pub struct Endpoint {
+    /// Base URLs to try, best first. A verbatim announcement has exactly
+    /// one and it is never re-derived -- naming a host is the operator
+    /// saying which address to use. A port announcement has one per address
+    /// of the announcing node that this router is allowed to reach.
+    ///
+    /// Empty means the announcement resolved to nothing, which is a
+    /// different failure from not announcing at all and reads differently
+    /// in `why_not`.
+    pub candidates: Vec<String>,
+    /// What was announced, for messages. Not parsed anywhere.
+    pub announced: String,
+    /// What the announcing agent noticed about the service afterwards,
+    /// typically that its server bound one address rather than all of them.
+    pub note: Option<String>,
+}
+
+impl Endpoint {
+    /// The URL to use with no probe result to go on.
+    pub fn best(&self) -> Option<&str> {
+        self.candidates.first().map(String::as_str)
+    }
+}
+
 /// One group as the freshest daemon views describe it.
 #[derive(Clone)]
 pub struct GroupEntry {
@@ -251,8 +291,128 @@ pub struct GroupEntry {
     pub daemon: String,
     pub agents_alive: usize,
     pub running: usize,
-    pub openai: Option<String>,
-    pub mcp: Option<String>,
+    pub openai: Option<Endpoint>,
+    pub mcp: Option<Endpoint>,
+}
+
+/// Ranked addresses per node, added to `out` from one daemon's snapshot.
+///
+/// Keyed by every address that identifies a node -- the name it calls
+/// itself, the address a mesh link reached it on, and each address it
+/// advertises -- because an agent registers under whichever of them its
+/// container was configured with, and that is the only key available to
+/// join an agent to its node.
+///
+/// Both its own daemon and every peer that knows it describe a node, and
+/// those descriptions differ in completeness. The longest list wins, since a
+/// peer that reports one address has not contradicted a daemon that reports
+/// three.
+fn collect_node_addrs(snap: &Value, out: &mut HashMap<String, Vec<String>>) {
+    let mut record = |ids: Vec<&str>, addrs: Vec<String>| {
+        if addrs.is_empty() {
+            return;
+        }
+        for id in ids.into_iter().filter(|s| !s.is_empty()) {
+            match out.get(id) {
+                Some(prev) if prev.len() >= addrs.len() => {}
+                _ => {
+                    out.insert(id.to_string(), addrs.clone());
+                }
+            }
+        }
+    };
+    let listed = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str())
+            .map(str::to_string)
+            .collect()
+    };
+
+    let own = listed(&snap["addrs"]);
+    let own_ip = snap["node_ip"].as_str().unwrap_or_default();
+    let mut own_ids: Vec<&str> = vec![own_ip];
+    own_ids.extend(own.iter().map(String::as_str));
+    record(
+        own_ids,
+        if own.is_empty() {
+            vec![own_ip.to_string()]
+        } else {
+            own.clone()
+        },
+    );
+
+    for (_, p) in snap["peers"].as_object().into_iter().flatten() {
+        let addrs = listed(&p["addrs"]);
+        let ip = p["node_ip"].as_str().unwrap_or_default();
+        let mut ids: Vec<&str> = vec![ip, p["link_ip"].as_str().unwrap_or_default()];
+        ids.extend(addrs.iter().map(String::as_str));
+        record(
+            ids,
+            if addrs.is_empty() {
+                vec![ip.to_string()]
+            } else {
+                addrs.clone()
+            },
+        );
+    }
+}
+
+/// One agent's announcement of `svc`, resolved into base URLs to try.
+///
+/// A verbatim URL resolves to itself and is left ungated: the operator named
+/// a host, and a router that second-guessed it would drop an endpoint that
+/// announced fine before. A port announcement is resolved here instead,
+/// against the announcing node's own ranked addresses, and ALLOWED_SOURCES
+/// gates every address that produces -- those are addresses this process
+/// derived and will connect to, which is what that list is for.
+///
+/// Within the node's ranking, an address on one of this box's own subnets
+/// comes first. The node ranks its links by speed because only it can. The
+/// router ranks by whether it shares the wire, because only it can. Serving
+/// HTTP is trivial bandwidth, so reachable beats fast.
+fn endpoint_of(
+    agent: &Value,
+    svc: &str,
+    nodes: &HashMap<String, Vec<String>>,
+    allowed: &[String],
+    subnets: &[(u32, u32)],
+) -> Option<Endpoint> {
+    let note = agent["service_notes"][svc]
+        .as_str()
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
+    if let Some(url) = agent["services"][svc].as_str().filter(|u| !u.is_empty()) {
+        return Some(Endpoint {
+            candidates: vec![url.to_string()],
+            announced: url.to_string(),
+            note,
+        });
+    }
+    let sp = &agent["services_ports"][svc];
+    let port = sp["port"].as_u64()?;
+    let path = sp["path"].as_str().unwrap_or_default();
+    let node_ip = agent["node_ip"].as_str().unwrap_or_default();
+    let mut hosts: Vec<String> = nodes
+        .get(node_ip)
+        .cloned()
+        .unwrap_or_else(|| vec![node_ip.to_string()]);
+    hosts.retain(|h| !h.is_empty() && prefix_allowed(allowed, h));
+    // A node may list an address twice across the views it was merged from,
+    // and a duplicate candidate would be probed twice and reported twice.
+    let mut seen = HashSet::new();
+    hosts.retain(|h| seen.insert(h.clone()));
+    // Stable, so the node's own order survives inside each half.
+    hosts.sort_by_key(|h| !on_local_subnet(h, subnets));
+    Some(Endpoint {
+        candidates: hosts
+            .iter()
+            .map(|h| format!("http://{h}:{port}{path}"))
+            .collect(),
+        announced: format!("port {port}{path} on node {node_ip}"),
+        note,
+    })
 }
 
 /// Merge the daemon views into one group table. A group's agents all
@@ -261,7 +421,16 @@ pub struct GroupEntry {
 /// actors.
 pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
     let stale = shared.cfg.poll_interval * 3;
+    let subnets = local_subnets();
     let daemons = shared.daemons.lock().unwrap();
+    // Every node any watched daemon can describe, so an agent's node_ip
+    // resolves to that node's own ranked addresses.
+    let mut nodes: HashMap<String, Vec<String>> = HashMap::new();
+    for view in daemons.values() {
+        if let Some(snap) = view.status.as_ref() {
+            collect_node_addrs(snap, &mut nodes);
+        }
+    }
     let mut out: BTreeMap<String, GroupEntry> = BTreeMap::new();
     for (addr, view) in daemons.iter() {
         let fresh = view.seen.map(|s| s.elapsed() <= stale).unwrap_or(false);
@@ -281,25 +450,32 @@ pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
                 .flatten()
                 .filter(|a| a["state"].as_str() == Some("running"))
                 .count();
+            let resolve = |a: &Value, svc: &str| {
+                endpoint_of(a, svc, &nodes, &shared.cfg.allowed_sources, &subnets)
+            };
             // Only the rank running the API server announces "openai". If
-            // several ever do, the lexically first wins, for determinism.
+            // several ever do, the one whose best candidate sorts first
+            // wins, for determinism.
             let openai = agents
                 .iter()
-                .filter_map(|a| a["services"]["openai"].as_str())
-                .min()
-                .map(str::to_string);
+                .filter_map(|a| resolve(a, "openai"))
+                .min_by(|x, y| x.best().cmp(&y.best()));
             // Every rank announces "mcp" (the status server runs on all of
             // them). Prefer the API node's -- it is the one with throughput
-            // to report -- then lexical order.
+            // to report -- then the same order.
             let mcp = agents
                 .iter()
                 .filter_map(|a| {
-                    a["services"]["mcp"]
-                        .as_str()
-                        .map(|m| (a["services"]["openai"].is_null(), m))
+                    resolve(a, "mcp").map(|m| {
+                        (
+                            a["services"]["openai"].is_null()
+                                && a["services_ports"]["openai"].is_null(),
+                            m,
+                        )
+                    })
                 })
-                .min()
-                .map(|(_, m)| m.to_string());
+                .min_by(|x, y| (x.0, x.1.best()).cmp(&(y.0, y.1.best())))
+                .map(|(_, m)| m);
             let entry = GroupEntry {
                 group: name.clone(),
                 daemon: addr.clone(),
@@ -327,8 +503,14 @@ pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
 
 /// Ok(model names) when the group may take traffic; Err(why) otherwise.
 pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<String>, String> {
-    if e.openai.is_none() {
+    let Some(ep) = e.openai.as_ref() else {
         return Err("no announced OpenAI endpoint".into());
+    };
+    if ep.candidates.is_empty() {
+        return Err(format!(
+            "announced {}, and no address of that node passes ALLOWED_SOURCES",
+            ep.announced
+        ));
     }
     if e.running == 0 {
         return Err("no running actors".into());
@@ -336,13 +518,34 @@ pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<String>, String>
     let probes = shared.probes.lock().unwrap();
     match probes.get(&e.group) {
         None => Err("not probed yet".into()),
+        // The agent's own finding is appended rather than substituted: it
+        // explains a probe failure without being the gate. "connection
+        // refused" plus "bound to 10.100.0.1 only" is one diagnosis. Either
+        // alone is a guess.
         Some(p) if !p.ok => Err(format!(
-            "endpoint probe failed: {}",
-            p.error.as_deref().unwrap_or("unknown")
+            "endpoint probe failed: {}{}",
+            p.error.as_deref().unwrap_or("unknown"),
+            match &ep.note {
+                Some(n) => format!(" (agent reports: {n})"),
+                None => String::new(),
+            }
         )),
         Some(p) if p.seen.elapsed() > shared.cfg.probe_fresh => Err("endpoint probe stale".into()),
         Some(p) => Ok(p.models.clone()),
     }
+}
+
+/// The base URL a healthy group's traffic goes to: whichever candidate the
+/// prober settled on, falling back to the best-ranked one.
+pub fn endpoint_url(shared: &Shared, e: &GroupEntry) -> Option<String> {
+    let ep = e.openai.as_ref()?;
+    shared
+        .probes
+        .lock()
+        .unwrap()
+        .get(&e.group)
+        .and_then(|p| p.selected.clone())
+        .or_else(|| ep.best().map(str::to_string))
 }
 
 /// model name -> (group, announced base URL), healthy groups only. Names come
@@ -351,7 +554,7 @@ pub fn model_table(shared: &Shared) -> BTreeMap<String, (String, String)> {
     let mut out = BTreeMap::new();
     for e in group_table(shared).values() {
         if let Ok(models) = health_of(shared, e) {
-            let url = e.openai.clone().unwrap_or_default();
+            let url = endpoint_url(shared, e).unwrap_or_default();
             for m in models {
                 out.entry(m)
                     .or_insert_with(|| (e.group.clone(), url.clone()));
@@ -399,8 +602,13 @@ pub fn status_view(shared: &Shared) -> Value {
                     "daemon": e.daemon,
                     "agents_alive": e.agents_alive,
                     "actors_running": e.running,
-                    "openai": e.openai,
-                    "mcp": e.mcp,
+                    // Which address is in use, and which were available to
+                    // fall through to. A group serving off its second
+                    // candidate is the visible symptom of a link being down.
+                    "openai": endpoint_url(shared, e),
+                    "openai_candidates": e.openai.as_ref().map(|x| x.candidates.clone()),
+                    "openai_note": e.openai.as_ref().and_then(|x| x.note.clone()),
+                    "mcp": e.mcp.as_ref().and_then(|x| x.best()),
                     "healthy": health.is_ok(),
                     "models": health.as_ref().ok(),
                     "why_not": health.as_ref().err(),
@@ -811,6 +1019,13 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) {
 /// an announcement into a routable fact, and its /models answer is where the
 /// served model names come from. Probes run concurrently so one wedged
 /// endpoint cannot age the others' results past freshness.
+///
+/// A group announced by port has several candidate addresses, and the probe
+/// decides among them the same way it decides anything else: by trying. The
+/// selection is sticky, falls through on failure, and is re-raised to the
+/// node's preferred address when that address answers again -- so a dropped
+/// cable moves serving onto the LAN and a reconnected one moves it back,
+/// without either transition needing an operator.
 async fn prober(shared: Arc<Shared>) {
     loop {
         let table = group_table(&shared);
@@ -828,26 +1043,43 @@ async fn prober(shared: Arc<Shared>) {
             if e.running == 0 {
                 continue;
             }
-            let Some(base) = e.openai.clone() else {
+            let Some(ep) = e.openai.clone().filter(|x| !x.candidates.is_empty()) else {
                 continue;
             };
             let group = e.group.clone();
             let client = shared.client.clone();
             let t = shared.cfg.probe_timeout;
+            // Sticky selection and the promotion clock, read before the
+            // round so the probe itself holds no lock.
+            let (sticky, promote) = {
+                let probes = shared.probes.lock().unwrap();
+                match probes.get(&group) {
+                    Some(p) => (
+                        p.selected.clone(),
+                        p.promoted_at.elapsed() >= shared.cfg.probe_promote,
+                    ),
+                    None => (None, true),
+                }
+            };
             set.spawn(async move {
-                let url = format!("{}/models", base.trim_end_matches('/'));
-                (group, http_get_json(&client, &url, t).await)
+                let r = probe_candidates(&client, &ep.candidates, sticky, promote, t).await;
+                (group, r)
             });
         }
-        while let Some(Ok((group, res))) = set.join_next().await {
+        while let Some(Ok((group, (tried_top, res)))) = set.join_next().await {
+            let now = Instant::now();
+            let prev = {
+                let probes = shared.probes.lock().unwrap();
+                probes
+                    .get(&group)
+                    .map(|p| (p.ok, p.selected.clone(), p.promoted_at))
+            };
+            let (was_ok, was_sel, was_promoted) = match prev {
+                Some((a, b, c)) => (Some(a), b, c),
+                None => (None, None, now),
+            };
             let pr = match res {
-                Ok(v) => {
-                    let mut models: Vec<String> = v["data"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|m| m["id"].as_str().map(String::from))
-                        .collect();
+                Ok((url, mut models)) => {
                     if models.is_empty() {
                         // An endpoint that answers but lists nothing still
                         // serves, so fall back to the group name.
@@ -856,19 +1088,25 @@ async fn prober(shared: Arc<Shared>) {
                     ProbeResult {
                         ok: true,
                         models,
-                        seen: Instant::now(),
+                        seen: now,
                         error: None,
+                        selected: Some(url),
+                        promoted_at: if tried_top { now } else { was_promoted },
                     }
                 }
                 Err(e) => ProbeResult {
                     ok: false,
                     models: Vec::new(),
-                    seen: Instant::now(),
+                    seen: now,
                     error: Some(e),
+                    // Nothing answered, so there is nothing to be routed to;
+                    // clearing it means recovery starts from the top of the
+                    // ranking rather than from the last thing that worked.
+                    selected: None,
+                    promoted_at: if tried_top { now } else { was_promoted },
                 },
             };
-            let mut probes = shared.probes.lock().unwrap();
-            if probes.get(&group).map(|p| p.ok) != Some(pr.ok) {
+            if was_ok != Some(pr.ok) {
                 log(
                     "group_probe",
                     &[
@@ -879,13 +1117,82 @@ async fn prober(shared: Arc<Shared>) {
                     ],
                 );
             }
-            probes.insert(group, pr);
+            // Which address serves a group is worth a line every time it
+            // moves: it is how a dropped fabric link shows up here.
+            if pr.ok && pr.selected != was_sel {
+                log(
+                    "group_endpoint",
+                    &[
+                        ("group", group.clone()),
+                        ("url", pr.selected.clone().unwrap_or_default()),
+                        ("previous", was_sel.unwrap_or_default()),
+                    ],
+                );
+            }
+            shared.probes.lock().unwrap().insert(group, pr);
         }
         tokio::select! {
             _ = tokio::time::sleep(shared.cfg.probe_interval) => {}
             _ = shared.refresh.notified() => {}
         }
     }
+}
+
+/// Probe candidates until one answers.
+///
+/// Order is the whole behaviour. With a sticky selection the router probes
+/// that address first and only walks the list when it fails, so a working
+/// route is never abandoned for a re-decision. Every `PROBE_PROMOTE_S` the
+/// order is inverted for one round: candidates ranked above the sticky one
+/// go first, and a success there takes the route back to the node's
+/// preferred link.
+///
+/// Returns whether the top-ranked candidate was tried this round (which is
+/// what resets the promotion clock) and either the answering URL with its
+/// model names, or every candidate's error.
+async fn probe_candidates(
+    client: &HttpClients,
+    candidates: &[String],
+    sticky: Option<String>,
+    promote: bool,
+    t: Duration,
+) -> (bool, Result<(String, Vec<String>), String>) {
+    let at = sticky
+        .as_ref()
+        .and_then(|s| candidates.iter().position(|c| c == s));
+    // A promotion round walks plain rank order, which puts the candidates
+    // above the sticky one ahead of it. Every other round leads with the
+    // sticky one and keeps rank order behind it.
+    let order: Vec<&String> = match at.filter(|_| !promote) {
+        Some(i) => std::iter::once(&candidates[i])
+            .chain(
+                candidates
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(j, c)| (j != i).then_some(c)),
+            )
+            .collect(),
+        None => candidates.iter().collect(),
+    };
+    let tried_top = order.first().copied() == candidates.first();
+
+    let mut errors: Vec<String> = Vec::new();
+    for base in order {
+        let url = format!("{}/models", base.trim_end_matches('/'));
+        match http_get_json(client, &url, t).await {
+            Ok(v) => {
+                let models: Vec<String> = v["data"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m["id"].as_str().map(String::from))
+                    .collect();
+                return (tried_top, Ok((base.clone(), models)));
+            }
+            Err(e) => errors.push(format!("{base}: {e}")),
+        }
+    }
+    (tried_top, Err(errors.join("; ")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,9 +1446,7 @@ mod tests {
         // assertion below would hold for the wrong reason.
         tokio::time::sleep(Duration::from_millis(150)).await;
         let second = pooled.request(get(&url)).await;
-        let e = second
-            .err()
-            .expect("reusing the dead connection should fail");
+        let e = second.expect_err("reusing the dead connection should fail");
         assert!(
             !e.is_connect(),
             "the endpoint is up, so this must not read as a connect failure: {e}"
@@ -1292,6 +1597,238 @@ mod tests {
         assert!(prefix_allowed(&allowed, "127.0.0.1"));
         assert!(!prefix_allowed(&allowed, "192.168.1.109"));
         assert!(!prefix_allowed(&allowed, "203.0.113.7"));
+    }
+
+    /// A port announcement is resolved against the announcing node's own
+    /// ranked addresses. The reported failure it exists for: the endpoint
+    /// was announced on the fabric address, and a router off that fabric
+    /// could never reach it however healthy the model was.
+    #[test]
+    fn a_port_announcement_resolves_to_every_address_of_its_node() {
+        let snap = serde_json::json!({
+            "node_ip": "10.100.0.1",
+            "addrs": ["10.100.0.1", "192.168.1.11"],
+            "peers": {},
+        });
+        let mut nodes = HashMap::new();
+        collect_node_addrs(&snap, &mut nodes);
+        let agent = serde_json::json!({
+            "node_ip": "10.100.0.1",
+            "services": {},
+            "services_ports": {"openai": {"port": 8000, "path": "/v1"}},
+        });
+        let allowed = vec!["10.".to_string(), "192.168.1.".to_string()];
+        let ep = endpoint_of(&agent, "openai", &nodes, &allowed, &subnets()).unwrap();
+        assert_eq!(
+            ep.candidates,
+            vec![
+                // Local subnet first: this router shares the LAN wire and
+                // not the fabric, whatever the node's own ranking says.
+                "http://192.168.1.11:8000/v1",
+                "http://10.100.0.1:8000/v1",
+            ]
+        );
+    }
+
+    /// A verbatim URL is the escape hatch, so it must survive untouched --
+    /// including past ALLOWED_SOURCES, which covers addresses this process
+    /// derived rather than one the operator wrote down.
+    #[test]
+    fn a_verbatim_url_is_neither_re_derived_nor_gated() {
+        let agent = serde_json::json!({
+            "node_ip": "10.100.0.1",
+            "services": {"openai": "http://203.0.113.7:8000/v1"},
+            "services_ports": {},
+        });
+        let ep = endpoint_of(
+            &agent,
+            "openai",
+            &HashMap::new(),
+            &["10.".to_string()],
+            &subnets(),
+        )
+        .unwrap();
+        assert_eq!(ep.candidates, vec!["http://203.0.113.7:8000/v1"]);
+    }
+
+    /// A derived address is a claim this process would connect to, so the
+    /// allowlist does apply to it. Everything filtered out leaves a resolved
+    /// endpoint with nothing to try, which health_of reports as its own
+    /// failure rather than as "nothing announced".
+    #[test]
+    fn derived_addresses_are_gated_and_may_leave_nothing() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "10.100.0.1".to_string(),
+            vec!["10.100.0.1".to_string(), "192.168.1.11".to_string()],
+        );
+        let agent = serde_json::json!({
+            "node_ip": "10.100.0.1",
+            "services": {},
+            "services_ports": {"openai": {"port": 8000, "path": "/v1"}},
+        });
+        let ep = endpoint_of(&agent, "openai", &nodes, &["172.".to_string()], &subnets()).unwrap();
+        assert!(ep.candidates.is_empty(), "{:?}", ep.candidates);
+        assert!(ep.announced.contains("port 8000/v1"), "{}", ep.announced);
+    }
+
+    /// An agent registered under an address the node does not list first
+    /// must still find its node. Agents register with whatever MENTAT_NODE_IP
+    /// their container was given, which is routinely the fabric address.
+    #[test]
+    fn an_agent_joins_its_node_by_any_of_its_addresses() {
+        let snap = serde_json::json!({
+            "node_ip": "192.168.1.13",
+            "addrs": ["192.168.1.13"],
+            "peers": {"n1": {
+                "node_ip": "10.100.0.1",
+                "link_ip": "192.168.1.11",
+                "addrs": ["192.168.1.11", "10.100.0.1"],
+            }},
+        });
+        let mut nodes = HashMap::new();
+        collect_node_addrs(&snap, &mut nodes);
+        for key in ["10.100.0.1", "192.168.1.11"] {
+            assert_eq!(
+                nodes.get(key).map(Vec::len),
+                Some(2),
+                "{key} must resolve to the peer's whole address list"
+            );
+        }
+    }
+
+    /// A peer that reports one address has not contradicted a daemon that
+    /// reports three, so the longer description wins.
+    #[test]
+    fn the_fuller_description_of_a_node_wins() {
+        let mut nodes = HashMap::new();
+        collect_node_addrs(
+            &serde_json::json!({
+                "node_ip": "10.100.0.1", "addrs": [], "peers": {}
+            }),
+            &mut nodes,
+        );
+        collect_node_addrs(
+            &serde_json::json!({
+                "node_ip": "10.100.0.1",
+                "addrs": ["10.100.0.1", "192.168.1.11"],
+                "peers": {},
+            }),
+            &mut nodes,
+        );
+        assert_eq!(nodes["10.100.0.1"].len(), 2);
+    }
+
+    /// A working route is not re-decided every round. Without stickiness the
+    /// router would move live traffic back to the preferred address the
+    /// instant it answered a probe, mid-generation.
+    #[tokio::test]
+    async fn a_working_selection_is_probed_first_and_kept() {
+        let (top, low) = (
+            models_endpoint("model-x").await,
+            models_endpoint("model-x").await,
+        );
+        let c = vec![format!("http://{top}/v1"), format!("http://{low}/v1")];
+        let clients = HttpClients::new();
+        let (tried_top, r) = probe_candidates(
+            &clients,
+            &c,
+            Some(c[1].clone()),
+            false,
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(!tried_top, "the sticky candidate is not the top-ranked one");
+        assert_eq!(r.unwrap().0, c[1], "the sticky candidate must be kept");
+    }
+
+    /// The failure this whole path exists for: the preferred address stops
+    /// answering and the group keeps serving on the next one.
+    #[tokio::test]
+    async fn a_dead_top_candidate_falls_through() {
+        let up = models_endpoint("model-x").await;
+        let dead = dead_addr().await;
+        let c = vec![format!("http://{dead}/v1"), format!("http://{up}/v1")];
+        let clients = HttpClients::new();
+        let (_, r) = probe_candidates(&clients, &c, None, false, Duration::from_secs(2)).await;
+        let (url, models) = r.expect("the second candidate answers");
+        assert_eq!(url, c[1]);
+        assert_eq!(models, vec!["model-x"]);
+    }
+
+    /// And back again once the cable is in: a promotion round tries the
+    /// higher-ranked candidate first, so recovery needs no operator.
+    #[tokio::test]
+    async fn a_promotion_round_takes_the_preferred_address_back() {
+        let top = models_endpoint("model-x").await;
+        let low = models_endpoint("model-x").await;
+        let c = vec![format!("http://{top}/v1"), format!("http://{low}/v1")];
+        let clients = HttpClients::new();
+        let (tried_top, r) = probe_candidates(
+            &clients,
+            &c,
+            Some(c[1].clone()),
+            true,
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(tried_top);
+        assert_eq!(r.unwrap().0, c[0], "the preferred address answers again");
+    }
+
+    /// Every candidate down must fail, and say which ones. A fall-through
+    /// list that swallowed the reasons would report one dead address as the
+    /// whole story.
+    #[tokio::test]
+    async fn every_candidate_down_reports_every_candidate() {
+        let (d1, d2) = (dead_addr().await, dead_addr().await);
+        let c = vec![format!("http://{d1}/v1"), format!("http://{d2}/v1")];
+        let clients = HttpClients::new();
+        let (_, r) = probe_candidates(&clients, &c, None, false, Duration::from_secs(2)).await;
+        let e = r.expect_err("nothing answers");
+        assert!(
+            e.contains(&d1.to_string()) && e.contains(&d2.to_string()),
+            "{e}"
+        );
+    }
+
+    /// A server that answers /v1/models with one model, for the candidate
+    /// tests above.
+    async fn models_endpoint(model: &str) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = format!("{{\"data\":[{{\"id\":\"{model}\"}}]}}");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    while sock.read(&mut buf).await.unwrap_or(0) > 0 {
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = sock.write_all(head.as_bytes()).await;
+                        let _ = sock.write_all(body.as_bytes()).await;
+                        let _ = sock.flush().await;
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// An address nothing listens on: bound, read, and dropped.
+    async fn dead_addr() -> std::net::SocketAddr {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        drop(l);
+        addr
     }
 
     #[test]

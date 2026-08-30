@@ -14,10 +14,18 @@ from ray.util.placement_group import (  # noqa: F401
 
 
 def get_node_ip_address():
-    """The IP this node is known by in the cluster. VLLM_HOST_IP wins because
-    the serving entrypoints derive it from the interface that actually
-    carries the cluster subnet; the UDP trick is the dev-box fallback."""
-    for var in ("VLLM_HOST_IP", "MENTAT_NODE_IP"):
+    """The IP this node is known by in the cluster.
+
+    VLLM_HOST_IP wins: an operator who set it by hand meant it, and that is
+    what makes adopting the automatic choice an opt-in -- a deployment moves
+    over by deleting its VLLM_HOST_IP, one deployment at a time.
+
+    MENTAT_FABRIC_IP comes next. The daemon sets it per rank when it placed
+    this group on a probed fabric, so it names the address that carries
+    NCCL for these particular ranks. MENTAT_NODE_IP is the container's own
+    idea of its address, which is right on a single-fabric box and a guess
+    anywhere else. The UDP trick is the dev-box fallback."""
+    for var in ("VLLM_HOST_IP", "MENTAT_FABRIC_IP", "MENTAT_NODE_IP"):
         v = os.environ.get(var)
         if v:
             return v

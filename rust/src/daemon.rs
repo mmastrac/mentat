@@ -66,6 +66,7 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
 
     crate::http::serve(shared.clone(), opts.http_port);
     crate::mesh::start(shared.clone(), opts.peers, opts.port, opts.http_port);
+    crate::island::start(shared.clone());
     crate::announce::start(shared.clone());
 
     // Lifecycle sweeper: slow-call warnings, the pending-pg timeout, and the
@@ -130,19 +131,32 @@ fn sweep_lifecycle(shared: &SharedRef) {
     // Pending-pg timeout: a placement group that never gets its agents must
     // fail loudly instead of leaving the driver waiting forever.
     let pg_timeout = cfg().pg_pending_timeout_ms;
-    let timed_out: Vec<(String, String, u64)> = st
+    let timed_out: Vec<(String, String, u64, Option<String>)> = st
         .pgs
         .values()
         .filter(|p| p.state == PgState::Pending)
         .filter(|p| now.saturating_sub(p.created_ms) > pg_timeout)
-        .map(|p| (p.id.clone(), p.group.clone(), now - p.created_ms))
+        .map(|p| {
+            (
+                p.id.clone(),
+                p.group.clone(),
+                now - p.created_ms,
+                p.pending_reason.clone(),
+            )
+        })
         .collect();
-    for (pg_id, group, age) in timed_out {
+    for (pg_id, group, age, why) in timed_out {
+        // The last placement attempt recorded what it could not find. Say
+        // that rather than the old blanket guess about GPU counts: at four
+        // nodes on two fabrics, "not enough GPUs" is usually wrong and
+        // "not enough on one fabric" is usually right.
+        let why =
+            why.unwrap_or_else(|| format!("group '{group}' never had enough registered GPUs"));
         if let Some(pg) = st.pgs.get_mut(&pg_id) {
             pg.state = PgState::Removed;
             pg.fail_reason = Some(format!(
-                "placement group still PENDING after {age}ms: group '{group}' never had \
-                 enough registered GPUs (MENTAT_PG_PENDING_TIMEOUT_MS)"
+                "placement group still PENDING after {age}ms: {why} \
+                 (MENTAT_PG_PENDING_TIMEOUT_MS)"
             ));
         }
         log(
@@ -151,11 +165,12 @@ fn sweep_lifecycle(shared: &SharedRef) {
                 ("pg", pg_id.clone()),
                 ("group", group.clone()),
                 ("age_ms", age.to_string()),
+                ("why", why.clone()),
             ],
         );
         st.emit(
             "pg_timeout",
-            json!({ "group": group, "pg_id": pg_id, "waited_ms": age }),
+            json!({ "group": group, "pg_id": pg_id, "waited_ms": age, "why": why }),
         );
         shared.cv.notify_all();
     }
@@ -301,6 +316,15 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
         Msg::Hello { .. } => client_conn(shared, reader, writer, peer_ip, first.0),
         Msg::AgentRegister { .. } => agent_conn(shared, reader, writer, peer_ip, first),
         Msg::PeerHello { .. } => crate::mesh::accept_peer(shared, reader, writer, peer_ip, first),
+        // A reachability probe. It gets its own connection because the
+        // question is about the socket rather than the mesh: answering says
+        // this address pair carries traffic, and the node id in the answer
+        // says the address belongs to the node the prober meant. Nothing is
+        // recorded here -- the prober owns the result.
+        Msg::Probe { .. } => {
+            let my_id = shared.st.lock().unwrap().node_id.clone();
+            let _ = writer.send(Msg::ProbeOk { node_id: my_id }, first.0.req, &[]);
+        }
         other => {
             let _ = writer.send(
                 Msg::Err {
@@ -525,6 +549,8 @@ fn handle_client_msg(
                     state: PgState::Pending,
                     created_ms: crate::state::now_ms_u64(),
                     fail_reason: None,
+                    island: None,
+                    pending_reason: None,
                 },
             );
             st.emit(
@@ -770,6 +796,14 @@ fn create_actor(
     let Some(Some(bundle)) = pg.assignment.get(bundle_index).cloned() else {
         return err(format!("bundle {bundle_index} of pg {pg_id} is not placed"));
     };
+    // The address this rank answers on inside the fabric its group was
+    // placed on. Only set when the group spans a fabric. A group on one
+    // node has nothing to cross.
+    let fabric_ip = pg
+        .island
+        .as_ref()
+        .and_then(|i| i.addr.get(&bundle.node_id))
+        .cloned();
     if num_gpus > bundle.gpu_ids.len() as f64 {
         return err(format!(
             "actor wants {num_gpus} GPUs but bundle {bundle_index} reserves {}",
@@ -798,6 +832,9 @@ fn create_actor(
             .join(","),
     );
     spawn_env.insert("MENTAT_GCS_ADDRESS".into(), st.gcs_address.clone());
+    if let Some(ip) = fabric_ip {
+        spawn_env.insert("MENTAT_FABRIC_IP".into(), ip);
+    }
 
     st.actors.insert(
         actor_id.clone(),
@@ -1127,6 +1164,19 @@ fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
 
 /// Try to complete every pending placement group. All-or-nothing per group:
 /// partial reservations are never held, so two pending pgs can't deadlock.
+///
+/// A group of more than one bundle is placed inside one fabric island. TP
+/// ranks talk to each other over NCCL, so ranks split across two fabrics
+/// would rendezvous and then hang -- a failure that looks like a model bug
+/// and costs a debugging session. Waiting is the better answer: the group
+/// stays PENDING and fails loudly at the pending timeout, naming what it
+/// could not find.
+///
+/// The constraint applies only where it means something. A cluster with no
+/// derived island places exactly as it did before fabrics existed, which is
+/// every untagged deployment and every single-box one. A group that fits on
+/// one node needs no fabric at all, and a node is therefore its own island
+/// of one.
 pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
     let pending: Vec<String> = st
         .pgs
@@ -1145,63 +1195,233 @@ pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
             .map(|c| c.node_id.clone())
             .unwrap_or_default();
 
-        // Candidate agents: this group's, alive, driver-node first, then
-        // registration order. Bundle 0 lands on the driver's node when it
-        // can, which puts TP rank 0 next to the engine for the shm queue.
-        let mut candidates: Vec<(bool, u64, String)> = st
+        let placed = match placement_scopes(st, &group, &bundles, &driver_node) {
+            Ok(scopes) => scopes.into_iter().find_map(|(island, nodes)| {
+                fit(st, &group, &bundles, &driver_node, nodes.as_deref()).map(|a| (island, a))
+            }),
+            Err(why) => {
+                if let Some(pg) = st.pgs.get_mut(&pg_id) {
+                    pg.pending_reason = Some(why);
+                }
+                continue;
+            }
+        };
+        let Some((island, assignment)) = placed else {
+            let why = no_fit_reason(st, &group, &bundles);
+            if let Some(pg) = st.pgs.get_mut(&pg_id) {
+                pg.pending_reason = Some(why);
+            }
+            continue;
+        };
+
+        let n = assignment.len();
+        let members = island.as_ref().map(|i| i.nodes.len());
+        if let Some(pg) = st.pgs.get_mut(&pg_id) {
+            pg.assignment = assignment;
+            pg.state = PgState::Created;
+            pg.island = island;
+            pg.pending_reason = None;
+        }
+        st.emit(
+            "pg_ready",
+            json!({ "group": group, "pg_id": pg_id, "bundles": n,
+                    "island_nodes": members }),
+        );
+        cv.notify_all();
+    }
+}
+
+/// The scopes to try placing a group in, best first.
+///
+/// `None` in a scope means "anywhere", which is the whole answer for a
+/// single-bundle group and for a group that has not opted in. Otherwise the
+/// driver's own island comes first -- keeping rank 0 next to the engine --
+/// and the rest follow smallest-sufficient-first, so a two-node group does
+/// not consume the only four-node fabric.
+///
+/// Every node also stands as an island of one, since a group whose bundles
+/// all land on one node never crosses a fabric.
+///
+/// Opting in is per group. The operator tags one pair first and boots it,
+/// which must leave a group on the untagged pair placing as before -- and a
+/// gate asking whether the cluster had any island would strand it instead.
+/// The gate asks whether this group's own nodes claim a fabric.
+#[allow(clippy::type_complexity)]
+fn placement_scopes(
+    st: &State,
+    group: &str,
+    bundles: &[f64],
+    driver_node: &str,
+) -> Result<Vec<(Option<crate::island::Island>, Option<Vec<String>>)>, String> {
+    let opted_in = cfg().island_placement
+        && st
             .agents
             .values()
-            .filter(|a| a.alive && a.group == group)
-            .map(|a| (a.node_id != driver_node, a.seq, a.id.clone()))
-            .collect();
-        candidates.sort();
-        let mut agents: Vec<(String, Vec<u32>)> = candidates
-            .into_iter()
-            .map(|(_, _, id)| {
-                let free = st.free_gpus_of(&id);
-                (id, free)
-            })
-            .collect();
+            .any(|a| a.alive && a.group == group && st.fabrics.tagged.contains(&a.node_id));
+    if bundles.len() < 2 || !opted_in {
+        return Ok(vec![(None, None)]);
+    }
+    let need: usize = bundles.iter().map(|b| b.ceil().max(1.0) as usize).sum();
+    let free_in = |nodes: &[String]| -> usize {
+        st.agents
+            .values()
+            .filter(|a| a.alive && a.group == group && nodes.contains(&a.node_id))
+            .map(|a| st.free_gpus_of(&a.id).len())
+            .sum()
+    };
 
-        let mut assignment: Vec<Option<BundleAssignment>> = Vec::with_capacity(bundles.len());
-        let mut complete = true;
-        for spec in &bundles {
-            let need = spec.ceil().max(1.0) as usize;
-            let mut placed = None;
-            for (agent_id, free) in agents.iter_mut() {
-                if free.len() >= need {
-                    let gpu_ids: Vec<u32> = free.drain(..need).collect();
-                    let node_id = st.agents[agent_id].node_id.clone();
-                    placed = Some(BundleAssignment {
-                        agent: agent_id.clone(),
-                        node_id,
-                        gpu_ids,
-                    });
-                    break;
-                }
-            }
-            match placed {
-                Some(b) => assignment.push(Some(b)),
-                None => {
-                    complete = false;
-                    break;
-                }
-            }
-        }
-
-        if complete {
-            let n = assignment.len();
-            if let Some(pg) = st.pgs.get_mut(&pg_id) {
-                pg.assignment = assignment;
-                pg.state = PgState::Created;
-            }
-            st.emit(
-                "pg_ready",
-                json!({ "group": group, "pg_id": pg_id, "bundles": n }),
-            );
-            cv.notify_all();
+    let mut scopes: Vec<(usize, bool, Vec<String>, crate::island::Island)> = Vec::new();
+    for i in &st.fabrics.islands {
+        if free_in(&i.nodes) >= need {
+            scopes.push((
+                i.nodes.len(),
+                !i.nodes.iter().any(|n| n == driver_node),
+                i.nodes.clone(),
+                i.clone(),
+            ));
         }
     }
+    // Nodes on no island: each is its own island of one, and only enters
+    // the running when it alone can hold the whole group.
+    let islanded: Vec<&String> = st.fabrics.islands.iter().flat_map(|i| &i.nodes).collect();
+    let mut lone: Vec<String> = st
+        .agents
+        .values()
+        .filter(|a| a.alive && a.group == group)
+        .map(|a| a.node_id.clone())
+        .filter(|n| !islanded.contains(&n))
+        .collect();
+    lone.sort();
+    lone.dedup();
+    for n in lone {
+        let nodes = vec![n.clone()];
+        if free_in(&nodes) >= need {
+            scopes.push((
+                1,
+                n != driver_node,
+                nodes.clone(),
+                crate::island::Island {
+                    nodes,
+                    addr: Default::default(),
+                },
+            ));
+        }
+    }
+    if scopes.is_empty() {
+        return Err(no_island_reason(st, group, bundles.len(), need));
+    }
+    // Driver's island first, then smallest sufficient.
+    scopes.sort_by(|a, b| (a.1, a.0, &a.2).cmp(&(b.1, b.0, &b.2)));
+    Ok(scopes
+        .into_iter()
+        .map(|(_, _, nodes, island)| {
+            // A one-node scope carries no fabric address to inject.
+            let island = (island.nodes.len() > 1).then_some(island);
+            (island, Some(nodes))
+        })
+        .collect())
+}
+
+/// First-fit the bundles over one scope's agents, or None if they do not
+/// all fit. `nodes` of None means every node in the group.
+///
+/// Agent order is this group's, alive, driver-node first, then registration
+/// order. Bundle 0 lands on the driver's node when it can, which puts TP
+/// rank 0 next to the engine for the shm queue.
+fn fit(
+    st: &State,
+    group: &str,
+    bundles: &[f64],
+    driver_node: &str,
+    nodes: Option<&[String]>,
+) -> Option<Vec<Option<BundleAssignment>>> {
+    let mut candidates: Vec<(bool, u64, String)> = st
+        .agents
+        .values()
+        .filter(|a| a.alive && a.group == group)
+        .filter(|a| nodes.map(|ns| ns.contains(&a.node_id)).unwrap_or(true))
+        .map(|a| (a.node_id != driver_node, a.seq, a.id.clone()))
+        .collect();
+    candidates.sort();
+    let mut agents: Vec<(String, Vec<u32>)> = candidates
+        .into_iter()
+        .map(|(_, _, id)| {
+            let free = st.free_gpus_of(&id);
+            (id, free)
+        })
+        .collect();
+
+    let mut assignment: Vec<Option<BundleAssignment>> = Vec::with_capacity(bundles.len());
+    for spec in bundles {
+        let need = spec.ceil().max(1.0) as usize;
+        let mut placed = None;
+        for (agent_id, free) in agents.iter_mut() {
+            if free.len() >= need {
+                let gpu_ids: Vec<u32> = free.drain(..need).collect();
+                placed = Some(BundleAssignment {
+                    agent: agent_id.clone(),
+                    node_id: st.agents[agent_id].node_id.clone(),
+                    gpu_ids,
+                });
+                break;
+            }
+        }
+        assignment.push(Some(placed?));
+    }
+    Some(assignment)
+}
+
+/// Why no island could hold this group, in the terms an operator can act
+/// on: how many nodes it needs on one fabric, and what the best fabric that
+/// actually holds part of this group offers.
+///
+/// Islands with no agent of this group are left out. Naming the cluster's
+/// largest fabric when the group has nothing on it sends the reader to the
+/// wrong rack.
+fn no_island_reason(st: &State, group: &str, bundles: usize, need: usize) -> String {
+    let best = st
+        .fabrics
+        .islands
+        .iter()
+        .filter_map(|i| {
+            let agents = st
+                .agents
+                .values()
+                .filter(|a| a.alive && a.group == group && i.nodes.contains(&a.node_id));
+            let (mut free, mut held) = (0usize, 0usize);
+            for a in agents {
+                free += st.free_gpus_of(&a.id).len();
+                held += 1;
+            }
+            (held > 0).then_some((free, i.nodes.len()))
+        })
+        .max();
+    match best {
+        Some((free, nodes)) => format!(
+            "{bundles} bundles ({need} GPUs) must share one rdma fabric. The best fabric \
+             holding group '{group}' offers {free} free GPUs across {nodes} nodes"
+        ),
+        None => format!(
+            "{bundles} bundles ({need} GPUs) must share one rdma fabric, and no node \
+             holding group '{group}' is on one"
+        ),
+    }
+}
+
+/// Why the bundles did not fit, when a scope existed to try. Free GPUs are
+/// the usual answer.
+fn no_fit_reason(st: &State, group: &str, bundles: &[f64]) -> String {
+    let need: usize = bundles.iter().map(|b| b.ceil().max(1.0) as usize).sum();
+    let free: usize = st
+        .agents
+        .values()
+        .filter(|a| a.alive && a.group == group)
+        .map(|a| st.free_gpus_of(&a.id).len())
+        .sum();
+    format!(
+        "{} bundles need {need} GPUs and group '{group}' has {free} free",
+        bundles.len()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1225,6 +1445,8 @@ fn agent_conn(
         container,
         pid,
         services,
+        services_ports,
+        service_notes,
         resume,
         unacked_refs,
     } = first.0.msg
@@ -1270,6 +1492,8 @@ fn agent_conn(
                 container: container.clone(),
                 pid,
                 services: services.clone(),
+                services_ports: services_ports.clone(),
+                service_notes,
                 writer: writer.clone(),
                 alive: true,
                 lost_at_ms: None,
@@ -1282,7 +1506,7 @@ fn agent_conn(
             "agent_register",
             json!({ "group": group, "agent": agent_id, "node_ip": node_ip,
                     "gpus": gpus.len(), "container": container,
-                    "services": services }),
+                    "services": services, "services_ports": services_ports }),
         );
 
         // Resumed actors whose owner is gone (or that this daemon already
@@ -1504,6 +1728,16 @@ fn agent_conn(
                         .unwrap_or_else(|| "none".into()),
                 );
                 mark_actor_dead(&mut st, &shared.cv, &actor_id, &reason);
+            }
+            Msg::ServiceNote { service, note } => {
+                let mut st = shared.st.lock().unwrap();
+                if let Some(a) = st.agents.get_mut(&agent_id) {
+                    if note.is_empty() {
+                        a.service_notes.remove(&service);
+                    } else {
+                        a.service_notes.insert(service, note);
+                    }
+                }
             }
             Msg::Ping => {
                 let _ = writer.send(Msg::Pong, frame.req, &[]);

@@ -18,7 +18,7 @@ use crate::config::cfg;
 use crate::daemon::set_keepalive;
 use crate::logfmt::log;
 use crate::proto::{read_frame, Frame, Msg};
-use crate::state::{now_ms_u64, FrameWriter, PeerInfo, SharedRef};
+use crate::state::{now_ms_u64, FrameWriter, PairProbe, PeerInfo, SharedRef};
 
 pub fn start(shared: SharedRef, seeds: Vec<String>, control_port: u16, http_port: u16) {
     for seed in seeds {
@@ -32,6 +32,10 @@ pub fn start(shared: SharedRef, seeds: Vec<String>, control_port: u16, http_port
     {
         let shared = shared.clone();
         std::thread::spawn(move || staleness_sweeper(shared));
+    }
+    {
+        let shared = shared.clone();
+        std::thread::spawn(move || prober(shared));
     }
     std::thread::spawn(move || status_pusher(shared));
 }
@@ -101,6 +105,7 @@ fn try_connect(
             http_port,
             addrs: crate::announce::local_addrs(),
             addr_tags: crate::announce::local_addr_tags(),
+            probes: true,
         },
         1,
         &[],
@@ -108,22 +113,32 @@ fn try_connect(
     let (frame, _) = read_frame(&mut reader)?.ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at peer hello")
     })?;
-    let (peer_id, peer_ip, peer_control, peer_http, peer_addrs, peer_tags) = match frame.msg {
-        Msg::PeerHelloOk {
-            node_id,
-            node_ip,
-            control_addr,
-            http_port,
-            addrs,
-            addr_tags,
-        } => (node_id, node_ip, control_addr, http_port, addrs, addr_tags),
-        other => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unexpected peer hello reply: {other:?}"),
-            ))
-        }
-    };
+    let (peer_id, peer_ip, peer_control, peer_http, peer_addrs, peer_tags, peer_probes) =
+        match frame.msg {
+            Msg::PeerHelloOk {
+                node_id,
+                node_ip,
+                control_addr,
+                http_port,
+                addrs,
+                addr_tags,
+                probes,
+            } => (
+                node_id,
+                node_ip,
+                control_addr,
+                http_port,
+                addrs,
+                addr_tags,
+                probes,
+            ),
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unexpected peer hello reply: {other:?}"),
+                ))
+            }
+        };
     if peer_id == my_id {
         // The seed list includes ourselves; harmless, just don't peer.
         return Ok(None);
@@ -147,6 +162,7 @@ fn try_connect(
             link_ip,
             addrs: peer_addrs,
             addr_tags: peer_tags,
+            probes: peer_probes,
             control_addr: control,
             http_port: peer_http,
         },
@@ -175,6 +191,7 @@ pub fn accept_peer(
         http_port,
         addrs,
         addr_tags,
+        probes,
     } = hello.0.msg
     else {
         unreachable!()
@@ -196,6 +213,7 @@ pub fn accept_peer(
             http_port: my_http,
             addrs: crate::announce::local_addrs(),
             addr_tags: crate::announce::local_addr_tags(),
+            probes: true,
         },
         hello.0.req,
         &[],
@@ -211,6 +229,7 @@ pub fn accept_peer(
             link_ip,
             addrs,
             addr_tags,
+            probes,
             control_addr,
             http_port,
         },
@@ -231,6 +250,7 @@ struct PeerIdent {
     link_ip: String,
     addrs: Vec<String>,
     addr_tags: std::collections::BTreeMap<String, Vec<String>>,
+    probes: bool,
     control_addr: String,
     http_port: u16,
 }
@@ -242,6 +262,7 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
         link_ip,
         addrs,
         addr_tags,
+        probes,
         control_addr,
         http_port,
     } = p;
@@ -251,6 +272,14 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
             return false;
         }
     }
+    // A relink keeps the probed pairs. They describe cabling, which a
+    // dropped control link says nothing about, and discarding them would
+    // leave placement blind until the next probe round.
+    let probe_pairs = st
+        .peers
+        .get(&node_id)
+        .map(|p| p.probe_pairs.clone())
+        .unwrap_or_default();
     st.peers.insert(
         node_id.clone(),
         PeerInfo {
@@ -259,6 +288,8 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
             link_ip,
             addrs,
             addr_tags,
+            probes,
+            probe_pairs,
             control_addr,
             http_port,
             writer,
@@ -455,5 +486,243 @@ fn status_pusher(shared: SharedRef) {
         for w in writers {
             let _ = w.send(Msg::PeerStatus { data: snap.clone() }, 0, &[]);
         }
+    }
+}
+
+/// Probe which of this node's addresses can reach which of each peer's,
+/// one TCP connection per pair, every MENTAT_PROBE_INTERVAL_MS.
+///
+/// Same-subnet numbering across two fabrics means address arithmetic cannot
+/// answer this. Two boxes cabled together and two that merely share a subnet
+/// look identical from the routing table, so the only honest answer comes
+/// from opening the connection.
+///
+/// The local bind is the whole point. Reaching a peer address over the LAN
+/// says nothing about reaching it over the fabric, so a probe that did not
+/// pin its source address would report the routing table's preference and
+/// call it topology.
+///
+/// Pairs are probed one at a time, so a round costs up to
+/// MENTAT_PROBE_TIMEOUT_MS per failing pair and the effective cadence is
+/// whichever is longer. A cluster with a dead fabric therefore refreshes its
+/// table more slowly than one with a live one, which the question being
+/// asked can afford.
+fn prober(shared: SharedRef) {
+    let interval = Duration::from_millis(cfg().probe_interval_ms.max(200));
+    let timeout = Duration::from_millis(cfg().probe_timeout_ms.max(50));
+    loop {
+        std::thread::sleep(interval);
+        let my_id = shared.st.lock().unwrap().node_id.clone();
+        let locals = crate::announce::local_addrs();
+        // Peers worth probing: alive, probe-answering, and with a control
+        // port to aim at. Collected before any connecting so the state lock
+        // is never held across a network wait.
+        let targets: Vec<(String, u16, Vec<String>)> = {
+            let st = shared.st.lock().unwrap();
+            st.peers
+                .values()
+                .filter(|p| p.alive && p.probes && !p.addrs.is_empty())
+                .filter_map(|p| {
+                    let port: u16 = p.control_addr.rsplit_once(':')?.1.parse().ok()?;
+                    Some((p.node_id.clone(), port, p.addrs.clone()))
+                })
+                .collect()
+        };
+        for (peer_id, port, remotes) in targets {
+            for local in &locals {
+                for remote in &remotes {
+                    let r = probe_pair(&my_id, &peer_id, local, remote, port, timeout);
+                    let now = now_ms_u64();
+                    let mut st = shared.st.lock().unwrap();
+                    let Some(p) = st.peers.get_mut(&peer_id) else {
+                        continue;
+                    };
+                    let cell = p
+                        .probe_pairs
+                        .entry(local.clone())
+                        .or_default()
+                        .entry(remote.clone())
+                        .or_insert(PairProbe {
+                            ok: false,
+                            rtt_ms: 0,
+                            last_ok_ms: 0,
+                            error: String::new(),
+                        });
+                    let was = cell.ok;
+                    match r {
+                        Ok(rtt) => {
+                            cell.ok = true;
+                            cell.rtt_ms = rtt.as_millis() as u64;
+                            cell.last_ok_ms = now;
+                            cell.error.clear();
+                        }
+                        Err(e) => {
+                            cell.ok = false;
+                            cell.error = e.to_string();
+                        }
+                    }
+                    // One line per transition. The table is read from
+                    // /status, and a 15 s cadence times four pairs would
+                    // otherwise be the whole log.
+                    if was != cell.ok {
+                        log(
+                            "probe_pair",
+                            &[
+                                ("peer", peer_id.clone()),
+                                ("local", local.clone()),
+                                ("remote", remote.clone()),
+                                ("ok", cell.ok.to_string()),
+                                ("rtt_ms", cell.rtt_ms.to_string()),
+                                ("error", cell.error.clone()),
+                            ],
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One probe: connect from `local` to `remote:port`, exchange the frames,
+/// close. Returns the round trip on success.
+fn probe_pair(
+    my_id: &str,
+    peer_id: &str,
+    local: &str,
+    remote: &str,
+    port: u16,
+    timeout: Duration,
+) -> std::io::Result<Duration> {
+    let started = Instant::now();
+    let stream = connect_from(local, remote, port, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let writer = FrameWriter::new(stream.try_clone()?);
+    let mut reader = BufReader::new(stream);
+    writer.send(
+        Msg::Probe {
+            node_id: my_id.to_string(),
+            local_addr: local.to_string(),
+        },
+        1,
+        &[],
+    )?;
+    match read_frame(&mut reader)? {
+        Some((frame, _)) => match frame.msg {
+            // The reply's identity is checked. Both fabrics are numbered
+            // out of the same subnet, so an address that answers is not by
+            // itself evidence that the intended node answered.
+            Msg::ProbeOk { node_id } if node_id == peer_id => Ok(started.elapsed()),
+            Msg::ProbeOk { node_id } => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("answered by node {node_id}, not {peer_id}"),
+            )),
+            other => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unexpected probe reply: {other:?}"),
+            )),
+        },
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "EOF at probe",
+        )),
+    }
+}
+
+/// TCP connect with the source address pinned, and with a deadline.
+///
+/// Neither half comes free from std: TcpStream::connect picks the source
+/// address by routing table, and connect_timeout cannot bind one. So the
+/// socket is built by hand -- bind, then a non-blocking connect polled to the
+/// deadline, because a dropped SYN would otherwise hold this thread for the
+/// kernel's retry schedule, minutes past the probe interval.
+///
+/// IPv4 only, matching what announce selects.
+fn connect_from(
+    local: &str,
+    remote: &str,
+    port: u16,
+    timeout: Duration,
+) -> std::io::Result<TcpStream> {
+    use std::os::fd::FromRawFd;
+
+    let bad = |what: &str| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{what} is not an IPv4 address"),
+        )
+    };
+    let local: std::net::Ipv4Addr = local.parse().map_err(|_| bad(local))?;
+    let remote: std::net::Ipv4Addr = remote.parse().map_err(|_| bad(remote))?;
+
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Owned from here on, so every early return closes it.
+        let sock = TcpStream::from_raw_fd(fd);
+
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        addr.sin_family = libc::AF_INET as libc::sa_family_t;
+        addr.sin_addr.s_addr = u32::from(local).to_be();
+        let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, len) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        sock.set_nonblocking(true)?;
+        addr.sin_addr.s_addr = u32::from(remote).to_be();
+        addr.sin_port = port.to_be();
+        if libc::connect(fd, &addr as *const _ as *const libc::sockaddr, len) < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EINPROGRESS) {
+                return Err(e);
+            }
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // A signal cutting the wait short is not a failed connect, and
+            // recording one would mark a good pair failed for a round.
+            loop {
+                match libc::poll(&mut pfd, 1, timeout.as_millis() as libc::c_int) {
+                    0 => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("connect timed out after {} ms", timeout.as_millis()),
+                        ))
+                    }
+                    n if n < 0 => {
+                        let e = std::io::Error::last_os_error();
+                        if e.kind() == std::io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                    _ => break,
+                }
+            }
+            // POLLOUT says the connect finished. SO_ERROR says whether it
+            // succeeded.
+            let mut err: libc::c_int = 0;
+            let mut elen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            if libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut err as *mut _ as *mut libc::c_void,
+                &mut elen,
+            ) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if err != 0 {
+                return Err(std::io::Error::from_raw_os_error(err));
+            }
+        }
+        sock.set_nonblocking(false)?;
+        Ok(sock)
     }
 }
