@@ -221,6 +221,15 @@ pub struct ProbeResult {
 
 pub struct Shared {
     pub cfg: Config,
+    /// When this process started.
+    ///
+    /// Several of the router's guards are in-memory and per-process: the
+    /// announce log notes a source once, and the watch set records a node
+    /// once. A restart re-arms them, so a line that looks like it repeats
+    /// every round may be one line per process. Publishing uptime is what
+    /// separates the two, and it does so for logs already written: a line
+    /// stamped before now minus uptime came from an earlier process.
+    pub started: Instant,
     pub client: HttpClients,
     /// One entry per daemon HTTP address being watched.
     pub daemons: Mutex<HashMap<String, DaemonView>>,
@@ -403,7 +412,12 @@ pub fn status_view(shared: &Shared) -> Value {
         .into_iter()
         .map(|(m, (g, url))| (m, json!({ "group": g, "url": url })))
         .collect();
-    json!({ "daemons": daemons, "groups": groups, "models": models })
+    json!({
+        "uptime_s": shared.started.elapsed().as_secs(),
+        "daemons": daemons,
+        "groups": groups,
+        "models": models,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1014,7 @@ async fn main() {
 
     let cfg = Config::from_env();
     let shared = Arc::new(Shared {
+        started: Instant::now(),
         client: HttpClients::new(),
         daemons: Mutex::new(HashMap::new()),
         watched: Mutex::new(HashSet::new()),

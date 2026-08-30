@@ -228,7 +228,7 @@ Router, port 6381:
 | `/v1/*` | OpenAI-compatible, routed by request `model`, streamed through |
 | any other POST | Routed by request `model`, for root-level endpoints such as `/tokenize` |
 | `/mcp` | Merged MCP, tools prefixed `<group>__` |
-| `/status.json`, `/healthz`, `/` | Route table and per-group health |
+| `/status.json`, `/healthz`, `/` | Route table, per-group health, and `uptime_s` |
 
 A `/v1` request naming a known but ungated model returns 503 with the gate it
 failed. An unknown name returns 404. Bodies over 128 MiB are refused.

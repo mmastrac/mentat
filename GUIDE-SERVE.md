@@ -116,7 +116,12 @@ curl -s http://<box>:6381/v1/models          # what routes right now
 curl -s http://<box>:6381/status.json | jq . # and why, per group
 ```
 
-`/`, `/healthz` and `/status.json` return the same document.
+`/`, `/healthz` and `/status.json` return the same document. It carries
+`uptime_s`, which is how you tell a router that has been up all along from
+one that has been restarting: several of the router's guards are per-process,
+so a log line that looks like it repeats every round may be one line per
+process. A line stamped earlier than now minus `uptime_s` came from an
+earlier one.
 
 ## Tuning
 
