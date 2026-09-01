@@ -33,7 +33,7 @@ def placement_group(bundles, strategy="PACK", name="", lifetime=None):
 
 
 def placement_group_table(pg):
-    resp, _ = _client.get_conn().request({"t": "pg_table", "pg_id": pg.id})
+    resp, _ = _client.get_conn().request({"t": "pg_table", "pg_id": pg.id}, retry=True)
     table = resp["table"]
     # JSON forces string keys; ray's table uses ints and vLLM indexes with
     # ints, so convert here.

@@ -73,7 +73,7 @@ def _get_one(ref, timeout):
         raise TypeError(f"ray.get expects ObjectRef, got {type(ref)}")
     timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
     resp, payload = _client.get_conn().request(
-        {"t": "get", "ref_id": ref._id, "timeout_ms": timeout_ms}
+        {"t": "get", "ref_id": ref._id, "timeout_ms": timeout_ms}, retry=True
     )
     status = resp["status"]
     if status == "ok":
@@ -108,7 +108,8 @@ def wait(refs, *, num_returns=1, timeout=None, fetch_local=True):
             "ref_ids": [r._id for r in refs],
             "num_returns": num_returns,
             "timeout_ms": timeout_ms,
-        }
+        },
+        retry=True,
     )
     ready_ids = set(resp["ready"])
     # Same objects back, partitioned, input order preserved -- vLLM uses the
@@ -119,12 +120,12 @@ def wait(refs, *, num_returns=1, timeout=None, fetch_local=True):
 
 
 def nodes():
-    resp, _ = _client.get_conn().request({"t": "nodes"})
+    resp, _ = _client.get_conn().request({"t": "nodes"}, retry=True)
     return resp["nodes"]
 
 
 def cluster_resources():
-    resp, _ = _client.get_conn().request({"t": "cluster_resources"})
+    resp, _ = _client.get_conn().request({"t": "cluster_resources"}, retry=True)
     return resp["resources"]
 
 

@@ -5,5 +5,5 @@ from ray import _client
 
 
 def available_resources_per_node():
-    resp, _ = _client.get_conn().request({"t": "available_per_node"})
+    resp, _ = _client.get_conn().request({"t": "available_per_node"}, retry=True)
     return resp["nodes"]
