@@ -22,10 +22,12 @@ mod mcp;
 mod proxy;
 mod secret;
 mod tokens;
+mod ui;
 mod ws;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -259,6 +261,12 @@ pub struct Shared {
     /// Wakes the prober when a daemon view changes, so admission does not
     /// wait out a full probe interval after boot.
     pub refresh: tokio::sync::Notify,
+    /// Requests being carried right now, keyed by a per-process id. Rows
+    /// leave on drop, so a client hangup clears its own.
+    pub inflight: Mutex<BTreeMap<u64, ui::Inflight>>,
+    pub next_req: AtomicU64,
+    /// group -> its last `/metrics` scrape, shared across pollers.
+    pub metrics: Mutex<HashMap<String, (Instant, String)>>,
 }
 
 /// One announced service, resolved into the base URLs that could serve it.
@@ -1370,9 +1378,13 @@ async fn handle(
         if p.is_empty() { "/" } else { p }.to_string()
     };
     match (req.method().clone(), path.as_str()) {
+        // A browser asking for `/` gets the page. Everything else, curl and
+        // the status pollers included, gets the document it always got.
+        (Method::GET, "/") if ui::wants_html(req.headers()) => ui::page(),
         (Method::GET, "/" | "/healthz" | "/status.json") => {
             json_response(StatusCode::OK, &status_view(&shared))
         }
+        (Method::GET, "/stats.json") => json_response(StatusCode::OK, &ui::stats(&shared).await),
         (Method::GET, "/v1" | "/v1/models") => json_response(
             StatusCode::OK,
             &json!({"object": "list", "data": model_objects(&shared)}),
@@ -1409,6 +1421,9 @@ async fn main() {
         probes: Mutex::new(HashMap::new()),
         tools: Mutex::new(HashMap::new()),
         refresh: tokio::sync::Notify::new(),
+        inflight: Mutex::new(BTreeMap::new()),
+        next_req: AtomicU64::new(1),
+        metrics: Mutex::new(HashMap::new()),
         cfg,
     });
     log(

@@ -151,6 +151,30 @@ frame with backpressure, so time to first token survives the hop. A model whose
 group exists but is ungated returns 503 with the reason. A name nothing claims
 returns 404. Request bodies over 128 MiB are refused.
 
+## The status page
+
+`http://<box>:6381/` in a browser is a live table of what the router is
+carrying and what each engine is doing with it. Everything else still gets the
+status document from that path, chosen by `Accept`, so nothing scripted
+against `/` changes. The page polls `/stats.json`, which is the same data as
+JSON.
+
+Two views feed it. The engine publishes queue depth, KV usage, token totals
+and latency histograms on `/metrics`, so `running`, `waiting`, `kv`, the token
+counts and the mean TTFT, queue and inter-token columns come from whichever
+engine serves that model. The router adds `proxied`, the count of requests it
+is carrying for that model right now, which is the one number the engine
+cannot report.
+
+Clicking a model focuses it and lists those requests one per row: how big the
+request body was, how long it has been waiting with no first byte yet, time to
+first byte once that arrives, and how much has gone back. A request that shows
+a long wait and no first byte while the engine reports nothing running is an
+engine that took the request and stopped.
+
+A group that fails its probe keeps its row, dimmed, with the reason in place
+of the numbers.
+
 ## Counting tokens
 
 `POST /v1/responses/input_tokens` answers how many prompt tokens an input

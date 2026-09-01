@@ -11,6 +11,7 @@ use hyper::header::{ACCEPT, CONTENT_TYPE};
 use hyper::{Method, Request, Response, StatusCode};
 use serde_json::{json, Value};
 
+use crate::ui::{Tracked, TrackedBody};
 use crate::{json_response, model_table, not_ready, BoxedBody, Shared};
 
 /// Prompt JSON runs megabytes at worst. Refusing bigger bodies keeps a
@@ -150,14 +151,28 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
         }
     };
 
+    // Registered once the upstream has accepted the request, and dropped
+    // with the body below, so a client hangup takes its row with it.
+    let tracked = Tracked::new(
+        shared,
+        model,
+        group,
+        bytes.len(),
+        parsed["stream"].as_bool().unwrap_or(false),
+    );
+
     let mut builder = Response::builder().status(resp.status());
     if let Some(ct) = resp.headers().get(CONTENT_TYPE) {
         builder = builder.header(CONTENT_TYPE, ct.clone());
     }
     match builder.body(
-        resp.into_body()
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-            .boxed(),
+        TrackedBody::wrap(
+            resp.into_body()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+                .boxed(),
+            tracked,
+        )
+        .boxed(),
     ) {
         Ok(r) => r,
         Err(e) => json_response(
