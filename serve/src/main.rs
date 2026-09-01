@@ -21,6 +21,7 @@ mod logfmt;
 mod mcp;
 mod proxy;
 mod secret;
+mod tokens;
 mod ws;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1377,6 +1378,9 @@ async fn handle(
             &json!({"object": "list", "data": model_objects(&shared)}),
         ),
         (Method::POST, "/mcp") => mcp::handle(&shared, req).await,
+        // Owned rather than proxied: vLLM has no such endpoint, and the path
+        // lands on its /v1/responses/{response_id} pattern for a 405.
+        (Method::POST, "/v1/responses/input_tokens") => tokens::count(&shared, req).await,
         // Anything else posted is routed by the model in its body. vLLM's
         // endpoint set moves between versions and a pinned list would rot,
         // so the contract is the one the router actually implements: a body

@@ -151,6 +151,43 @@ frame with backpressure, so time to first token survives the hop. A model whose
 group exists but is ungated returns 503 with the reason. A name nothing claims
 returns 404. Request bodies over 128 MiB are refused.
 
+## Counting tokens
+
+`POST /v1/responses/input_tokens` answers how many prompt tokens an input
+would cost, in OpenAI's shape:
+
+```bash
+curl -s http://<box>:6381/v1/responses/input_tokens \
+  -d '{"model":"glm53","input":"hello world"}' -H 'content-type: application/json'
+# {"object":"response.input_tokens","input_tokens":14}
+```
+
+The router owns this route rather than proxying it. vLLM has no such endpoint,
+and a request for it lands on the `/v1/responses/{response_id}` pattern and
+comes back 405.
+
+The serving engine counts the text. It goes to that group's `/tokenize` as a
+chat request, so the chat template is included, which is most of the answer: `hello world` is 2 tokens as a bare prompt and 14 as a
+one-message chat. `instructions` becomes a leading system message and `tools`
+ride along, both because the template renders them and the engine then prices
+them. Text-only counts match the engine exactly.
+
+Media is estimated at flat rates, 4000 tokens an image and 40000 a video,
+whatever the resolution or length. The true cost depends on tiling and the
+model's patch size, which the router cannot know without downloading the media
+and running the engine's preprocessor. One image priced within a few thousand
+tokens moves a 262144-token budget by about 1%. Passing media through is not
+an option either: vLLM fetches the URL and fails the whole request.
+
+An attachment that is neither, a PDF say, contributes only whatever text
+accompanies it. That undercounts.
+
+The route needs `MENTAT_MODEL_PROVIDER=vllm` on the container. A group that
+announced no provider, or one this router does not know, gets a 400 naming the
+group. Counting means knowing how an engine turns an input into tokens, and a
+number produced for an unrecognised one would be a guess a caller could not
+tell from a measurement.
+
 ## The MCP merge
 
 `/mcp` merges every group's management MCP into one endpoint. Tool names are
