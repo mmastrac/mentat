@@ -66,7 +66,7 @@ pip wheel --no-deps -w dist ./python
 Or take both from the published image:
 
 ```
-docker pull mmastrac/mentatd:0.3.0
+docker pull mmastrac/mentatd:0.4.0
 ```
 
 Run a daemon on each box, before any model container:
@@ -81,7 +81,7 @@ claims the import name:
 ```
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
- && pip install --no-deps /tmp/mentatd-0.3.0-py3-none-any.whl
+ && pip install --no-deps /tmp/mentatd-0.4.0-py3-none-any.whl
 ```
 
 The entrypoint keeps its `ray start` and `ray status` calls. Export first:
