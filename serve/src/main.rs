@@ -168,8 +168,8 @@ impl Config {
         let probe_interval = env_secs("PROBE_INTERVAL_S", 5.0);
         let probe_timeout = env_secs("PROBE_TIMEOUT_S", 3.0);
         Config {
-            // Unset means seed with the local daemon; set-but-empty means no
-            // seeds at all, leaving UDP announcements as the only way in.
+            // Unset means seed with the local daemon. Set-but-empty means
+            // no seeds at all, leaving UDP announcements as the only way in.
             daemons: std::env::var("MENTAT_DAEMONS")
                 .unwrap_or_else(|_| "127.0.0.1:6380".to_string())
                 .split(',')
@@ -386,7 +386,7 @@ fn collect_node_addrs(snap: &Value, out: &mut HashMap<String, Vec<String>>) {
 /// Within the node's ranking, an address on one of this box's own subnets
 /// comes first. The node ranks its links by speed because only it can. The
 /// router ranks by whether it shares the wire, because only it can. Serving
-/// HTTP is trivial bandwidth, so reachable beats fast.
+/// Serving HTTP costs almost nothing to send, so reachable beats fast.
 fn endpoint_of(
     agent: &Value,
     svc: &str,
@@ -863,7 +863,7 @@ async fn udp_listener(shared: Arc<Shared>) {
                 }
                 // A restart resets seq, which the new boot_id distinguishes
                 // from a replay. One announcement per interface repeats a
-                // seq; dropping the repeat costs nothing, since the address
+                // seq. Dropping the repeat costs nothing, since the address
                 // it carries is the same one.
                 match seen.get(&node) {
                     Some((b, last)) if *b == boot && seq <= *last => continue,
@@ -908,8 +908,8 @@ async fn udp_listener(shared: Arc<Shared>) {
         }
         // ALLOWED_SOURCES gates what gets acted on, and nothing else. The
         // source address can become the address watched, so it is checked
-        // here; so is any advertised address before it is chosen, further
-        // down. The advertised address itself is not, because nothing acts
+        // here, and so is any advertised address before it is chosen,
+        // further down. The advertised address itself is not, because nothing acts
         // on it any more -- gating a field the router only reads would fail
         // discovery closed over a subnet the operator has no reason to be
         // thinking about, and say nothing about why.
@@ -936,8 +936,8 @@ async fn udp_listener(shared: Arc<Shared>) {
         }
         // The node ranks its own addresses, most preferred first, because
         // only it knows which link is the fast one. Take the best it offers
-        // that lands on a subnet we are attached to; failing that, the source
-        // address, which at least carried this packet here.
+        // that lands on a subnet we are attached to. Failing that, the
+        // source address, which at least carried this packet here.
         let ranked: Vec<String> = v["addrs"]
             .as_array()
             .into_iter()
@@ -1393,7 +1393,7 @@ async fn handle(
         // Owned rather than proxied: vLLM has no such endpoint, and the path
         // lands on its /v1/responses/{response_id} pattern for a 405.
         (Method::POST, "/v1/responses/input_tokens") => tokens::count(&shared, req).await,
-        // Anything else posted is routed by the model in its body. vLLM's
+        // The model in the body routes anything else posted. vLLM's
         // endpoint set moves between versions and a pinned list would rot,
         // so the contract is the one the router actually implements: a body
         // naming a model goes to whoever serves it. A body without one is
@@ -1525,8 +1525,8 @@ mod tests {
     }
 
     /// Proof the case below is real: with no retry, reusing the pooled
-    /// connection fails, and not as a connect error. This is the failure that
-    /// drops a healthy group out of the route table.
+    /// connection fails, and reports something other than a connect error.
+    /// This is the failure that drops a healthy group out of the route table.
     #[tokio::test]
     async fn without_a_retry_a_reused_connection_fails() {
         let addr = serves_once_per_connection().await;
@@ -1572,9 +1572,10 @@ mod tests {
         );
     }
 
-    /// The reported trap: ALLOWED_SOURCES lists where packets come from, the
-    /// node calls itself something on another subnet, and discovery used to
-    /// die on a field nothing acts on. The source still carries the day.
+    /// The reported trap: ALLOWED_SOURCES lists where packets come from, and
+    /// the node calls itself something on another subnet. Gating on that
+    /// identity field, which nothing acts on, closes discovery over a subnet
+    /// the operator had no reason to list. The source address decides.
     #[test]
     fn an_unlisted_identity_subnet_does_not_block_discovery() {
         let allowed = vec!["192.168.1.".to_string()];
@@ -1976,8 +1977,7 @@ mod tests {
         );
     }
 
-    /// A server that answers /v1/models with one model, for the candidate
-    /// tests above.
+    /// A single-model /v1/models endpoint, for the candidate tests above.
     async fn models_endpoint(model: &str) -> std::net::SocketAddr {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

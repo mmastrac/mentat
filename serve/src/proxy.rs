@@ -126,7 +126,7 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
     // Sent once. A retry would re-send work the upstream may already be
     // doing, and would double the wait on an engine that accepts a
     // connection and then never answers, which is a real failure here. A
-    // client that fails fast can decide for itself; one inside a doubled
+    // client that fails fast can decide for itself. One inside a doubled
     // timeout can do nothing until it expires.
     let resp = match shared
         .client
