@@ -366,6 +366,12 @@ Set on each actor process: `MENTAT_ACTOR_ID`, `MENTAT_NODE_ID`,
 | `PROBE_PROMOTE_S` | 6 probe intervals | How often a fallen-through group re-tries its preferred address |
 | `MENTAT_SECRET` | unset | HMAC key for announcements |
 | `MENTAT_SECRET_FILE` | unset | Key from a file, wins over `MENTAT_SECRET` |
+
+A named `MENTAT_SECRET_FILE` that will not read, or reads empty, stops the
+process at boot with the reason. A container whose key mount is unreadable
+would otherwise sign nothing and refuse every signed announcement its peers
+send, which from outside looks like a node that never joined. Leaving both
+variables unset, or `MENTAT_SECRET` empty, still runs unsigned.
 | `MENTAT_UNIVERSE` | `default` | Cluster name. Foreign universes are dropped silently |
 
 Unset, `MENTAT_DAEMONS` seeds the local daemon. Set empty, UDP is the only

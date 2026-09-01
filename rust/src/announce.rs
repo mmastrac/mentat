@@ -58,7 +58,17 @@ pub fn start(shared: SharedRef) {
             }
         })
         .collect();
-    let key = secret::load();
+    // A key that was asked for and cannot be had stops the daemon here. It
+    // would otherwise sign nothing and refuse every signed announcement its
+    // peers send, which from outside is a node that never joined the mesh.
+    let key = match secret::load() {
+        Ok(k) => k,
+        Err(why) => {
+            log("announce_secret_unusable", &[("error", why.clone())]);
+            eprintln!("mentatd: {why}");
+            std::process::exit(1);
+        }
+    };
     log(
         "announce_signing",
         &[(

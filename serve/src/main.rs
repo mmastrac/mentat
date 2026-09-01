@@ -791,7 +791,17 @@ async fn udp_listener(shared: Arc<Shared>) {
             return;
         }
     };
-    let key = secret::load();
+    // Same stop as the daemon's: a router that cannot read the key it was
+    // given verifies nothing and drops every signed announcement, so it
+    // watches an empty cluster and says only that each datagram failed.
+    let key = match secret::load() {
+        Ok(k) => k,
+        Err(why) => {
+            log("announce_secret_unusable", &[("error", why.clone())]);
+            eprintln!("mentatd-serve: {why}");
+            std::process::exit(1);
+        }
+    };
     log(
         "announce_listen",
         &[

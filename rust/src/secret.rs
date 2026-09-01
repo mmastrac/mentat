@@ -32,22 +32,45 @@ pub const SIGNED_VERSION: u64 = 2;
 /// being useful quickly.
 pub const CLOCK_SKEW_S: f64 = 30.0;
 
-/// The mesh key, from a mounted file or the environment. The file wins, so a
-/// secret need not appear in the process environment where `docker inspect`
-/// and `/proc/<pid>/environ` expose it. An unreadable or empty source reads
-/// as absent.
-pub fn load() -> Option<Vec<u8>> {
+/// The mesh key, from a mounted file or the environment.
+///
+/// `Ok(None)` means no key was asked for, which runs unsigned. `Err` means a
+/// key was asked for and could not be had: a named file that will not read,
+/// or one that reads empty. Those are misconfigurations rather than choices,
+/// and a daemon that shrugged at them would sign nothing, refuse every
+/// signed announcement its peers send, and look from the outside like a node
+/// that never joined.
+///
+/// The file wins over the environment, so a secret need not appear where
+/// `docker inspect` and `/proc/<pid>/environ` expose it. An empty
+/// MENTAT_SECRET stays absent rather than fatal, since a compose file
+/// setting a variable to nothing is how deployments say "unset".
+pub fn load() -> Result<Option<Vec<u8>>, String> {
     if let Ok(path) = std::env::var("MENTAT_SECRET_FILE") {
         let path = path.trim();
         if !path.is_empty() {
-            let bytes = std::fs::read(path).ok()?;
-            let key = trim_ascii(&bytes);
-            return (!key.is_empty()).then(|| key.to_vec());
+            return from_file(path);
         }
     }
-    let v = std::env::var("MENTAT_SECRET").ok()?;
+    from_env(std::env::var("MENTAT_SECRET").ok().as_deref())
+}
+
+/// The file half of `load`, split out so it can be exercised without the
+/// process environment.
+fn from_file(path: &str) -> Result<Option<Vec<u8>>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("MENTAT_SECRET_FILE {path}: {e}"))?;
+    let key = trim_ascii(&bytes);
+    if key.is_empty() {
+        return Err(format!("MENTAT_SECRET_FILE {path}: file is empty"));
+    }
+    Ok(Some(key.to_vec()))
+}
+
+/// The environment half of `load`. An absent or blank value is no key.
+fn from_env(v: Option<&str>) -> Result<Option<Vec<u8>>, String> {
+    let Some(v) = v else { return Ok(None) };
     let key = trim_ascii(v.as_bytes());
-    (!key.is_empty()).then(|| key.to_vec())
+    Ok((!key.is_empty()).then(|| key.to_vec()))
 }
 
 /// Trailing newlines are what a secret file almost always carries, and a key
@@ -212,6 +235,43 @@ mod tests {
         let a: Value = serde_json::from_str(r#"{"a":1,"b":2}"#).unwrap();
         let b: Value = serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap();
         assert_eq!(canonical(&a), canonical(&b));
+    }
+
+    /// The reported trap: the key file is mounted, the variable names it,
+    /// and the container cannot read it. Reading that as "no key" leaves a
+    /// daemon that refuses every signed announcement its peers send.
+    #[test]
+    fn a_named_key_that_cannot_be_read_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("mentat-secret-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let missing = dir.join("absent.key");
+        let empty = dir.join("empty.key");
+        std::fs::write(&empty, b"   \n").unwrap();
+
+        assert!(from_file(missing.to_str().unwrap()).is_err(), "unreadable");
+        assert!(
+            from_file(empty.to_str().unwrap()).is_err(),
+            "mounted but empty"
+        );
+
+        let good = dir.join("good.key");
+        std::fs::write(&good, b"hunter2\n").unwrap();
+        assert_eq!(
+            from_file(good.to_str().unwrap()).unwrap(),
+            Some(b"hunter2".to_vec()),
+            "trailing newline trimmed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Asking for no key at all still runs unsigned, which is a choice a
+    /// deployment is allowed to make.
+    #[test]
+    fn an_unasked_key_is_absent_rather_than_fatal() {
+        assert_eq!(from_env(None), Ok(None), "unset");
+        assert_eq!(from_env(Some("")), Ok(None), "compose sets it to nothing");
+        assert_eq!(from_env(Some("  ")), Ok(None), "whitespace only");
+        assert_eq!(from_env(Some("k\n")), Ok(Some(b"k".to_vec())));
     }
 
     #[test]

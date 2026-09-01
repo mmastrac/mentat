@@ -221,7 +221,9 @@ Signed (version 2) wraps the same payload:
 ```
 
 `sig` is HMAC-SHA256 over the payload's compact JSON with sorted keys, keyed
-by `MENTAT_SECRET` or the contents of `MENTAT_SECRET_FILE`. The verifier
+by `MENTAT_SECRET` or the contents of `MENTAT_SECRET_FILE`. A
+`MENTAT_SECRET_FILE` that cannot be read is fatal at boot rather than
+unsigned. The verifier
 re-serializes the payload it parsed, so every value must survive a JSON round
 trip: integers and strings only. An `f64` does not round-trip and will fail
 the signature for some values.
