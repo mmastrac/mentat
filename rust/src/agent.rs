@@ -19,7 +19,7 @@ use crate::daemon::set_keepalive;
 use crate::gpu::detect_gpus;
 use crate::logfmt::log;
 use crate::proto::{read_frame, Msg, ResumeActor, ServicePort};
-use crate::state::{local_ip_toward, FrameWriter, UnixFrameWriter};
+use crate::state::{is_loopback, local_ip_toward, FrameWriter, UnixFrameWriter};
 
 pub struct AgentOpts {
     pub daemon_addr: String,
@@ -221,12 +221,6 @@ fn claimed_node_ip(daemon_addr: &str) -> String {
         Some(ip) if !is_loopback(&ip) => ip,
         _ => String::new(),
     }
-}
-
-fn is_loopback(ip: &str) -> bool {
-    ip.parse::<std::net::IpAddr>()
-        .map(|a| a.is_loopback())
-        .unwrap_or(false)
 }
 
 /// What serves this container's `openai` endpoint, read once at agent start.

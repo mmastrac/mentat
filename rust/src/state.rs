@@ -392,6 +392,13 @@ impl State {
 /// zero-padded to ray's 56-hex-char shape. vLLM only ever compares these for
 /// equality and uses them as dict keys, so shape is all that matters.
 /// node_ip_of reverses it.
+/// Whether an address belongs to every box rather than identifying one.
+pub fn is_loopback(ip: &str) -> bool {
+    ip.parse::<std::net::IpAddr>()
+        .map(|a| a.is_loopback())
+        .unwrap_or(false)
+}
+
 pub fn node_id_for(ip: &str) -> NodeId {
     let mut hex = String::with_capacity(56);
     for b in format!("mentat:{ip}").bytes() {

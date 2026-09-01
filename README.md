@@ -220,6 +220,12 @@ restarts. The gap allows for short periods of disconnection.
 version, timed against status pushes. Keep `MENTAT_PEER_STATUS_INTERVAL_MS`
 well under them. Fifteen missed pushes means stale.
 
+A dead peer keeps its row in `/status`, since a box that is down is worth
+seeing. It is dropped only when the same box rejoins under a different node
+id, which happens when its identity address changes: the two rows carry
+overlapping address lists, and the arriving one supersedes the row it left
+behind.
+
 `MENTAT_ELECTION_HOLD_DOWN_MS` damps flapping. A candidate must stay best this
 long before the designation moves. Raise it if `head_change` streams, and head
 changes lag by as much.

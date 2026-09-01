@@ -18,7 +18,7 @@ use crate::config::cfg;
 use crate::daemon::set_keepalive;
 use crate::logfmt::log;
 use crate::proto::{read_frame, Frame, Msg};
-use crate::state::{now_ms_u64, FrameWriter, PairProbe, PeerInfo, SharedRef};
+use crate::state::{is_loopback, now_ms_u64, FrameWriter, PairProbe, PeerInfo, SharedRef};
 
 pub fn start(shared: SharedRef, seeds: Vec<String>, control_port: u16, http_port: u16) {
     for seed in seeds {
@@ -255,6 +255,22 @@ struct PeerIdent {
     http_port: u16,
 }
 
+/// Whether two peer entries describe one box.
+///
+/// A node id is the hash of an address, so a box that comes back calling
+/// itself something else joins as a second peer while the first is left
+/// behind. What ties the two together is the address list, which both carry
+/// in full and which is the same list.
+///
+/// Loopback is on every box, so an overlap there identifies nothing and is
+/// left out. An empty list matches nothing.
+fn same_box(arriving: &[String], existing: &[String]) -> bool {
+    arriving
+        .iter()
+        .filter(|a| !is_loopback(a))
+        .any(|a| existing.contains(a))
+}
+
 fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool {
     let PeerIdent {
         node_id,
@@ -272,6 +288,22 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
             return false;
         }
     }
+    // A dead entry for this same box under an identity it has stopped
+    // using is dropped here. Nothing else removes a peer, so it would sit
+    // in /status for the life of the process as a node that never came
+    // back. Only dead entries go: two live links to one box is a different
+    // situation, and keep-first above already settles it.
+    let superseded: Vec<String> = st
+        .peers
+        .values()
+        .filter(|q| !q.alive && q.node_id != node_id && same_box(&addrs, &q.addrs))
+        .map(|q| q.node_id.clone())
+        .collect();
+    for old in superseded {
+        st.peers.remove(&old);
+        log("peer_superseded", &[("peer", old), ("by", node_id.clone())]);
+    }
+
     // A relink keeps the probed pairs. They describe cabling, which a
     // dropped control link says nothing about, and discarding them would
     // leave placement blind until the next probe round.
@@ -724,5 +756,67 @@ fn connect_from(
         }
         sock.set_nonblocking(false)?;
         Ok(sock)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_box;
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The reported tombstone: one box registered as 192.168.1.93, came back
+    /// identifying as 10.103.0.93, and the first entry stayed dead in every
+    /// peer's table for as long as the process lived. Both entries carry the
+    /// same address list, which is what says they are one box.
+    #[test]
+    fn a_renumbered_node_matches_its_own_old_entry() {
+        let arriving = v(&["192.168.1.93", "10.103.0.93"]);
+        let old = v(&["192.168.1.93", "10.103.0.93"]);
+        assert!(same_box(&arriving, &old));
+    }
+
+    /// One address in common is enough: an entry recorded before a box had
+    /// its fabric address lists only the address it had then.
+    #[test]
+    fn one_address_in_common_is_enough() {
+        assert!(same_box(
+            &v(&["192.168.1.93", "10.103.0.93"]),
+            &v(&["192.168.1.93"])
+        ));
+    }
+
+    /// Different boxes keep their entries, which is what stops this from
+    /// eating the mesh.
+    #[test]
+    fn separate_boxes_do_not_match() {
+        assert!(!same_box(
+            &v(&["192.168.1.93", "10.103.0.93"]),
+            &v(&["192.168.1.77", "10.100.0.2"])
+        ));
+    }
+
+    /// Loopback is on every box, so two nodes that both list it are not
+    /// thereby one node.
+    #[test]
+    fn loopback_alone_identifies_nothing() {
+        assert!(!same_box(
+            &v(&["127.0.0.1", "10.103.0.93"]),
+            &v(&["127.0.0.1"])
+        ));
+        assert!(!same_box(&v(&["::1"]), &v(&["::1", "10.100.0.2"])));
+        // A real address alongside it still matches.
+        assert!(same_box(
+            &v(&["127.0.0.1", "10.103.0.93"]),
+            &v(&["127.0.0.1", "10.103.0.93"])
+        ));
+    }
+
+    #[test]
+    fn an_empty_list_matches_nothing() {
+        assert!(!same_box(&v(&[]), &v(&["10.100.0.2"])));
+        assert!(!same_box(&v(&["10.100.0.2"]), &v(&[])));
     }
 }
