@@ -295,6 +295,10 @@ pub struct GroupEntry {
     pub running: usize,
     pub openai: Option<Endpoint>,
     pub mcp: Option<Endpoint>,
+    /// What serves `openai`, as the announcing agent said it (`vllm`). Taken
+    /// from the agent whose endpoint won, since it describes the engine
+    /// behind that endpoint. Empty when the container did not say.
+    pub provider: String,
 }
 
 /// Ranked addresses per node, added to `out` from one daemon's snapshot.
@@ -417,6 +421,23 @@ fn endpoint_of(
     })
 }
 
+/// The `openai` endpoint a group routes to, and the provider of the agent
+/// that announced it.
+///
+/// Only the rank running the API server is meant to announce `openai`, and
+/// nothing enforces it. Several announcements resolve by best candidate, for
+/// determinism. The provider follows that same agent, since it describes the
+/// engine behind that endpoint.
+fn best_openai(announced: Vec<(Endpoint, String)>) -> (Option<Endpoint>, String) {
+    match announced
+        .into_iter()
+        .min_by(|x, y| x.0.best().cmp(&y.0.best()))
+    {
+        Some((e, provider)) => (Some(e), provider),
+        None => (None, String::new()),
+    }
+}
+
 /// Merge the daemon views into one group table. A group's agents all
 /// register with one daemon (the rendezvous rule), so overlap only happens
 /// around a stale view -- resolved toward the daemon with more running
@@ -458,10 +479,15 @@ pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
             // Only the rank running the API server announces "openai". If
             // several ever do, the one whose best candidate sorts first
             // wins, for determinism.
-            let openai = agents
-                .iter()
-                .filter_map(|a| resolve(a, "openai"))
-                .min_by(|x, y| x.best().cmp(&y.best()));
+            let (openai, provider) = best_openai(
+                agents
+                    .iter()
+                    .filter_map(|a| {
+                        resolve(a, "openai")
+                            .map(|e| (e, a["provider"].as_str().unwrap_or_default().to_string()))
+                    })
+                    .collect(),
+            );
             // Every rank announces "mcp" (the status server runs on all of
             // them). Prefer the API node's -- it is the one with throughput
             // to report -- then the same order.
@@ -485,6 +511,7 @@ pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
                 running,
                 openai,
                 mcp,
+                provider,
             };
             let replace = match out.get(name) {
                 None => true,
@@ -655,6 +682,7 @@ pub fn status_view(shared: &Shared) -> Value {
                     "openai": endpoint_url(shared, e),
                     "openai_candidates": e.openai.as_ref().map(|x| x.candidates.clone()),
                     "openai_note": e.openai.as_ref().and_then(|x| x.note.clone()),
+                    "provider": e.provider,
                     "mcp": e.mcp.as_ref().and_then(|x| x.best()),
                     "healthy": health.is_ok(),
                     // Names only. /v1/models carries the whole entries, and
@@ -1689,6 +1717,40 @@ mod tests {
             json!({"id": "b"}),
         ];
         assert_eq!(model_ids(&models), vec!["a", "b"]);
+    }
+
+    fn endpoint(url: &str) -> Endpoint {
+        Endpoint {
+            candidates: vec![url.to_string()],
+            announced: url.to_string(),
+            note: None,
+        }
+    }
+
+    /// The provider names the engine behind the endpoint, so it has to come
+    /// from the rank whose endpoint won rather than from whichever agent the
+    /// snapshot happened to list first.
+    #[test]
+    fn the_provider_follows_the_winning_endpoint() {
+        let (ep, provider) = best_openai(vec![
+            (endpoint("http://b:8000/v1"), "sglang".into()),
+            (endpoint("http://a:8000/v1"), "vllm".into()),
+        ]);
+        assert_eq!(ep.unwrap().best(), Some("http://a:8000/v1"));
+        assert_eq!(provider, "vllm");
+    }
+
+    /// An agent predating the field announces no provider, which reads as
+    /// unknown rather than as a group with no endpoint.
+    #[test]
+    fn an_unannounced_provider_is_empty() {
+        let (ep, provider) = best_openai(vec![(endpoint("http://a:8000/v1"), String::new())]);
+        assert!(ep.is_some());
+        assert_eq!(provider, "");
+
+        let (none, provider) = best_openai(Vec::new());
+        assert!(none.is_none());
+        assert_eq!(provider, "");
     }
 
     /// An advertised address is a claim. Without the allowlist check on the

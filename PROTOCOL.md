@@ -97,6 +97,7 @@ A service endpoint is announced in one of two forms, both read from
 | --- | --- | --- |
 | `services` | `{"openai": "http://10.0.0.1:8000/v1"}` | One URL, used verbatim |
 | `services_ports` | `{"openai": {"port": 8000, "path": "/v1"}}` | Host left open; the consumer resolves it |
+| `provider` | `"vllm"` | What serves `openai`, from `MENTAT_MODEL_PROVIDER` |
 
 `MENTAT_OPENAI_API=http://0.0.0.0:8000/v1` and `MENTAT_OPENAI_API=8000/v1`
 both produce the second form. Any other value produces the first, unparsed.

@@ -46,6 +46,8 @@ struct HostActor {
 struct Services {
     urls: BTreeMap<String, String>,
     ports: BTreeMap<String, ServicePort>,
+    /// What serves the `openai` endpoint, from MENTAT_MODEL_PROVIDER.
+    provider: String,
 }
 
 struct AgentShared {
@@ -95,7 +97,11 @@ pub fn run(opts: AgentOpts) -> ! {
     let sock_dir = std::env::var("MENTAT_SOCK_DIR").unwrap_or_else(|_| "/tmp/mentat".into());
     let _ = std::fs::create_dir_all(&sock_dir);
     let (urls, ports) = announced_services();
-    let services = Services { urls, ports };
+    let services = Services {
+        urls,
+        ports,
+        provider: announced_provider(),
+    };
 
     log(
         "agent_start",
@@ -107,6 +113,7 @@ pub fn run(opts: AgentOpts) -> ! {
             ("gpus", format!("{gpus:?}")),
             ("services", format!("{:?}", services.urls)),
             ("service_ports", format!("{:?}", services.ports)),
+            ("provider", services.provider.clone()),
         ],
     );
 
@@ -192,6 +199,16 @@ fn parse_announcement(v: &str) -> Announcement {
         Some((port, path)) => Announcement::Port { port, path },
         None => verbatim(),
     }
+}
+
+/// What serves this container's `openai` endpoint, read once at agent start.
+/// Lowercased free-form text, `vllm` on every current image. Empty when the
+/// container did not say.
+fn announced_provider() -> String {
+    std::env::var("MENTAT_MODEL_PROVIDER")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase()
 }
 
 /// Service endpoints this container announces, read once at agent start.
@@ -441,6 +458,7 @@ fn serve_once(
             pid: std::process::id(),
             services: services.urls.clone(),
             services_ports: services.ports.clone(),
+            provider: services.provider.clone(),
             service_notes: shared.service_notes.lock().unwrap().clone(),
             resume,
             unacked_refs,

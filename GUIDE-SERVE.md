@@ -26,13 +26,19 @@ Model containers announce through agent registration. The entrypoint exports
 these before `ray start`, and the agent reads them once:
 
 ```bash
-export MENTAT_OPENAI_API=8000/v1   # rank serving the API
-export MENTAT_MCP_API=9000/mcp     # every rank
+export MENTAT_OPENAI_API=8000/v1      # rank serving the API
+export MENTAT_MCP_API=9000/mcp        # every rank
+export MENTAT_MODEL_PROVIDER=vllm     # what serves the API
 ray start --address=$RAY_ADDRESS
 ```
 
-Both are optional and additive. An agent without them registers as before, and
-a daemon that predates the field ignores it.
+All three are optional and additive. An agent without them registers as
+before, and a daemon that predates the field ignores it.
+
+`MENTAT_MODEL_PROVIDER` names the engine behind `MENTAT_OPENAI_API`, so set it
+on the same rank. Two engines can both answer `/v1/chat/completions` and still
+differ in what else they expose, which is what the router needs it for.
+`/status.json` reports it per group, empty when the container did not say.
 
 ### Which form to use
 

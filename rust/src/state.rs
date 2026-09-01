@@ -113,6 +113,9 @@ pub struct AgentInfo {
     /// What the agent noticed about a service after announcing it, keyed by
     /// service name. Republished so the router can say why a probe failed.
     pub service_notes: std::collections::BTreeMap<String, String>,
+    /// What serves the announced `openai` endpoint (`vllm`). Stored and
+    /// republished verbatim, like the endpoints themselves.
+    pub provider: String,
     pub writer: FrameWriter,
     pub alive: bool,
     /// When the agent link EOFed (degrade window start). None while

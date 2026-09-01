@@ -77,6 +77,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                     "services": a.services,
                     "services_ports": a.services_ports,
                     "service_notes": a.service_notes,
+                    "provider": a.provider,
                 })
             })
             .collect();

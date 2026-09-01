@@ -293,6 +293,7 @@ has the selection order.
 | `MENTAT_DAEMON` | `RAY_ADDRESS` | Daemon address override |
 | `MENTAT_OPENAI_API` | unset | Announced OpenAI endpoint (head rank only) |
 | `MENTAT_MCP_API` | unset | Announced MCP endpoint (every rank) |
+| `MENTAT_MODEL_PROVIDER` | unset | What serves `MENTAT_OPENAI_API`, e.g. `vllm` |
 | `MENTAT_FABRIC_IP` | set by the daemon | This rank's address on the fabric its group was placed on |
 | `MENTAT_HOST_CONNECT_TIMEOUT_MS` | 60000 | Wait for a spawned actor host to dial back |
 | `MENTAT_AGENT_PING_INTERVAL_MS` | 2000 | Agent → daemon ping interval |
@@ -320,6 +321,11 @@ MENTAT_OPENAI_API=http://10.0.0.1:8000/v1   # this address, verbatim
 MENTAT_OPENAI_API=http://0.0.0.0:8000/v1    # every address of this node
 MENTAT_OPENAI_API=8000/v1                   # the same, said shorter
 ```
+
+`MENTAT_MODEL_PROVIDER` names the engine behind the OpenAI endpoint, `vllm`
+on every current image. The agent lowercases it and announces it alongside the
+endpoint, so set it on the rank that sets `MENTAT_OPENAI_API`. It is optional.
+Unset, the router reports the provider as unknown.
 
 The port form is the one to prefer. A URL naming one address is reachable
 only from that link, and the router resolves the port form against every

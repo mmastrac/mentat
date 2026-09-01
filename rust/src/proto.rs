@@ -160,6 +160,14 @@ pub enum Msg {
         /// agent that only ever announces URLs never sends it.
         #[serde(default)]
         services_ports: BTreeMap<String, ServicePort>,
+        /// What serves the announced `openai` endpoint, from
+        /// MENTAT_MODEL_PROVIDER -- `vllm` on every current image. The
+        /// consumer needs it to know which interface an endpoint speaks,
+        /// since two engines answering /v1/chat/completions can still differ
+        /// in what else they expose. Empty when the container did not say,
+        /// and always empty from an agent that predates the field.
+        #[serde(default)]
+        provider: String,
         /// What the agent found out about a service after announcing it,
         /// keyed by service name -- today, that the server bound one address
         /// rather than every address. Advisory: it explains a probe failure,

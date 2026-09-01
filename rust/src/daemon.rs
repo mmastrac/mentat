@@ -1447,6 +1447,7 @@ fn agent_conn(
         services,
         services_ports,
         service_notes,
+        provider,
         resume,
         unacked_refs,
     } = first.0.msg
@@ -1494,6 +1495,7 @@ fn agent_conn(
                 services: services.clone(),
                 services_ports: services_ports.clone(),
                 service_notes,
+                provider,
                 writer: writer.clone(),
                 alive: true,
                 lost_at_ms: None,
