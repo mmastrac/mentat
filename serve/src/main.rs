@@ -221,7 +221,9 @@ pub struct DaemonView {
 
 pub struct ProbeResult {
     pub ok: bool,
-    pub models: Vec<String>,
+    /// The endpoint's own `/models` entries, verbatim. Carrying whole objects
+    /// keeps `max_model_len` and the rest correct as vLLM adds fields.
+    pub models: Vec<Value>,
     pub seen: Instant,
     pub error: Option<String>,
     /// The candidate this group is currently routed to. Sticky: once an
@@ -502,7 +504,7 @@ pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
 }
 
 /// Ok(model names) when the group may take traffic; Err(why) otherwise.
-pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<String>, String> {
+pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<Value>, String> {
     let Some(ep) = e.openai.as_ref() else {
         return Err("no announced OpenAI endpoint".into());
     };
@@ -548,20 +550,65 @@ pub fn endpoint_url(shared: &Shared, e: &GroupEntry) -> Option<String> {
         .or_else(|| ep.best().map(str::to_string))
 }
 
+/// The `id` of each model entry, for the callers that only name them.
+pub fn model_ids(models: &[Value]) -> Vec<String> {
+    models
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect()
+}
+
 /// model name -> (group, announced base URL), healthy groups only. Names come
 /// from probing the endpoint's /models, so SERVED_NAME needs no announcing.
+///
+/// Names and routes only. This runs on every proxied request, where cloning
+/// each engine's full `/models` object would be paid per request.
+/// `model_objects` is the listing's heavier answer.
 pub fn model_table(shared: &Shared) -> BTreeMap<String, (String, String)> {
     let mut out = BTreeMap::new();
     for e in group_table(shared).values() {
         if let Ok(models) = health_of(shared, e) {
             let url = endpoint_url(shared, e).unwrap_or_default();
-            for m in models {
+            for m in model_ids(&models) {
                 out.entry(m)
                     .or_insert_with(|| (e.group.clone(), url.clone()));
             }
         }
     }
     out
+}
+
+/// What `/v1/models` answers: every healthy group's `/models` entries as the
+/// engine wrote them, so a client sees the same `max_model_len` and `root` it
+/// would reading the engine direct. `owned_by` becomes the serving group,
+/// which through a router is the useful owner and what `/status.json`
+/// correlates on.
+///
+/// First writer wins on a duplicate name, matching `model_table`, so the
+/// listing cannot advertise an entry that routes elsewhere.
+pub fn model_objects(shared: &Shared) -> Vec<Value> {
+    let mut out: BTreeMap<String, Value> = BTreeMap::new();
+    for e in group_table(shared).values() {
+        if let Ok(models) = health_of(shared, e) {
+            for m in models {
+                let Some(id) = m["id"].as_str().map(String::from) else {
+                    continue;
+                };
+                out.entry(id).or_insert_with(|| listed_model(&m, &e.group));
+            }
+        }
+    }
+    out.into_values().collect()
+}
+
+/// One `/models` entry as the router republishes it: the engine's own object
+/// with `owned_by` set to the serving group.
+fn listed_model(m: &Value, group: &str) -> Value {
+    let mut m = m.clone();
+    if let Some(obj) = m.as_object_mut() {
+        obj.insert("owned_by".into(), json!(group));
+    }
+    m
 }
 
 /// Groups that announced an endpoint but are not routable, with the reason.
@@ -610,7 +657,9 @@ pub fn status_view(shared: &Shared) -> Value {
                     "openai_note": e.openai.as_ref().and_then(|x| x.note.clone()),
                     "mcp": e.mcp.as_ref().and_then(|x| x.best()),
                     "healthy": health.is_ok(),
-                    "models": health.as_ref().ok(),
+                    // Names only. /v1/models carries the whole entries, and
+                    // repeating them here would crowd out the health fields.
+                    "models": health.as_ref().ok().map(|m| model_ids(m)),
                     "why_not": health.as_ref().err(),
                 }),
             )
@@ -1082,8 +1131,9 @@ async fn prober(shared: Arc<Shared>) {
                 Ok((url, mut models)) => {
                     if models.is_empty() {
                         // An endpoint that answers but lists nothing still
-                        // serves, so fall back to the group name.
-                        models.push(group.clone());
+                        // serves, so fall back to the group name. Only `id`
+                        // is known here, and the listing fills the rest in.
+                        models.push(json!({"id": group.clone()}));
                     }
                     ProbeResult {
                         ok: true,
@@ -1112,7 +1162,7 @@ async fn prober(shared: Arc<Shared>) {
                     &[
                         ("group", group.clone()),
                         ("ok", pr.ok.to_string()),
-                        ("models", format!("{:?}", pr.models)),
+                        ("models", format!("{:?}", model_ids(&pr.models))),
                         ("error", pr.error.clone().unwrap_or_default()),
                     ],
                 );
@@ -1148,15 +1198,15 @@ async fn prober(shared: Arc<Shared>) {
 /// preferred link.
 ///
 /// Returns whether the top-ranked candidate was tried this round (which is
-/// what resets the promotion clock) and either the answering URL with its
-/// model names, or every candidate's error.
+/// what resets the promotion clock) and either the answering URL with the
+/// endpoint's own model entries, or every candidate's error.
 async fn probe_candidates(
     client: &HttpClients,
     candidates: &[String],
     sticky: Option<String>,
     promote: bool,
     t: Duration,
-) -> (bool, Result<(String, Vec<String>), String>) {
+) -> (bool, Result<(String, Vec<Value>), String>) {
     let at = sticky
         .as_ref()
         .and_then(|s| candidates.iter().position(|c| c == s));
@@ -1181,11 +1231,13 @@ async fn probe_candidates(
         let url = format!("{}/models", base.trim_end_matches('/'));
         match http_get_json(client, &url, t).await {
             Ok(v) => {
-                let models: Vec<String> = v["data"]
+                // An entry with no string `id` cannot be named or routed to.
+                let models: Vec<Value> = v["data"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(|m| m["id"].as_str().map(String::from))
+                    .filter(|m| m["id"].as_str().is_some())
+                    .cloned()
                     .collect();
                 return (tried_top, Ok((base.clone(), models)));
             }
@@ -1292,13 +1344,10 @@ async fn handle(
         (Method::GET, "/" | "/healthz" | "/status.json") => {
             json_response(StatusCode::OK, &status_view(&shared))
         }
-        (Method::GET, "/v1" | "/v1/models") => {
-            let data: Vec<Value> = model_table(&shared)
-                .iter()
-                .map(|(m, (g, _))| json!({"id": m, "object": "model", "owned_by": g}))
-                .collect();
-            json_response(StatusCode::OK, &json!({"object": "list", "data": data}))
-        }
+        (Method::GET, "/v1" | "/v1/models") => json_response(
+            StatusCode::OK,
+            &json!({"object": "list", "data": model_objects(&shared)}),
+        ),
         (Method::POST, "/mcp") => mcp::handle(&shared, req).await,
         // Anything else posted is routed by the model in its body. vLLM's
         // endpoint set moves between versions and a pinned list would rot,
@@ -1588,6 +1637,60 @@ mod tests {
         assert_eq!(peer_address(&p, &subnets()).as_deref(), Some("172.16.4.4"));
     }
 
+    /// The reported gap: a client reading /v1/models through the router got
+    /// three fields where the engine serves eight, so max_model_len -- which
+    /// differs between two deployments of the same family -- was undiscoverable
+    /// and had to be hardcoded.
+    #[test]
+    fn a_listed_model_keeps_every_field_the_engine_sent() {
+        let engine = json!({
+            "id": "glm53",
+            "object": "model",
+            "created": 1788281389,
+            "owned_by": "vllm",
+            "root": "/models/glm-5.3-flash-nvfp4",
+            "parent": null,
+            "max_model_len": 262144,
+            "permission": [{"id": "modelperm-9631122d1ff25211"}],
+        });
+        let listed = listed_model(&engine, "ga");
+        assert_eq!(listed["max_model_len"], 262144);
+        assert_eq!(listed["root"], "/models/glm-5.3-flash-nvfp4");
+        assert_eq!(listed["permission"][0]["id"], "modelperm-9631122d1ff25211");
+        assert!(listed["parent"].is_null());
+        assert_eq!(
+            listed.as_object().unwrap().len(),
+            engine.as_object().unwrap().len(),
+            "no field added or dropped"
+        );
+        assert_eq!(listed["owned_by"], "ga", "the one rewrite");
+    }
+
+    /// The bare entry a probe synthesises when an endpoint lists nothing, and
+    /// an entry carrying fields this router predates. Both reach the listing
+    /// intact.
+    #[test]
+    fn a_sparse_or_unfamiliar_entry_survives() {
+        let bare = listed_model(&json!({"id": "gb"}), "gb");
+        assert_eq!(bare["id"], "gb");
+        assert_eq!(bare["owned_by"], "gb");
+
+        let future = listed_model(&json!({"id": "m", "some_new_field": [1, 2]}), "ga");
+        assert_eq!(future["some_new_field"], json!([1, 2]));
+    }
+
+    /// An entry with no `id` cannot be routed to, so it never reaches the
+    /// route table.
+    #[test]
+    fn model_ids_skips_what_it_cannot_name() {
+        let models = vec![
+            json!({"id": "a"}),
+            json!({"no_id": true}),
+            json!({"id": "b"}),
+        ];
+        assert_eq!(model_ids(&models), vec!["a", "b"]);
+    }
+
     /// An advertised address is a claim. Without the allowlist check on the
     /// candidates, an announcement naming any host would have this process
     /// connect to it.
@@ -1753,7 +1856,7 @@ mod tests {
         let (_, r) = probe_candidates(&clients, &c, None, false, Duration::from_secs(2)).await;
         let (url, models) = r.expect("the second candidate answers");
         assert_eq!(url, c[1]);
-        assert_eq!(models, vec!["model-x"]);
+        assert_eq!(model_ids(&models), vec!["model-x"]);
     }
 
     /// And back again once the cable is in: a promotion round tries the
