@@ -38,6 +38,41 @@ Unknown fields are ignored, and fields marked `#[serde(default)]` in
 backward-compatible in both directions; removing one or changing a type is
 not.
 
+## Named placements
+
+`claim` matches a requested shape against the measured topology and answers
+with nodes and links. The name is the reservation: every holder of one name
+is answered with the view the first claim produced, so ranks starting
+independently agree without a coordinator between them.
+
+```json
+{"t": "claim", "name": "myjob", "shape": {
+  "sets": [{"name": "tp0", "bundles": 2, "link": "rdma"},
+           {"name": "tp1", "bundles": 2, "link": "rdma"}],
+  "between": [{"from": "tp0", "to": "tp1", "link": "ip"}]}}
+```
+
+`link` is `rdma` (`roce`, `fabric`) or `ip` (`any`). An `rdma` set is placed
+inside one fabric island, so every member reaches every other over a tagged,
+probe-confirmed address. `bundles` is a count, meaning one GPU per node, or a
+list giving GPUs per node.
+
+The answer carries, per member, the node, its host, the address to bind and
+the interface that address sits on. Per `between` entry it carries the link a
+caller would use, both ends and the round trip observed.
+
+Claiming a name that is held for a different shape is refused. Re-solving
+would move nodes under whoever claimed first, so the caller releases the name
+or picks another.
+
+Only the head answers a claim. Two daemons solving one name against their own
+views could each hand out a placement, and islands are soft-consistent between
+daemons by design. A claim sent elsewhere is refused with the head's address.
+
+A claim ends when its last holder goes, so a driver that dies gives its nodes
+back with no explicit release. Holders re-send `claim` on reconnect, which is
+what rebuilds the table after the head moves.
+
 ## Connection start
 
 The first frame identifies the link type:
@@ -71,6 +106,8 @@ Request and response, all `req`-correlated. `err` may replace any response.
 | `kill_actor` | — | Terminate one actor |
 | `status` | `status_ok` | Cluster snapshot |
 | `stop_all` | — | Kill actors, optionally one group's |
+| `claim` | `claim_ok` | Claim a named placement, or read the one that name already holds |
+| `release` | `claim_ok` | Give up a hold. The claim ends with its last holder |
 
 Exactly one client connection per driver sets `session: true`. Its EOF ends
 the session and reaps that group's actors.

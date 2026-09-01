@@ -9,6 +9,7 @@
 
 mod agent;
 mod announce;
+mod claim;
 mod config;
 mod daemon;
 mod gpu;

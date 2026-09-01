@@ -15,8 +15,8 @@ use crate::logfmt::log;
 use crate::proto::{read_frame, Frame, Msg};
 use crate::state::{
     local_ip_toward, node_id_for, random_hex_id, write_json_file, ActorInfo, ActorState, AgentInfo,
-    BundleAssignment, ClientInfo, FrameWriter, PgInfo, PgState, RefInfo, RefState, Shared,
-    SharedRef, State,
+    BundleAssignment, ClaimInfo, ClientInfo, FrameWriter, PgInfo, PgState, RefInfo, RefState,
+    Shared, SharedRef, State,
 };
 
 pub struct DaemonOpts {
@@ -532,6 +532,32 @@ fn handle_client_msg(
             }
             (Msg::AvailOk { nodes }, Vec::new())
         }
+        Msg::Claim { name, shape } => {
+            let mut st = shared.st.lock().unwrap();
+            match claim(&mut st, client_id, &name, &shape) {
+                Ok((generation, view)) => (
+                    Msg::ClaimOk {
+                        name,
+                        generation,
+                        view,
+                    },
+                    Vec::new(),
+                ),
+                Err(error) => (Msg::Err { error }, Vec::new()),
+            }
+        }
+        Msg::Release { name } => {
+            let mut st = shared.st.lock().unwrap();
+            release(&mut st, client_id, &name);
+            (
+                Msg::ClaimOk {
+                    name,
+                    generation: 0,
+                    view: Value::Null,
+                },
+                Vec::new(),
+            )
+        }
         Msg::CreatePg { bundles, strategy } => {
             let mut st = shared.st.lock().unwrap();
             let group = client_group(&st, client_id);
@@ -740,6 +766,93 @@ fn handle_client_msg(
             (Msg::Ok0, Vec::new())
         }
         other => err(format!("unexpected client message: {other:?}")),
+    }
+}
+
+/// Answer a claim on `name`, solving it the first time and repeating that
+/// answer afterwards.
+///
+/// The name is the reservation. A second holder of one name is not a second
+/// placement, so ranks that claim the same name agree on their nodes without
+/// a coordinator. A holder that asks for a different shape under a name
+/// already taken is refused: re-solving would move nodes under whoever
+/// claimed first.
+///
+/// Only the head answers. Two daemons solving the same name against their
+/// own views could each hand out a placement, and islands are deliberately
+/// soft-consistent between daemons. The error names the head so a caller can
+/// go there.
+fn claim(
+    st: &mut State,
+    client_id: &str,
+    name: &str,
+    shape: &Value,
+) -> Result<(u64, Value), String> {
+    if name.trim().is_empty() {
+        return Err("a claim needs a name".into());
+    }
+    if st.head_node_id != st.node_id {
+        let addr = st
+            .peers
+            .values()
+            .find(|p| p.node_id == st.head_node_id)
+            .map(|p| p.control_addr.clone())
+            .unwrap_or_default();
+        return Err(format!(
+            "claims are answered by the head, which is {} at {addr}",
+            st.head_node_id
+        ));
+    }
+    if let Some(c) = st.claims.get_mut(name) {
+        if &c.shape != shape {
+            return Err(format!(
+                "claim {name:?} is held for a different shape; release it or use another name"
+            ));
+        }
+        c.holders.insert(client_id.to_string());
+        return Ok((c.generation, c.view.clone()));
+    }
+    let req = crate::claim::parse(shape)?;
+    let topo = crate::claim::topology(st);
+    let solution = crate::claim::solve(&topo, &req)?;
+    st.claim_generation += 1;
+    let generation = st.claim_generation;
+    let view = solution.to_json(&topo);
+    st.claims.insert(
+        name.to_string(),
+        ClaimInfo {
+            shape: shape.clone(),
+            view: view.clone(),
+            generation,
+            holders: [client_id.to_string()].into_iter().collect(),
+        },
+    );
+    st.emit(
+        "claim_solved",
+        json!({ "name": name, "generation": generation }),
+    );
+    Ok((generation, view))
+}
+
+/// Drop one hold. The claim goes with its last holder, which is how a driver
+/// that dies gives its nodes back.
+fn release(st: &mut State, client_id: &str, name: &str) {
+    let Some(c) = st.claims.get_mut(name) else {
+        return;
+    };
+    c.holders.remove(client_id);
+    if c.holders.is_empty() {
+        st.claims.remove(name);
+        st.emit("claim_released", json!({ "name": name }));
+    }
+}
+
+/// Drop every claim this client held. This runs where its other resources
+/// are reaped, so a disconnect needs no explicit release.
+fn release_all(st: &mut State, client_id: &str) {
+    let names: Vec<String> = st.claims.keys().cloned().collect();
+    for n in names {
+        release(st, client_id, &n);
     }
 }
 
@@ -1129,6 +1242,7 @@ fn reap_client(shared: &SharedRef, client_id: &str) {
 fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
     let actor_ids: Vec<String> = {
         let mut st = shared.st.lock().unwrap();
+        release_all(&mut st, client_id);
         let ids: Vec<String> = st
             .actors
             .values()

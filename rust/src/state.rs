@@ -185,6 +185,24 @@ pub struct ClientInfo {
     pub has_session: bool,
 }
 
+/// A named placement, held by everyone who claimed it.
+///
+/// The name is the reservation. Every holder of one name gets the answer the
+/// first claim produced, so ranks starting independently agree on their node
+/// set without a coordinator between them. A claim ends when its last holder
+/// goes, which is what makes a driver that dies give its nodes back.
+pub struct ClaimInfo {
+    /// The request this was solved for. A second claim describing something
+    /// else is a conflict rather than a re-solve.
+    pub shape: serde_json::Value,
+    /// The answer, returned verbatim to every later holder.
+    pub view: serde_json::Value,
+    /// Bumped on each solve, so a holder can tell one answer from another
+    /// across a head change.
+    pub generation: u64,
+    pub holders: std::collections::BTreeSet<ClientId>,
+}
+
 #[derive(Default)]
 pub struct Counters {
     pub actors_spawned: u64,
@@ -274,6 +292,9 @@ pub struct State {
     pub pgs: HashMap<PgId, PgInfo>,
     pub refs: HashMap<RefId, RefInfo>,
     pub clients: HashMap<ClientId, ClientInfo>,
+    /// Named placements, by name. Only the head fills this in.
+    pub claims: std::collections::BTreeMap<String, ClaimInfo>,
+    pub claim_generation: u64,
     pub next_seq: u64,
     pub next_ref: u64,
     pub counters: Counters,
@@ -310,6 +331,8 @@ impl State {
             pgs: HashMap::new(),
             refs: HashMap::new(),
             clients: HashMap::new(),
+            claims: std::collections::BTreeMap::new(),
+            claim_generation: 0,
             next_seq: 1,
             next_ref: 1,
             counters: Counters::default(),

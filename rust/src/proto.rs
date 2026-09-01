@@ -39,6 +39,20 @@ pub enum Msg {
     Nodes,
     ClusterResources,
     AvailablePerNode,
+    /// Claim a named placement. Every holder of one name is answered with
+    /// the view the first claim produced, so ranks agree without talking to
+    /// each other. Re-sent on reconnect: that is what holds the claim.
+    Claim {
+        name: String,
+        /// `{"sets": [...], "between": [...]}`, matched against the measured
+        /// topology. A second claim on one name describing something else is
+        /// refused rather than re-solved.
+        shape: serde_json::Value,
+    },
+    /// Give up a hold. The claim ends when its last holder does.
+    Release {
+        name: String,
+    },
     CreatePg {
         /// GPUs per bundle, e.g. [1.0, 1.0].
         bundles: Vec<f64>,
@@ -102,6 +116,11 @@ pub enum Msg {
     },
     AvailOk {
         nodes: BTreeMap<String, BTreeMap<String, f64>>,
+    },
+    ClaimOk {
+        name: String,
+        generation: u64,
+        view: serde_json::Value,
     },
     CreatePgOk {
         pg_id: String,
