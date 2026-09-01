@@ -196,8 +196,10 @@ the constraint, for a cluster whose probes disagree with its cabling and no
 time to work out why.
 
 Islands are derived over node ids, and an agent joins its node by
-`MENTAT_NODE_IP`. A box's daemon and its containers must therefore agree on
-that value — the same requirement `ray.nodes()` already has.
+`MENTAT_NODE_IP`. A container that reaches its daemon over loopback claims
+nothing and takes the daemon's own identity, so it needs no setting. Set it
+where a container reaches its daemon across the network, and match the
+daemon's value — the same requirement `ray.nodes()` already has.
 
 ## 7. Verify
 

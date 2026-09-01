@@ -79,12 +79,7 @@ pub fn run(opts: AgentOpts) -> ! {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(crate::daemon::hostname);
-    let node_ip = std::env::var("MENTAT_NODE_IP")
-        .ok()
-        .or_else(|| std::env::var("VLLM_HOST_IP").ok())
-        .filter(|s| !s.is_empty())
-        .or_else(|| local_ip_toward(&opts.daemon_addr))
-        .unwrap_or_default();
+    let node_ip = claimed_node_ip(&opts.daemon_addr);
     // The node ip is part of the identity: both ranks of a TP pair run a
     // container named the same thing (glm53 on both boxes), and identical
     // agent ids made their registrations replace each other in a loop on
@@ -199,6 +194,39 @@ fn parse_announcement(v: &str) -> Announcement {
         Some((port, path)) => Announcement::Port { port, path },
         None => verbatim(),
     }
+}
+
+/// The node identity this agent claims, or empty to let the daemon assert it.
+///
+/// The identity is hashed into a node id, so the agent and the daemon have to
+/// arrive at the same string or the cluster grows a second node where there is
+/// one. Asking the route which address reaches the daemon answers 127.0.0.1
+/// over loopback, which is such a string: a node beside the daemon's own,
+/// holding this agent's GPUs.
+///
+/// An agent that reaches its daemon over loopback is on that daemon's node, so
+/// it claims nothing and the daemon fills in its own. A container then needs
+/// MENTAT_NODE_IP only when it is telling the truth about a node the daemon
+/// cannot see for itself.
+fn claimed_node_ip(daemon_addr: &str) -> String {
+    for var in ["MENTAT_NODE_IP", "VLLM_HOST_IP"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return v.to_string();
+            }
+        }
+    }
+    match local_ip_toward(daemon_addr) {
+        Some(ip) if !is_loopback(&ip) => ip,
+        _ => String::new(),
+    }
+}
+
+fn is_loopback(ip: &str) -> bool {
+    ip.parse::<std::net::IpAddr>()
+        .map(|a| a.is_loopback())
+        .unwrap_or(false)
 }
 
 /// What serves this container's `openai` endpoint, read once at agent start.

@@ -109,8 +109,10 @@ behind one endpoint. [PROTOCOL.md](PROTOCOL.md) is the wire format.
 Step 2's ordering saves time. A container that starts first retries until a
 daemon answers.
 
-Set `MENTAT_NODE_IP` to the address the driver sees. Left empty, the daemon
-takes the default route, wrong on a multi-homed box.
+Set `MENTAT_NODE_IP` on the daemon to the address the driver sees. Left empty
+it takes the default route, wrong on a multi-homed box. A container reaching
+that daemon over loopback needs no setting: it claims no identity and the
+daemon supplies its own.
 
 Rollback: point `IMAGE` at the previous real-ray image tag.
 
@@ -180,7 +182,7 @@ Model names come from probing the group's own `/v1/models`.
 
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `MENTAT_NODE_IP` | default route | This node's cluster identity |
+| `MENTAT_NODE_IP` | the daemon's, over loopback | This node's cluster identity |
 | `MENTAT_PEERS` | empty | Comma-separated peer control addresses |
 | `MENTAT_ANNOUNCE_PORT` | 6382 | UDP announce port; 0 disables |
 | `MENTAT_ANNOUNCE_ADDR` | empty | Extra unicast announce targets |
