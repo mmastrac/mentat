@@ -335,6 +335,26 @@ pub fn local_addrs() -> Vec<String> {
         .collect()
 }
 
+/// The interface each address sits on, for the addresses discovered from
+/// one. A placement caller asks which link reaches a node, and the answer is
+/// an address and the interface to bind it on.
+///
+/// MENTAT_ANNOUNCE_ADDRS names addresses without an interface, so those are
+/// left out. An address missing from this map has an interface nobody
+/// recorded.
+pub fn local_addr_ifaces() -> BTreeMap<String, String> {
+    if announced_override().is_some() {
+        return BTreeMap::new();
+    }
+    selected_ifaces()
+        .into_iter()
+        .filter_map(|i| {
+            let name = i.iface.name.clone();
+            i.iface.address.ip_addr().map(|a| (a.to_string(), name))
+        })
+        .collect()
+}
+
 /// Tags per address, for the addresses that were given any. Empty unless
 /// MENTAT_ANNOUNCE_IFACES names tags, so a datagram carries no dead weight.
 pub fn local_addr_tags() -> BTreeMap<String, Vec<String>> {

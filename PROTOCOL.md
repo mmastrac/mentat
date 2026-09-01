@@ -257,6 +257,7 @@ A daemon reports three kinds of address. They are not interchangeable:
 | `link_ip` | The address a mesh link uses: the socket peer address inbound, the dialed address outbound |
 | `addrs` | Every address the node answers on, most preferred first |
 | `addr_tags` | Operator tags per address. Carried for consumers to read |
+| `addr_ifaces` | The interface each address sits on, where one was discovered |
 
 `node_ip` is not an address a third party can necessarily reach. On a
 multi-homed node it names the subnet the cluster talks on, which a host off
@@ -271,6 +272,12 @@ difference between them. The order comes from `MENTAT_ANNOUNCE_IFACES`.
 the operator cabled this address into a fabric. Placement acts on it once a
 probe over that address has succeeded (see "Placement"). The rest are carried
 for consumers to read.
+
+`addr_ifaces` maps an address to the interface it was found on, e.g.
+`{"10.100.0.1": "enp1s0f0np0"}`. A consumer choosing a link needs the address
+to dial and the interface to bind, and only the node knows the second.
+Addresses named by `MENTAT_ANNOUNCE_ADDRS` have no interface behind them and
+are absent from the map, which reads as unknown.
 
 A tag on its own admits nothing. A link that fails its probes stays out of
 placement however it is tagged.

@@ -255,6 +255,11 @@ pub enum Msg {
         /// traffic over different links. Carried, never interpreted here.
         #[serde(default)]
         addr_tags: BTreeMap<String, Vec<String>>,
+        /// The interface each address sits on, where it was discovered from
+        /// one. Absent from a daemon that predates the field, and from an
+        /// address named by MENTAT_ANNOUNCE_ADDRS.
+        #[serde(default)]
+        addr_ifaces: BTreeMap<String, String>,
         /// True when this daemon answers `probe` on its control port. A
         /// daemon that predates probing defaults to false and is never
         /// probed, so it never logs a peer_unexpected_msg per pair.
@@ -276,6 +281,11 @@ pub enum Msg {
         addrs: Vec<String>,
         #[serde(default)]
         addr_tags: BTreeMap<String, Vec<String>>,
+        /// The interface each address sits on, where it was discovered from
+        /// one. Absent from a daemon that predates the field, and from an
+        /// address named by MENTAT_ANNOUNCE_ADDRS.
+        #[serde(default)]
+        addr_ifaces: BTreeMap<String, String>,
         #[serde(default)]
         probes: bool,
     },

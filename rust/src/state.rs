@@ -233,6 +233,8 @@ pub struct PeerInfo {
     /// on both ends of a probe-ok pair is what makes two nodes fabric
     /// neighbours (see island::islands).
     pub addr_tags: std::collections::BTreeMap<String, Vec<String>>,
+    /// The interface each address sits on, where the peer knew one.
+    pub addr_ifaces: std::collections::BTreeMap<String, String>,
     /// True when this peer answers probes. False for a daemon that predates
     /// them, which is never probed.
     pub probes: bool,

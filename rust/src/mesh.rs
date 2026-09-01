@@ -105,6 +105,7 @@ fn try_connect(
             http_port,
             addrs: crate::announce::local_addrs(),
             addr_tags: crate::announce::local_addr_tags(),
+            addr_ifaces: crate::announce::local_addr_ifaces(),
             probes: true,
         },
         1,
@@ -113,32 +114,42 @@ fn try_connect(
     let (frame, _) = read_frame(&mut reader)?.ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at peer hello")
     })?;
-    let (peer_id, peer_ip, peer_control, peer_http, peer_addrs, peer_tags, peer_probes) =
-        match frame.msg {
-            Msg::PeerHelloOk {
-                node_id,
-                node_ip,
-                control_addr,
-                http_port,
-                addrs,
-                addr_tags,
-                probes,
-            } => (
-                node_id,
-                node_ip,
-                control_addr,
-                http_port,
-                addrs,
-                addr_tags,
-                probes,
-            ),
-            other => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("unexpected peer hello reply: {other:?}"),
-                ))
-            }
-        };
+    let (
+        peer_id,
+        peer_ip,
+        peer_control,
+        peer_http,
+        peer_addrs,
+        peer_tags,
+        peer_ifaces,
+        peer_probes,
+    ) = match frame.msg {
+        Msg::PeerHelloOk {
+            node_id,
+            node_ip,
+            control_addr,
+            http_port,
+            addrs,
+            addr_tags,
+            addr_ifaces,
+            probes,
+        } => (
+            node_id,
+            node_ip,
+            control_addr,
+            http_port,
+            addrs,
+            addr_tags,
+            addr_ifaces,
+            probes,
+        ),
+        other => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unexpected peer hello reply: {other:?}"),
+            ))
+        }
+    };
     if peer_id == my_id {
         // The seed list includes ourselves; harmless, just don't peer.
         return Ok(None);
@@ -162,6 +173,7 @@ fn try_connect(
             link_ip,
             addrs: peer_addrs,
             addr_tags: peer_tags,
+            addr_ifaces: peer_ifaces,
             probes: peer_probes,
             control_addr: control,
             http_port: peer_http,
@@ -191,6 +203,7 @@ pub fn accept_peer(
         http_port,
         addrs,
         addr_tags,
+        addr_ifaces,
         probes,
     } = hello.0.msg
     else {
@@ -213,6 +226,7 @@ pub fn accept_peer(
             http_port: my_http,
             addrs: crate::announce::local_addrs(),
             addr_tags: crate::announce::local_addr_tags(),
+            addr_ifaces: crate::announce::local_addr_ifaces(),
             probes: true,
         },
         hello.0.req,
@@ -229,6 +243,7 @@ pub fn accept_peer(
             link_ip,
             addrs,
             addr_tags,
+            addr_ifaces,
             probes,
             control_addr,
             http_port,
@@ -250,6 +265,7 @@ struct PeerIdent {
     link_ip: String,
     addrs: Vec<String>,
     addr_tags: std::collections::BTreeMap<String, Vec<String>>,
+    addr_ifaces: std::collections::BTreeMap<String, String>,
     probes: bool,
     control_addr: String,
     http_port: u16,
@@ -278,6 +294,7 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
         link_ip,
         addrs,
         addr_tags,
+        addr_ifaces,
         probes,
         control_addr,
         http_port,
@@ -320,6 +337,7 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
             link_ip,
             addrs,
             addr_tags,
+            addr_ifaces,
             probes,
             probe_pairs,
             control_addr,
