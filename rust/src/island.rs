@@ -186,28 +186,15 @@ pub fn fabrics(v: &FabricView) -> Fabrics {
 /// could never know whether two other boxes share a fabric.
 fn gather(shared: &SharedRef) -> FabricView {
     let mut v = FabricView::default();
-    let mut note = |node: &str, addrs: Vec<String>, tags: BTreeMap<String, Vec<String>>| {
-        let tagged: Vec<String> = addrs
-            .into_iter()
-            .filter(|a| {
-                tags.get(a)
-                    .map(|t| t.iter().any(|x| x == "rdma"))
-                    .unwrap_or(false)
-            })
-            .collect();
-        if !tagged.is_empty() {
-            v.rdma.insert(node.to_string(), tagged);
-        }
-    };
-
     let st = shared.st.lock().unwrap();
     note(
+        &mut v,
         &st.node_id,
         crate::announce::local_addrs(),
         crate::announce::local_addr_tags(),
     );
     for p in st.peers.values().filter(|p| p.alive) {
-        note(&p.node_id, p.addrs.clone(), p.addr_tags.clone());
+        note(&mut v, &p.node_id, p.addrs.clone(), p.addr_tags.clone());
         for (local, remotes) in &p.probe_pairs {
             for (remote, r) in remotes {
                 if r.ok {
@@ -216,21 +203,44 @@ fn gather(shared: &SharedRef) -> FabricView {
             }
         }
         // What this peer knows about the rest of the mesh.
-        for (_, q) in p.last_status["peers"].as_object().into_iter().flatten() {
-            let Some(id) = q["node_id"].as_str().or_else(|| q["id"].as_str()) else {
-                continue;
-            };
-            note(id, str_list(&q["addrs"]), tag_map(&q["addr_tags"]));
-            for (local, remotes) in q["probes"].as_object().into_iter().flatten() {
-                for (remote, r) in remotes.as_object().into_iter().flatten() {
-                    if r["ok"].as_bool().unwrap_or(false) {
-                        v.ok_pairs.insert((local.clone(), remote.clone()));
-                    }
+        merge_published(&mut v, &p.last_status["peers"]);
+    }
+    v
+}
+
+/// Record a node's RDMA-tagged addresses. An untagged node is left out: the
+/// tag is what says a link is meant to carry NCCL.
+fn note(v: &mut FabricView, node: &str, addrs: Vec<String>, tags: BTreeMap<String, Vec<String>>) {
+    let tagged: Vec<String> = addrs
+        .into_iter()
+        .filter(|a| {
+            tags.get(a)
+                .map(|t| t.iter().any(|x| x == "rdma"))
+                .unwrap_or(false)
+        })
+        .collect();
+    if !tagged.is_empty() {
+        v.rdma.insert(node.to_string(), tagged);
+    }
+}
+
+/// Fold one peer's published peer table into the view.
+///
+/// A node's id is the key it is filed under. The entry itself carries no id,
+/// so reading one out of the object skipped every entry, and this daemon
+/// derived only the fabric it sits on: the third source contributed nothing
+/// and a four-node cluster saw two halves.
+fn merge_published(v: &mut FabricView, peers: &Value) {
+    for (id, q) in peers.as_object().into_iter().flatten() {
+        note(v, id, str_list(&q["addrs"]), tag_map(&q["addr_tags"]));
+        for (local, remotes) in q["probes"].as_object().into_iter().flatten() {
+            for (remote, r) in remotes.as_object().into_iter().flatten() {
+                if r["ok"].as_bool().unwrap_or(false) {
+                    v.ok_pairs.insert((local.clone(), remote.clone()));
                 }
             }
         }
     }
-    v
 }
 
 fn str_list(v: &Value) -> Vec<String> {
@@ -347,6 +357,59 @@ mod tests {
 
     /// The cluster this exists for: four boxes, two cabled pairs, every
     /// fabric address out of the same subnet. Only the probes separate them.
+    /// The reported gap: on a four-node cluster of two cabled pairs, each
+    /// daemon derived only the fabric it sits on. A node's id is the key it
+    /// is filed under, and reading one out of the object instead skipped
+    /// every published peer, so this source contributed nothing.
+    ///
+    /// Shaped like a real /status peers map, which carries no id field.
+    #[test]
+    fn a_published_peer_table_is_read_by_its_keys() {
+        let peers = json!({
+            "6d656e7461743a31302e3130302e302e31": {
+                "node_ip": "10.100.0.1",
+                "addrs": ["192.168.1.70", "10.100.0.1"],
+                "addr_tags": {"10.100.0.1": ["connectx", "rdma"], "192.168.1.70": ["lan"]},
+                "probes": {"10.100.0.1": {"10.100.0.2": {"ok": true}}}
+            },
+            "6d656e7461743a31302e3130302e302e32": {
+                "node_ip": "10.100.0.2",
+                "addrs": ["192.168.1.77", "10.100.0.2"],
+                "addr_tags": {"10.100.0.2": ["connectx", "rdma"], "192.168.1.77": ["lan"]},
+                "probes": {"10.100.0.2": {"10.100.0.1": {"ok": true}}}
+            }
+        });
+        let mut v = FabricView::default();
+        merge_published(&mut v, &peers);
+
+        assert_eq!(v.rdma.len(), 2, "both nodes contribute a tagged address");
+        assert!(v
+            .ok_pairs
+            .contains(&("10.100.0.1".into(), "10.100.0.2".into())));
+
+        let got = islands(&v);
+        assert_eq!(got.len(), 1, "a fabric this daemon is not on: {got:?}");
+        assert_eq!(
+            got[0].addr.values().cloned().collect::<BTreeSet<_>>(),
+            ["10.100.0.1", "10.100.0.2"].map(String::from).into()
+        );
+    }
+
+    /// A LAN address every box shares is not a fabric, tagged or not.
+    #[test]
+    fn an_untagged_published_peer_contributes_nothing() {
+        let peers = json!({
+            "n1": {"addrs": ["192.168.1.70"], "addr_tags": {"192.168.1.70": ["lan"]},
+                   "probes": {"192.168.1.70": {"192.168.1.77": {"ok": true}}}},
+            "n2": {"addrs": ["192.168.1.77"], "addr_tags": {"192.168.1.77": ["lan"]},
+                   "probes": {}}
+        });
+        let mut v = FabricView::default();
+        merge_published(&mut v, &peers);
+        assert!(v.rdma.is_empty(), "nothing tagged rdma");
+        assert!(islands(&v).is_empty());
+    }
+
     #[test]
     fn two_cabled_pairs_are_two_islands() {
         let v = view(
