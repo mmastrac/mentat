@@ -1070,6 +1070,7 @@ fn create_actor(
             gpu_ids: gpu_ids.clone(),
             node_id: node_id.clone(),
             gcs_address: gcs,
+            owner: client_id.to_string(),
         },
         0,
         &payload,
@@ -1815,21 +1816,55 @@ fn agent_conn(
         // the head). The kills are sent after AgentRegisterOk below -- the
         // agent's handshake expects that as the first frame.
         let mut kills: Vec<String> = Vec::new();
+        let mut adopt: Vec<ActorInfo> = Vec::new();
         for r in &resume {
-            let keep = st
-                .actors
-                .get(&r.actor_id)
-                .map(|a| {
-                    st.clients.contains_key(&a.owner) && !matches!(a.state, ActorState::Dead { .. })
-                })
-                .unwrap_or(false);
-            if !keep {
-                kills.push(r.actor_id.clone());
-                log(
-                    "resume_rejected",
-                    &[("actor", r.actor_id.clone()), ("agent", agent_id.clone())],
-                );
+            match st.actors.get(&r.actor_id) {
+                // Known here: keep it while its owner is around and it has
+                // not already been declared dead.
+                Some(a) => {
+                    if !st.clients.contains_key(&a.owner)
+                        || matches!(a.state, ActorState::Dead { .. })
+                    {
+                        kills.push(r.actor_id.clone());
+                        log(
+                            "resume_rejected",
+                            &[("actor", r.actor_id.clone()), ("agent", agent_id.clone())],
+                        );
+                    }
+                }
+                // Not known here. A daemon that restarted knows no actor at
+                // all, and killing them would take down every model on the
+                // cluster because its own bookkeeping was lost. The process
+                // is alive on the agent, which is the fact that matters, so
+                // it is adopted from what the agent reports.
+                //
+                // The owner may not have reconnected yet, and nothing reaps
+                // an actor for want of one. The driver re-sends its hello
+                // under the same client id, which is what rejoins the two.
+                None => adopt.push(ActorInfo {
+                    id: r.actor_id.clone(),
+                    name: r.name.clone(),
+                    group: group.clone(),
+                    agent: agent_id.clone(),
+                    node_id: node_id.clone(),
+                    gpu_ids: r.gpu_ids.clone(),
+                    owner: r.owner.clone(),
+                    state: ActorState::Running,
+                    pid: (r.pid != 0).then_some(r.pid),
+                    queued_calls: Vec::new(),
+                }),
             }
+        }
+        for a in adopt {
+            log(
+                "actor_adopted",
+                &[
+                    ("actor", a.id.clone()),
+                    ("agent", agent_id.clone()),
+                    ("owner", a.owner.clone()),
+                ],
+            );
+            st.actors.insert(a.id.clone(), a);
         }
 
         // The resume list is authoritative for what survived on the agent's

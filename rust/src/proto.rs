@@ -218,6 +218,12 @@ pub enum Msg {
         gpu_ids: Vec<u32>,
         node_id: String,
         gcs_address: String,
+        /// The client this actor belongs to. Carried so the agent can name
+        /// it again on resume, which is what lets a daemon that lost its
+        /// state rebuild who owns what. Empty from a daemon that predates
+        /// the field.
+        #[serde(default)]
+        owner: String,
         // payload: pickle (cls, args, kwargs)
     },
     SpawnResult {
@@ -450,6 +456,11 @@ pub struct ResumeActor {
     pub name: String,
     pub gpu_ids: Vec<u32>,
     pub pid: u32,
+    /// The client this actor belongs to, as the daemon named it on spawn.
+    /// Empty from an agent that predates the field, and from an actor
+    /// spawned by a daemon that did.
+    #[serde(default)]
+    pub owner: String,
     /// Ref ids of calls the agent has relayed but not yet answered
     /// (including the long-lived run() ref).
     pub pending_refs: Vec<String>,

@@ -28,6 +28,9 @@ pub struct AgentOpts {
 
 struct HostActor {
     name: String,
+    /// The client the daemon said owns this actor, reported back on resume
+    /// so a daemon that lost its state can rebuild that link.
+    owner: String,
     /// 0 until the process is actually forked. Never pass 0 to kill(2): with
     /// a negated pgid that would target our own process group.
     pid: u32,
@@ -493,6 +496,7 @@ fn serve_once(
                 name: a.name.clone(),
                 gpu_ids: a.gpu_ids.clone(),
                 pid: a.pid,
+                owner: a.owner.clone(),
                 pending_refs: a.pending_refs.iter().cloned().collect(),
             })
             .collect()
@@ -594,6 +598,7 @@ fn serve_once(
                 name,
                 env,
                 gpu_ids,
+                owner,
                 ..
             } => {
                 // Insert the entry BEFORE the spawn thread does its slow work:
@@ -604,6 +609,7 @@ fn serve_once(
                     actor_id.clone(),
                     HostActor {
                         name: name.clone(),
+                        owner,
                         pid: 0,
                         gpu_ids: gpu_ids.clone(),
                         host: None,
