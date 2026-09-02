@@ -18,7 +18,7 @@
 #
 # Build all with ./build.sh, or pull mmastrac/mentat-artifacts:<ver> from
 # Docker Hub. A model image referencing a local tag needs build.sh to have run
-# on that box first; one referencing the published tag does not.
+# on that host first; one referencing the published tag does not.
 
 # Both binaries link statically against musl. The artifacts image is COPY'd
 # into model images this repo does not control, and a static binary needs

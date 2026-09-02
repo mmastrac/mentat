@@ -1,6 +1,7 @@
 # Tests
 
-GPU-free, daemon and agents as subprocesses, fake GPUs.
+Every suite runs without a GPU. The daemon and agents run as subprocesses
+with `MENTAT_GPUS` supplying fake GPUs.
 
 ```
 python3 tests/test_e2e_local.py   # kill -9 liveness, pg timeout, degrade window, give-up
@@ -18,6 +19,6 @@ Run from the repo root. Each suite builds the binary unless
 `test_vllm_shape.py` replays `RayExecutorV2` call for call, so a drifted shim
 fails there instead of in a model container.
 
-Re-audit on a base-image bump: `grep -rn 'ray\.'
+Re-audit on a base-image change: `grep -rn 'ray\.'
 <site-packages>/vllm/v1/executor/`. The audit holds only for the vLLM it ran
 against.

@@ -18,7 +18,7 @@ Discovery is a separate UDP datagram (port 6382). HTTP surfaces are 6380
 u32le header_len | u32le payload_len | header (JSON) | payload (opaque)
 ```
 
-Both lengths are capped at 256 MiB; a larger value is a protocol error and
+Both lengths are capped at 256 MiB. A larger value is a protocol error and
 closes the link. EOF at a frame boundary is a clean close.
 
 The payload carries Python pickle bytes end to end. No Rust component
@@ -35,8 +35,8 @@ unsolicited messages use 0. Remaining fields are the message's own.
 
 Unknown fields are ignored, and fields marked `#[serde(default)]` in
 `rust/src/proto.rs` may be absent. Adding an optional field is
-backward-compatible in both directions; removing one or changing a type is
-not.
+compatible in both directions. Removing one or changing a type breaks
+older peers.
 
 ## Named placements
 
@@ -137,12 +137,12 @@ the session and reaps that group's actors.
 | Daemon → agent | `kill` | Terminate an actor |
 | Both | `ping` / `pong` | Liveness |
 
-A service endpoint is announced in one of two forms, both read from
+A service endpoint takes either of these forms. Both are read from
 `MENTAT_*_API` in the container environment.
 
 | Field | Form | Meaning |
 | --- | --- | --- |
-| `services` | `{"openai": "http://10.0.0.1:8000/v1"}` | One URL, used verbatim |
+| `services` | `{"openai": "http://10.0.0.1:8000/v1"}` | A URL, used verbatim |
 | `services_ports` | `{"openai": {"port": 8000, "path": "/v1"}}` | Host left open; the consumer resolves it |
 | `provider` | `"vllm"` | What serves `openai`, from `MENTAT_MODEL_PROVIDER` |
 
@@ -154,10 +154,9 @@ consumer knows which of the node's links it shares, so only the consumer can
 resolve a host. See "Address selection".
 
 `service_notes` maps a service name to what the agent noticed about it after
-announcing — today, that its server bound one address rather than all of
-them. It is carried on `agent_register` and updated in flight by
-`service_note`, whose empty `note` clears one. Advisory: it explains a failed
-probe, it never causes one.
+announcing, such as its server binding one address. It is carried on
+`agent_register` and updated in flight by `service_note`, whose empty `note`
+clears one. A note is advisory. A failed probe quotes it.
 
 An agent reconnects with `resume` listing actors still alive, so a link
 outage does not orphan them.
@@ -189,8 +188,7 @@ The head is the lowest node id currently visible, after a hold-down.
 
 ### Probes
 
-A probe is not sent over the mesh link. It opens its own TCP connection, and
-that connection is the answer:
+A probe opens its own TCP connection, and that connection is the answer:
 
 1. The prober binds one of its own addresses, then connects to one of the
    peer's addresses at the peer's control port.
@@ -199,18 +197,17 @@ that connection is the answer:
 4. The connection closes.
 
 Success requires the reply to carry the expected `node_id`. Both fabrics in a
-multi-pair cluster may be numbered out of one subnet, so an address that
-answers is not by itself evidence that the intended node answered.
+multi-pair cluster may share a subnet, so an address that answers is not by itself evidence that the intended node answered.
 
-The local bind is the point. Without it the kernel picks a source address by
-routing table, and the result reports that table's preference rather than the
-cabling. Reachability is therefore a property of an address *pair* rather
-than of a remote address.
+Binding the local address is what makes the result describe the cabling.
+Without it the kernel picks a source address by routing table, and the
+result reports that table's preference. Reachability is therefore a property
+of an address pair.
 
 One probe per (own address × peer address) pair, every
 `MENTAT_PROBE_INTERVAL_MS`, bounded by `MENTAT_PROBE_TIMEOUT_MS`. Results are
 published per peer under `probes` in `/status` (see "HTTP"). A pair with no
-entry has not been tried, which is not the same as a pair that failed.
+entry has not been tried.
 
 ## Host messages
 
@@ -234,8 +231,7 @@ container bridges.
 `MENTAT_ANNOUNCE_IFACES` is a comma-separated list of `name` or
 `name=tag+tag`. A name is an fnmatch-style pattern over interface names, with
 `*` and `?` only: no character classes, no negation, no regex. A pattern with
-no wildcard is an exact name, so every configuration written before patterns
-existed keeps its meaning — `en` does not match `eno1`.
+no wildcard is an exact name: `en` does not match `eno1`.
 
     MENTAT_ANNOUNCE_IFACES=en*f*np*=connectx+rdma,en*=lan
 
@@ -246,11 +242,10 @@ List order is preference order.
 `MENTAT_ANNOUNCE_ADDRS` takes the same syntax with addresses in place of
 names, and replaces what the node says it answers on:
 
-    MENTAT_ANNOUNCE_ADDRS=192.168.1.11=lan,10.100.0.1=connectx+rdma
+    MENTAT_ANNOUNCE_ADDRS=10.0.1.1=lan,10.0.0.1=connectx+rdma
 
 It is for a node whose advertisable address is on no interface of its own.
-It does not change where broadcast goes, which still follows the selected
-interfaces.
+Broadcast still follows the selected interfaces.
 
 Unsigned (version 1):
 
@@ -269,9 +264,8 @@ Signed (version 2) wraps the same payload:
 
 `sig` is HMAC-SHA256 over the payload's compact JSON with sorted keys, keyed
 by `MENTAT_SECRET` or the contents of `MENTAT_SECRET_FILE`. A
-`MENTAT_SECRET_FILE` that cannot be read is fatal at boot rather than
-unsigned. The verifier
-re-serializes the payload it parsed, so every value must survive a JSON round
+`MENTAT_SECRET_FILE` that cannot be read, or reads empty, is fatal at boot.
+The verifier re-serializes the payload it parsed, so every value must survive a JSON round
 trip: integers and strings only. An `f64` does not round-trip and will fail
 the signature for some values.
 
@@ -289,14 +283,14 @@ Receiver rules, in order:
 4. Check the source address against `ALLOWED_SOURCES`, and each advertised
    address before choosing it. The address the announcement calls its own is
    not checked, because nothing acts on it. A rejected source is logged once,
-   naming the configured prefixes.
+   specifying the configured prefixes.
 
 An announcement is a hint. It adds one address to watch, and every claim in
 it is re-read over TCP and probed before it affects routing.
 
 ## Address selection
 
-A daemon reports three kinds of address. They are not interchangeable:
+A daemon reports these address fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -306,24 +300,24 @@ A daemon reports three kinds of address. They are not interchangeable:
 | `addr_tags` | Operator tags per address. Carried for consumers to read |
 | `addr_ifaces` | The interface each address sits on, where one was discovered |
 
-`node_ip` is not an address a third party can necessarily reach. On a
-multi-homed node it names the subnet the cluster talks on, which a host off
-that subnet has no route to.
+A third party cannot necessarily reach `node_ip`. On a multi-homed node it
+specifies the subnet the cluster talks on, which a host off that subnet has no
+route to.
 
 `addrs` is ordered: the node lists its preferred link first. Only the node
 can rank its own links, since a consumer that can reach both sees no
 difference between them. The order comes from `MENTAT_ANNOUNCE_IFACES`.
 
 `addr_tags` maps an address to operator-defined tags, e.g.
-`{"10.100.0.1": ["connectx", "rdma"]}`. One tag is interpreted: `rdma` means
+`{"10.0.0.1": ["connectx", "rdma"]}`. One tag is interpreted: `rdma` means
 the operator cabled this address into a fabric. Placement acts on it once a
 probe over that address has succeeded (see "Placement"). The rest are carried
 for consumers to read.
 
 `addr_ifaces` maps an address to the interface it was found on, e.g.
-`{"10.100.0.1": "enp1s0f0np0"}`. A consumer choosing a link needs the address
+`{"10.0.0.1": "enp1s0f0np0"}`. A consumer choosing a link needs the address
 to dial and the interface to bind, and only the node knows the second.
-Addresses named by `MENTAT_ANNOUNCE_ADDRS` have no interface behind them and
+Addresses from `MENTAT_ANNOUNCE_ADDRS` have no interface behind them and
 are absent from the map, which reads as unknown.
 
 A tag on its own admits nothing. A link that fails its probes stays out of
@@ -345,18 +339,17 @@ A service announced under `services_ports` has no host. The consumer forms
 
 1. Candidate hosts are the announcing node's `addrs`. An agent is joined to
    its node by matching its `node_ip` against every address that identifies a
-   node in the consumer's view — `node_ip`, `link_ip`, and each entry of
-   `addrs`. This is why a box's daemon and its containers must agree on
+   node in the consumer's view: `node_ip`, `link_ip`, and each entry of
+   `addrs`. This is why a node's daemon and its containers must agree on
    `MENTAT_NODE_IP`.
 2. Every candidate is checked against the consumer's own allowlist
    (`ALLOWED_SOURCES` in `mentatd-serve`). These are addresses the consumer
    derived and will connect to, which is what that list is for. A verbatim
    `services` URL passes no check and is used exactly as written, because the
-   operator named a host.
+   operator specified a host.
 3. Candidates on one of the consumer's own subnets sort first, preserving the
-   node's own order within each half. The node ranks its links by speed
-   because only it can; the consumer ranks by shared wire because only it
-   can.
+   node's own order within each half. Only the node can rank its links by
+   speed. Only the consumer can rank them by shared wire.
 
 The consumer then probes candidates in order, keeps whichever answers, falls
 through to the next when it stops answering, and periodically re-tries the
@@ -383,8 +376,8 @@ Derivation, in order:
    `MENTAT_ISLAND_HOLD_DOWN_MS` of stability, so a flapping cable cannot send
    consecutive placements to different islands.
 
-The graph is over ports — one node's one address — rather than over nodes,
-because a rank binds one address and every other rank has to reach that one.
+The graph's vertices are addresses rather than nodes: a rank binds a single
+address and every other rank has to reach that one.
 A node with two fabric ports on separate links joins through whichever port
 reaches all of the island, or through neither.
 
@@ -404,7 +397,7 @@ Placement then:
 - Candidate islands are those with enough free GPUs in the group. The
   driver's island is tried first, then the smallest sufficient one.
 - Nothing spills onto the LAN. A group that fits no island stays PENDING and
-  fails at `MENTAT_PG_PENDING_TIMEOUT_MS`, naming the constraint and what the
+  fails at `MENTAT_PG_PENDING_TIMEOUT_MS`, specifying the constraint and what the
   best island offered. `pending_reason` in `/status` says the same while
   there is still time to act.
 
@@ -412,7 +405,7 @@ Each rank of a group placed on an island is spawned with `MENTAT_FABRIC_IP`
 set to that node's address on that island. The `ray` shim resolves
 `get_node_ip_address()` as `VLLM_HOST_IP` → `MENTAT_FABRIC_IP` →
 `MENTAT_NODE_IP` → a UDP-socket guess, so a hand-set `VLLM_HOST_IP` always
-wins and removing it is how a deployment opts in.
+wins. Removing it is how a deployment opts in.
 
 ## HTTP
 
@@ -441,7 +434,7 @@ Router, port 6381:
 | `/mcp` | Merged MCP, tools prefixed `<group>__` |
 | `/status.json`, `/healthz`, `/` | Route table, per-group health and selected endpoint, and `uptime_s` |
 
-A `/v1` request naming a known but ungated model returns 503 with the gate it
+A `/v1` request specifying a known but ungated model returns 503 with the gate it
 failed. An unknown name returns 404. Bodies over 128 MiB are refused.
 
 Each group carries `openai` (the candidate currently routed to),

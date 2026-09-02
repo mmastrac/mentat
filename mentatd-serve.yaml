@@ -1,32 +1,16 @@
-# mentatd-serve: the cluster's serving front door -- one OpenAI-compatible
-# endpoint (routes by model name to whichever group announced it, streaming
-# passed through) and one MCP endpoint merging the per-container management
-# MCPs (tools prefixed <group>__). A separate process from mentatd on
-# purpose: the daemon never touches inference traffic.
+# mentatd-serve: one OpenAI-compatible endpoint that routes by model name to
+# the group serving it, and one MCP endpoint merging the per-container
+# management MCPs. A separate process from mentatd: the daemon never touches
+# inference traffic.
 #
-# Deploy to ~/compose/mentatd-serve/ on whichever box(es) should answer
-# clients -- any box works, it only needs to reach every mentatd's HTTP port
-# and the announced endpoints. On the pair those are on 10.100.0.x, so a
-# front door for a pair-hosted model must run on one of the pair (n3
-# cannot reach that subnet).
-#
-# No .env is required. Daemons are found by their UDP announcements (port
-# 6382), by the MENTAT_DAEMONS seed (the local daemon by default; set it
-# empty for UDP only), and through the mesh's membership once any one
-# daemon is reached. Announcements are unsigned hints: they only add an
-# address to watch, and everything a daemon claims is re-read over TCP and
-# probed.
-#
-# Routing is health-gated: a group is admitted only while it has a running
-# actor and its announced endpoint answers a /models probe. The MCP merge
-# skips the gate: the status server matters most while the engine is loading
-# or wedged.
+# Deploy on any node that can reach every mentatd's HTTP port and the
+# announced endpoints. No .env is required. See GUIDE-SERVE.md.
 services:
   mentatd-serve:
     image: ${IMAGE:-mentatd-serve:0.5.1}
     container_name: mentatd-serve
-    # Host networking: the announced endpoints live on host/cluster
-    # addresses (10.100.0.x on the pair) that bridge networking cannot reach.
+    # The announced endpoints sit on host addresses that bridge networking
+    # cannot reach.
     network_mode: host
     restart: unless-stopped
     # The HMAC key when it lives in a file. Point MENTAT_SECRET_HOST_FILE at
@@ -35,23 +19,22 @@ services:
     volumes:
       - ${MENTAT_SECRET_HOST_FILE:-/dev/null}:/run/mentat/secret:ro
     environment:
-      # The local seed costs nothing beside the UDP path and covers a
-      # listener that missed the first announcements. To the bare binary an
-      # empty (set) value means no seeds at all; compose cannot express
-      # that, since ${VAR:-default} treats empty as unset.
+      # The local seed covers a listener that missed the first
+      # announcements. To the binary an empty value means no seeds. Compose
+      # cannot express that, since ${VAR:-default} treats empty as unset.
       - MENTAT_DAEMONS=${MENTAT_DAEMONS:-127.0.0.1:6380}
       - SERVE_PORT=${SERVE_PORT:-6381}
       # The daemons' announcement port. 0 turns the listener off.
       - MENTAT_ANNOUNCE_PORT=${MENTAT_ANNOUNCE_PORT:-6382}
-      # Empty keeps the built-in default: own subnets, loopback, and the
-      # docker bridge ranges (a bridge-networked client like OpenWebUI
-      # reaching this host keeps its 172.x source).
+      # Empty keeps the built-in default, which covers loopback and the
+      # docker bridge range: a bridge-networked client reaching this host
+      # keeps its 172.x source.
       - ALLOWED_SOURCES=${ALLOWED_SOURCES:-}
       # HMAC key for announcements. Set it here and on every daemon, or on
       # neither: a router holding a key accepts signed announcements only.
       - MENTAT_SECRET=${MENTAT_SECRET:-}
-      # Set this to /run/mentat/secret to use the mount above. A path
-      # that reads empty turns signing off, even with MENTAT_SECRET set.
+      # Set this to /run/mentat/secret to use the mount above. A file that
+      # cannot be read, or reads empty, stops the router at boot.
       - MENTAT_SECRET_FILE=${MENTAT_SECRET_FILE:-}
       # Cluster name. Foreign universes are dropped without a log line.
       - MENTAT_UNIVERSE=${MENTAT_UNIVERSE:-}

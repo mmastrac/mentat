@@ -1,37 +1,29 @@
-# mentatd: the host-level mentat daemon, one per GB10 box. Deploy to
-# ~/compose/mentatd/ on each node with a per-node .env:
+# mentatd: the host-level daemon, one per node. Deploy with a per-node .env
+# setting MENTAT_NODE_IP and MENTAT_PEERS:
 #
-#   gx10-n1 (.env): MENTAT_NODE_IP=10.100.0.2
-#                     MENTAT_PEERS=10.100.0.1:6379,192.168.1.13:6379
-#   gx10-n2 (.env): MENTAT_NODE_IP=10.100.0.1
-#                     MENTAT_PEERS=10.100.0.2:6379,192.168.1.13:6379
-#   gx10-n3 (.env): MENTAT_NODE_IP=192.168.1.13
-#                     MENTAT_PEERS=192.168.1.11:6379,192.168.1.12:6379
+#   MENTAT_NODE_IP=10.0.0.1
+#   MENTAT_PEERS=10.0.0.2:6379,10.0.0.3:6379
 #
-# MENTAT_NODE_IP is this node's CLUSTER identity -- on the serving pair that
-# is the ConnectX 10.100.0.x address (matching VLLM_HOST_IP inside the model
-# containers), NOT the LAN address. Left empty the daemon derives its identity
-# from the default route, which lands on 192.168.1.x and breaks the
-# driver-node match on the pair. n3 has no QSFP link, so its LAN address IS
-# its cluster identity, and it must dial the pair by their LAN addresses --
-# the mesh dedupes by node id, not by the address a link happened to use.
+# MENTAT_NODE_IP is this node's cluster identity: the address the driver sees
+# itself on, which on a multi-homed node is the fabric address that matches
+# VLLM_HOST_IP in the model containers. Left empty, the daemon takes the
+# default route's address, which on a multi-homed node breaks the driver-node
+# match. The mesh dedupes peers by node id, so a peer may be dialed on any of
+# its addresses.
 #
-# The hand-matching above is what MENTAT_ANNOUNCE_IFACES retires. Tag the
-# links on every box, let the daemons probe which ones are really cabled
-# together, and each rank is handed MENTAT_FABRIC_IP for the fabric its
-# group was placed on. This block stays until every deployment has dropped
-# its VLLM_HOST_IP. See GUIDE.md "Fabrics".
+# MENTAT_ANNOUNCE_IFACES lets the daemons probe which links are cabled
+# together and hand each rank MENTAT_FABRIC_IP, which retires the per-node
+# VLLM_HOST_IP. See GUIDE.md "Fabrics".
 #
-# Must be running before any converted model container starts: the containers'
-# `ray start` registers with this daemon on 127.0.0.1:6379 (retrying, so
-# ordering only delays them, never kills them).
+# Model containers register with this daemon on 127.0.0.1:6379 and retry, so
+# a container that starts first waits for it.
 services:
   mentatd:
     image: ${IMAGE:-mentatd:0.5.1}
     container_name: mentatd
-    # Host networking on purpose: the control port must be reachable both at
-    # 127.0.0.1:6379 (agents in host-network model containers) and on the
-    # cluster subnets (the worker's agent and the mesh).
+    # The control port must answer on 127.0.0.1:6379 for agents in
+    # host-network model containers and on the cluster subnets for remote
+    # agents and the mesh.
     network_mode: host
     restart: unless-stopped
     # The HMAC key when it lives in a file. Point MENTAT_SECRET_HOST_FILE at
@@ -42,9 +34,8 @@ services:
     environment:
       - MENTAT_NODE_IP=${MENTAT_NODE_IP:-}
       - MENTAT_PEERS=${MENTAT_PEERS:-}
-      # Lifecycle tuning, all optional, in milliseconds. Defaults in README
-      # "Tuning" and rust/src/config.rs. Set in the per-node .env only when
-      # deviating from the defaults.
+      # Lifecycle tuning, in milliseconds. GUIDE.md "Environment" has the
+      # defaults. Empty takes the default.
       - MENTAT_PG_PENDING_TIMEOUT_MS=${MENTAT_PG_PENDING_TIMEOUT_MS:-}
       - MENTAT_AGENT_DEGRADED_AFTER_MS=${MENTAT_AGENT_DEGRADED_AFTER_MS:-}
       - MENTAT_AGENT_DEAD_AFTER_MS=${MENTAT_AGENT_DEAD_AFTER_MS:-}
@@ -63,33 +54,31 @@ services:
       # Interfaces to announce on, preferred first, with optional tags.
       # Empty picks every up non-loopback interface except the container
       # bridges, in kernel order and untagged. Names are `*`/`?` patterns,
-      # so one line serves every box:
+      # so one line serves every node:
       #
       #   MENTAT_ANNOUNCE_IFACES=en*f*np*=connectx+rdma,en*=lan
       #
-      # The `rdma` tag is a claim that this link is cabled into a fabric.
-      # The daemons probe it before placement acts on it. A tag on the wrong
-      # interface fails its probes and is logged. Placement never uses it.
+      # The `rdma` tag claims that this link is cabled into a fabric. The
+      # daemons probe it before placement acts on it. A tag on the wrong
+      # interface fails its probes, is logged, and stays out of placement.
       - MENTAT_ANNOUNCE_IFACES=${MENTAT_ANNOUNCE_IFACES:-}
       # Addresses to announce instead of deriving them from interfaces,
-      # same syntax. For a box whose advertisable address is on none of its
+      # same syntax. For a node whose advertisable address is on none of its
       # own interfaces.
       - MENTAT_ANNOUNCE_ADDRS=${MENTAT_ANNOUNCE_ADDRS:-}
       # Reachability probing and the fabric-island hold-down. Empty uses the
-      # defaults (15 s cadence, 2 s per probe, 5 s hold-down).
+      # defaults (15 s interval, 2 s per probe, 5 s hold-down).
       - MENTAT_PROBE_INTERVAL_MS=${MENTAT_PROBE_INTERVAL_MS:-}
       - MENTAT_PROBE_TIMEOUT_MS=${MENTAT_PROBE_TIMEOUT_MS:-}
       - MENTAT_ISLAND_HOLD_DOWN_MS=${MENTAT_ISLAND_HOLD_DOWN_MS:-}
-      # `off` places multi-bundle groups without the one-fabric constraint.
-      # Groups opt in one at a time by carrying an rdma tag, so this is only
+      # `off` places multi-bundle groups without the one-fabric constraint,
       # for a cluster whose probes disagree with its cabling.
       - MENTAT_ISLAND_PLACEMENT=${MENTAT_ISLAND_PLACEMENT:-}
-      # HMAC key for announcements, matching spark-agent's mesh discovery.
-      # Unset leaves them unsigned. A file keeps the key out of the
-      # environment.
+      # HMAC key for announcements. Unset leaves them unsigned. A file keeps
+      # the key out of the environment.
       - MENTAT_SECRET=${MENTAT_SECRET:-}
-      # Set this to /run/mentat/secret to use the mount above. A path
-      # that reads empty turns signing off, even with MENTAT_SECRET set.
+      # Set this to /run/mentat/secret to use the mount above. A file that
+      # cannot be read, or reads empty, stops the daemon at boot.
       - MENTAT_SECRET_FILE=${MENTAT_SECRET_FILE:-}
       # Cluster name. Foreign universes are dropped without a log line.
       - MENTAT_UNIVERSE=${MENTAT_UNIVERSE:-}

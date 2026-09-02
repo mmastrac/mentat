@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mentatd"
 version = "0.5.1"
-description = "mentatd's ray-compatible shim for vLLM multi-node serving on unified-memory GB10"
+description = "ray-compatible shim for vLLM multi-node serving with mentatd"
 requires-python = ">=3.9"
 
 [tool.setuptools]
