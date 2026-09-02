@@ -116,10 +116,6 @@ pub struct AgentInfo {
     /// What serves the announced `openai` endpoint (`vllm`). Stored and
     /// republished verbatim, like the endpoints themselves.
     pub provider: String,
-    /// Set when this agent claimed an address the mesh files under another
-    /// node. Advisory, like the service notes: it explains a group that
-    /// takes no fabric, and leaves every placement decision alone.
-    pub node_note: Option<String>,
     pub writer: FrameWriter,
     pub alive: bool,
     /// When the agent link EOFed (degrade window start). None while
@@ -302,6 +298,10 @@ pub struct State {
     /// Named placements, by name. Only the head fills this in.
     pub claims: std::collections::BTreeMap<String, ClaimInfo>,
     pub claim_generation: u64,
+    /// Agent ids already refused for a misfiled node, so a container that
+    /// retries every few seconds is named once rather than every round. The
+    /// refusal itself repeats, and only the line is held back.
+    pub misfiled_warned: std::collections::BTreeSet<String>,
     pub next_seq: u64,
     pub next_ref: u64,
     pub counters: Counters,
@@ -340,6 +340,7 @@ impl State {
             clients: HashMap::new(),
             claims: std::collections::BTreeMap::new(),
             claim_generation: 0,
+            misfiled_warned: std::collections::BTreeSet::new(),
             next_seq: 1,
             next_ref: 1,
             counters: Counters::default(),

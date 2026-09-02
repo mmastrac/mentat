@@ -1668,15 +1668,36 @@ fn agent_conn(
             node_id_for(&node_ip)
         }
     };
-    let node_note = {
-        let st = shared.st.lock().unwrap();
-        misfiled_node(&st, &node_ip, &node_id)
+    // A container claiming an address that belongs to a box the mesh files
+    // under another node is refused. Registering it would put its GPUs on a
+    // node no island reaches, so its group would take no fabric and its
+    // ranks would talk over whichever link the address named, which reads
+    // as a slow model rather than as a misconfiguration.
+    let misfiled = {
+        let mut st = shared.st.lock().unwrap();
+        misfiled_node(&st, &node_ip, &node_id).map(|why| {
+            let first_time = st.misfiled_warned.insert(agent_id.clone());
+            (why, first_time)
+        })
     };
-    if let Some(note) = &node_note {
-        log(
-            "agent_node_misfiled",
-            &[("agent", agent_id.clone()), ("why", note.clone())],
+    if let Some((why, first_time)) = misfiled {
+        if first_time {
+            log(
+                "agent_node_misfiled",
+                &[("agent", agent_id.clone()), ("why", why.clone())],
+            );
+        }
+        // The reason rides on the refusal, and the agent retries in a loop
+        // and logs it there, so the operator reading the container's own
+        // output sees it however long it has been failing.
+        let _ = writer.send(
+            Msg::Err {
+                error: format!("agent {agent_id} {why}"),
+            },
+            first.0.req,
+            &[],
         );
+        return;
     }
 
     {
@@ -1702,7 +1723,6 @@ fn agent_conn(
                 services_ports: services_ports.clone(),
                 service_notes,
                 provider,
-                node_note,
                 writer: writer.clone(),
                 alive: true,
                 lost_at_ms: None,
