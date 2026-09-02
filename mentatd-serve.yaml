@@ -7,7 +7,7 @@
 # announced endpoints. No .env is required. See GUIDE-SERVE.md.
 services:
   mentatd-serve:
-    image: ${IMAGE:-mentatd-serve:0.5.2}
+    image: ${IMAGE:-mentatd-serve:0.6.0}
     container_name: mentatd-serve
     # The announced endpoints sit on host addresses that bridge networking
     # cannot reach.

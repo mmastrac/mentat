@@ -19,7 +19,7 @@
 # a container that starts first waits for it.
 services:
   mentatd:
-    image: ${IMAGE:-mentatd:0.5.2}
+    image: ${IMAGE:-mentatd:0.6.0}
     container_name: mentatd
     # The control port must answer on 127.0.0.1:6379 for agents in
     # host-network model containers and on the cluster subnets for remote

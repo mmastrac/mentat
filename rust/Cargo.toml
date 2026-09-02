@@ -1,6 +1,6 @@
 [package]
 name = "mentatd"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 description = "Minimal Ray replacement for vLLM multi-node serving"
 license = "MIT OR Apache-2.0"
