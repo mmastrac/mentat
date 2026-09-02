@@ -1867,6 +1867,62 @@ fn agent_conn(
             st.actors.insert(a.id.clone(), a);
         }
 
+        // The calls those actors are still working on. The agent carries
+        // them (pending_refs) or holds their results to re-send
+        // (unacked_refs), and a daemon with none of its own would answer a
+        // driver's get with "no such ref" or leave it waiting for a result
+        // it has nowhere to put.
+        //
+        // A ref id is "<actor>:<n>", so it names its own actor, and the
+        // counter is moved past what was adopted: starting again from one
+        // would hand a new call the id of a call still running.
+        {
+            let reported: Vec<String> = resume
+                .iter()
+                .flat_map(|r| r.pending_refs.iter())
+                .chain(unacked_refs.iter())
+                .cloned()
+                .collect();
+            let mut adopted = 0usize;
+            for rid in reported {
+                if st.refs.contains_key(&rid) {
+                    continue;
+                }
+                let (actor, seq) = match rid.rsplit_once(':') {
+                    Some((a, n)) => (Some(a.to_string()), n.parse::<u64>().ok()),
+                    None => (None, None),
+                };
+                // Only for actors this agent is carrying: a ref naming
+                // something else is not this agent's to revive.
+                let owner = match actor.as_deref().and_then(|a| st.actors.get(a)) {
+                    Some(a) if a.agent == agent_id => a.owner.clone(),
+                    _ => continue,
+                };
+                if let Some(n) = seq {
+                    st.next_ref = st.next_ref.max(n + 1);
+                }
+                st.refs.insert(
+                    rid,
+                    RefInfo {
+                        state: RefState::Pending,
+                        actor,
+                        owner,
+                        // The agent reports a call by id and nothing more.
+                        method: String::new(),
+                        created_ms: crate::state::now_ms_u64(),
+                        warned: false,
+                    },
+                );
+                adopted += 1;
+            }
+            if adopted > 0 {
+                log(
+                    "refs_adopted",
+                    &[("agent", agent_id.clone()), ("count", adopted.to_string())],
+                );
+            }
+        }
+
         // The resume list is authoritative for what survived on the agent's
         // side. An actor this daemon still thinks is live but the agent no
         // longer carries (agent restarted, or the actor exited during the

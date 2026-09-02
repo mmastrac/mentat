@@ -492,6 +492,91 @@ def t17_agent_link_giveup():
         c.cleanup()
 
 
+def t18_actors_survive_a_daemon_restart():
+    """A daemon that restarts must not take the models down with it.
+
+    The daemon's own tables are a cache of what the agents hold: the agent
+    has the actor processes, so a fresh daemon rebuilds from what it
+    reports. Before that, a restart killed every actor on the cluster
+    because the resume check read an empty table and treated a miss as
+    grounds to kill.
+    """
+    import json as _json
+    import urllib.request as _url
+
+    c = tl.Cluster()
+    try:
+        c.start_agent("grestart", container="cr", gpus=1)
+        c.wait_group_gpus("grestart", 1)
+
+        driver = """
+import os, sys, json
+sys.path[:0] = os.environ["PYTHONPATH"].split(os.pathsep)
+import ray
+from ray.util.placement_group import placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from fake_worker import FakeWorker
+ray.init()
+pg = placement_group([{"GPU": 1.0}])
+ray.wait([pg.ready()], timeout=20)
+a = ray.remote(FakeWorker).options(
+    name="w0", num_gpus=1,
+    scheduling_strategy=PlacementGroupSchedulingStrategy(
+        placement_group=pg, placement_group_bundle_index=0),
+).remote(rank=0)
+print("READY %d" % ray.get(a.pid.remote(), timeout=30), flush=True)
+for line in sys.stdin:
+    try:
+        print("PID %d" % ray.get(a.pid.remote(), timeout=25), flush=True)
+    except Exception as e:
+        print("FAIL %s" % type(e).__name__, flush=True)
+"""
+        env = {
+            **os.environ,
+            "RAY_ADDRESS": c.address,
+            "MENTAT_GROUP": "grestart",
+            "PYTHONPATH": os.pathsep.join([tl.PYTHON_PKG, HERE]),
+        }
+        p = subprocess.Popen(
+            [sys.executable, "-c", driver], env=env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, text=True, bufsize=1,
+        )
+        tl._children.append(p)
+        first = p.stdout.readline().split()
+        assert first and first[0] == "READY", first
+        pid = first[1]
+
+        def live_actors():
+            with _url.urlopen(f"http://127.0.0.1:{c.http_port}/status", timeout=10) as r:
+                g = (_json.load(r).get("groups") or {}).get("grestart") or {}
+            return [a for a in (g.get("actors") or []) if a.get("state") == "running"]
+
+        assert len(live_actors()) == 1, live_actors()
+
+        c.daemon.kill()
+        c.daemon.wait(timeout=5)
+        time.sleep(1)
+        c.daemon = c._spawn_daemon()
+        c._wait_port(c.port)
+        time.sleep(6)
+
+        assert len(live_actors()) == 1, f"the restart took the actor: {live_actors()}"
+
+        # The first call finds the socket the old daemon closed. A call is a
+        # mutation, so the shim reports it rather than replaying it, and
+        # redials underneath. The one after must reach the same process.
+        p.stdin.write("go\n")
+        p.stdin.flush()
+        p.stdout.readline()
+        p.stdin.write("go\n")
+        p.stdin.flush()
+        again = p.stdout.readline().split()
+        assert again and again[0] == "PID", again
+        assert again[1] == pid, f"a different process answered: {again[1]} != {pid}"
+    finally:
+        c.cleanup()
+
+
 def main():
     tests = [
         t01_init_and_resources,
@@ -513,6 +598,7 @@ def main():
         t15_pg_pending_timeout,
         t16_agent_link_degrade_and_recover,
         t17_agent_link_giveup,
+        t18_actors_survive_a_daemon_restart,
     ]
     try:
         for t in tests:
