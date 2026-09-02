@@ -28,15 +28,34 @@ pub struct DaemonOpts {
     pub peers: Vec<String>,
 }
 
+/// This node's cluster identity.
+///
+/// A set-but-empty MENTAT_NODE_IP reads as unset. `${MENTAT_NODE_IP:-}` in a
+/// compose file sets the variable to nothing, and taking that literally gave
+/// every daemon deployed from the shipped file the same identity, since a
+/// node id is the hash of this string and they all hashed "mentat:". Peers
+/// skip a peer bearing their own id, so such a fleet never meshed.
 pub fn default_node_ip() -> String {
     if let Ok(ip) = std::env::var("MENTAT_NODE_IP") {
-        return ip;
+        let ip = ip.trim();
+        if !ip.is_empty() {
+            return ip.to_string();
+        }
     }
     // The address we'd use to reach the world; loopback for dev boxes.
     local_ip_toward("8.8.8.8:53").unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
+    // A daemon with no identity hashes to the same node id as every other
+    // one, and a peer bearing your own id is taken for yourself and skipped.
+    if opts.node_ip.trim().is_empty() {
+        let why = "node ip is empty: set MENTAT_NODE_IP or --node-ip to the \
+                   address this node is known by";
+        log("daemon_no_node_ip", &[("error", why.to_string())]);
+        eprintln!("mentatd: {why}");
+        std::process::exit(1);
+    }
     let hostname = hostname();
     let gcs_address = format!("{}:{}", opts.node_ip, opts.port);
     let shared: SharedRef = Arc::new(Shared {
