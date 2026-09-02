@@ -207,6 +207,7 @@ fn main() {
             }
         }
         Some(Cmd::Start {
+            head,
             block,
             address,
             object_store_memory,
@@ -223,14 +224,32 @@ fn main() {
                 );
             }
             let group = group_from_env();
-            // Workers pass --address=<head>; agents connect to that daemon
-            // directly (no per-node daemon required). MENTAT_DAEMON overrides
-            // for tests and for a future local-daemon mesh.
-            let daemon_addr = std::env::var("MENTAT_DAEMON")
+            // `--head` is a ray flag mentat has no use for, and it carries no
+            // address. An entrypoint that runs the head role with it and the
+            // worker roles with --address sends the two to different daemons.
+            // Neither daemon then counts the whole group: the gate sees one
+            // node's GPUs, and the head solves a claim against nodes the
+            // driver cannot see.
+            let told = std::env::var("MENTAT_DAEMON")
                 .ok()
-                .filter(|s| !s.is_empty())
-                .or(address.filter(|s| !s.is_empty()))
-                .unwrap_or_else(|| "127.0.0.1:6379".to_string());
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| address.clone().filter(|s| !s.trim().is_empty()));
+            if head && told.is_none() {
+                if let Ok(ray) = std::env::var("RAY_ADDRESS") {
+                    if !ray.trim().is_empty() {
+                        let why = format!(
+                            "--head names no daemon, so this agent would register with \
+                             the local one while RAY_ADDRESS names {ray}. Every agent of \
+                             a group and its driver must reach one daemon. Pass \
+                             --address={ray}"
+                        );
+                        logfmt::log("head_without_address", &[("error", why.clone())]);
+                        eprintln!("mentatd: {why}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let daemon_addr = told.unwrap_or_else(|| "127.0.0.1:6379".to_string());
             if block {
                 agent::run(agent::AgentOpts { daemon_addr, group });
             } else {

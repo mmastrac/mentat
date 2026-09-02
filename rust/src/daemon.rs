@@ -1479,6 +1479,37 @@ fn placement_scopes(
         if nodes.is_empty() {
             return Err(format!("claim {claim:?} names no nodes"));
         }
+        // The head solves a claim against the whole mesh. This daemon
+        // places among its own agents. Where the two disagree the group
+        // would be assigned a node the driver cannot see, and the driver
+        // reads the assignment by node id, so it would fail looking up a
+        // node it was never told about.
+        let served: std::collections::BTreeSet<&str> = st
+            .agents
+            .values()
+            .filter(|a| a.alive && a.group == group)
+            .map(|a| a.node_id.as_str())
+            .collect();
+        if let Some(missing) = nodes.iter().find(|n| !served.contains(n.as_str())) {
+            let where_ = st
+                .peers
+                .values()
+                .find(|p| &p.node_id == missing)
+                .map(|p| p.node_ip.clone())
+                .unwrap_or_else(|| missing.clone());
+            let head = st
+                .peers
+                .values()
+                .find(|p| p.node_id == st.head_node_id)
+                .map(|p| p.control_addr.clone())
+                .unwrap_or_else(|| "this node".to_string());
+            return Err(format!(
+                "claim {claim:?} placed a bundle on {where_}, which has no agent of \
+                 group {group} registered with this daemon. The head solved the claim \
+                 against the whole mesh. Point the driver and every agent of the group \
+                 at the head, {head}"
+            ));
+        }
         return Ok(vec![(None, Some(nodes))]);
     }
     let opted_in = cfg().island_placement
