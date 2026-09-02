@@ -403,9 +403,13 @@ Placement then:
 
 Each rank of a group placed on an island is spawned with `MENTAT_FABRIC_IP`
 set to that node's address on that island. The `ray` shim resolves
-`get_node_ip_address()` as `VLLM_HOST_IP` → `MENTAT_FABRIC_IP` →
-`MENTAT_NODE_IP` → a UDP-socket guess, so a hand-set `VLLM_HOST_IP` always
-wins. Removing it is how a deployment opts in.
+`get_node_ip_address()` as `MENTAT_FABRIC_IP` → `MENTAT_NODE_IP` → the route
+to this daemon, so a hand-set node address always wins and removing it is how
+a deployment opts in. No engine's own address variable is read.
+
+The route is asked only when a daemon is known to aim it at, and its answer
+is refused when it is loopback and this is a rank: that address is this
+node's only to itself, and every peer dialling it would reach themselves.
 
 ## HTTP
 

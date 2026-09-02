@@ -245,7 +245,7 @@ Export before `ray start`:
 export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
 export RAY_ADDRESS=10.0.0.1:6379      # the same daemon for driver and every agent
 export MENTAT_GROUP=mymodel           # one per model deployment
-export VLLM_HOST_IP=10.0.0.1          # this rank's cluster address
+export MENTAT_NODE_IP=10.0.0.1        # this rank's cluster address
 
 ray start --address=$RAY_ADDRESS      # detaches; the agent runs beside vllm
 ray status | grep -oE '[0-9.]+/[0-9.]+ GPU' | cut -d/ -f2 | cut -d. -f1
@@ -255,8 +255,9 @@ vllm serve ... --distributed-executor-backend ray -tp 2
 `ray status` prints exactly one line matching that regex, scoped to the
 group, so a `GPU >= TP` gate keeps working.
 
-`VLLM_HOST_IP` is per rank and per container. A wrong value hangs at NCCL
-rendezvous. "Fabrics" covers letting the daemon choose it.
+`MENTAT_NODE_IP` is per rank and per container. A wrong value hangs at NCCL
+rendezvous, and one naming an address another node is known by is refused at
+register. "Fabrics" covers letting the daemon choose it.
 
 ### Workarounds to delete
 
@@ -344,10 +345,11 @@ The constraint applies per group: a group none of whose nodes carry an
 `rdma` tag is placed as before. Tagging one pair leaves a deployment on an
 untagged pair unchanged.
 
-Within a tagged pair, a deployment opts in by removing `VLLM_HOST_IP` from
+Within a tagged pair, a deployment opts in by removing `MENTAT_NODE_IP` from
 its environment. The shim's `ray.util.get_node_ip_address()` resolves
-`VLLM_HOST_IP`, then `MENTAT_FABRIC_IP`, then `MENTAT_NODE_IP`, so a hand-set
-`VLLM_HOST_IP` always wins.
+`MENTAT_FABRIC_IP`, then `MENTAT_NODE_IP`, so a hand-set node address always
+wins. No engine's own address variable is read: that names what the engine
+binds, chosen for its own reasons.
 
 `MENTAT_ISLAND_PLACEMENT=off` on a daemon places multi-bundle groups without
 the constraint. It is for a cluster whose probes disagree with its cabling.
@@ -384,10 +386,11 @@ process start.
 - `MENTAT_NODE_IP` (default: the source address of the default route)
 
   This node's cluster identity. On a multi-homed node set it to the address
-  the driver sees itself on, which is the interface that carries
-  `VLLM_HOST_IP` inside the model containers. The default is the route to
-  the internet, which on a multi-homed node is usually the wrong interface
-  and breaks the match between driver and node.
+  the driver sees itself on, the same one the model containers use. The
+  default is the route to the internet, which on a multi-homed node is
+  usually the wrong interface and breaks the match between driver and node.
+  Set but empty reads as unset; an identity that is still empty after that
+  stops the daemon, since every such daemon would share one node id.
 
 - `MENTAT_PEERS` (default: empty)
 
@@ -539,8 +542,8 @@ process start.
   The group this container belongs to. Read by the agent, the shim and the
   `status` command.
 
-- `MENTAT_NODE_IP` (default: `VLLM_HOST_IP`, then the local address toward
-  the daemon)
+- `MENTAT_NODE_IP` (default: the local address toward the daemon, unless
+  that is loopback)
 
   The node this agent belongs to, matched against the daemon's
   `MENTAT_NODE_IP`. A container that reaches its daemon over loopback claims

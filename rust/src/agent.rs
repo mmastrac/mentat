@@ -208,13 +208,17 @@ fn parse_announcement(v: &str) -> Announcement {
 /// it claims nothing and the daemon fills in its own. A container then needs
 /// MENTAT_NODE_IP only when it is telling the truth about a node the daemon
 /// cannot see for itself.
+///
+/// MENTAT_NODE_IP is the only variable read. An engine's own address setting
+/// is that engine's business: it names the address the engine binds, which is
+/// chosen for its own reasons and is routinely the fabric address while the
+/// daemon is known by another. Reading it made the two disagree and put this
+/// agent's GPUs on a node the cluster does not have.
 fn claimed_node_ip(daemon_addr: &str) -> String {
-    for var in ["MENTAT_NODE_IP", "VLLM_HOST_IP"] {
-        if let Ok(v) = std::env::var(var) {
-            let v = v.trim();
-            if !v.is_empty() {
-                return v.to_string();
-            }
+    if let Ok(v) = std::env::var("MENTAT_NODE_IP") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return v.to_string();
         }
     }
     match local_ip_toward(daemon_addr) {
