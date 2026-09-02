@@ -49,7 +49,7 @@ impl EventStream {
             if buf.len() > 64 * 1024 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "oversized handshake response",
+                    "handshake response over 64 KiB",
                 ));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -82,7 +82,7 @@ impl EventStream {
                     0x8 => {
                         return Err(io::Error::new(
                             io::ErrorKind::ConnectionAborted,
-                            "websocket closed by daemon",
+                            "daemon closed the websocket",
                         ))
                     }
                     _ => {}

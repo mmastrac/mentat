@@ -762,7 +762,7 @@ async fn watch_daemon(shared: Arc<Shared>, addr: String) {
                     seen: None,
                     error: None,
                 });
-                v.error = Some(format!("events: {e}"));
+                v.error = Some(format!("/events: {e}"));
             }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -897,7 +897,8 @@ async fn udp_listener(shared: Arc<Shared>) {
                                 ("src", src.ip().to_string()),
                                 (
                                     "why",
-                                    "signed announcement, no MENTAT_SECRET here".to_string(),
+                                    "signed announcement, and this router has no MENTAT_SECRET"
+                                        .to_string(),
                                 ),
                             ],
                         );
@@ -1380,7 +1381,7 @@ async fn handle(
     if !source_allowed(&shared.cfg, &peer_ip) {
         return json_response(
             StatusCode::FORBIDDEN,
-            &json!({"error": "source not permitted"}),
+            &json!({"error": "source address is not in ALLOWED_SOURCES"}),
         );
     }
     let path = {

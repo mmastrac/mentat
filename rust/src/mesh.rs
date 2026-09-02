@@ -112,7 +112,10 @@ fn try_connect(
         &[],
     )?;
     let (frame, _) = read_frame(&mut reader)?.ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at peer hello")
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "peer closed the connection at hello",
+        )
     })?;
     let (
         peer_id,
@@ -665,7 +668,7 @@ fn probe_pair(
             Msg::ProbeOk { node_id } if node_id == peer_id => Ok(started.elapsed()),
             Msg::ProbeOk { node_id } => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("answered by node {node_id}, not {peer_id}"),
+                format!("node {node_id} answered, expected {peer_id}"),
             )),
             other => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -674,7 +677,7 @@ fn probe_pair(
         },
         None => Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
-            "EOF at probe",
+            "peer closed the connection before answering the probe",
         )),
     }
 }

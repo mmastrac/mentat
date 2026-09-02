@@ -205,8 +205,8 @@ before.
 ### Audit vLLM
 
 The shim implements the surface vLLM's `RayExecutorV2` uses, audited against
-`0.1.dev20051+g487ecf187`. Any other attribute raises `AttributeError` specifying
-it, at engine boot. Check the vLLM in the image:
+`0.1.dev20051+g487ecf187`. Any other attribute raises `AttributeError` naming
+it at engine boot. Check the vLLM in the image:
 
 ```bash
 grep -rn 'ray\.' $(python -c 'import vllm,os;print(os.path.dirname(vllm.__file__))')/v1/executor/
@@ -267,7 +267,7 @@ register. "Fabrics" covers letting the daemon choose it.
 | `RAY_memory_monitor_refresh_ms` | There is no memory monitor. Nothing samples node memory or kills workers. |
 | Object store size caps | Same. That memory goes back to weights and KV cache. |
 | Head-first startup ordering | Registration retries forever. `ray start --head` is accepted and ignored. |
-| `ray stop` between runs | Actors get their own process group and a kill takes the whole tree. `ray stop` now kills actors, see "The ray symlink". |
+| `ray stop` between runs | Actors get their own process group and a kill takes the whole tree. `ray stop` kills actors, see "The ray symlink". |
 
 ### Verify
 
@@ -389,7 +389,7 @@ process start.
   the driver sees itself on, the same one the model containers use. The
   default is the route to the internet, which on a multi-homed node is
   usually the wrong interface and breaks the match between driver and node.
-  Set but empty reads as unset; an identity that is still empty after that
+  Set but empty reads as unset. An identity that is still empty after that
   stops the daemon, since every such daemon would share one node id.
 
 - `MENTAT_PEERS` (default: empty)

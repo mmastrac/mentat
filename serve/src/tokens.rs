@@ -57,7 +57,7 @@ pub async fn count(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<Box
         Err(_) => {
             return json_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                &json!({"error": format!("body over {MAX_BODY} bytes")}),
+                &json!({"error": format!("request body over {MAX_BODY} bytes")}),
             )
         }
     };
@@ -89,7 +89,7 @@ pub async fn count(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<Box
         return json_response(
             StatusCode::NOT_FOUND,
             &json!({
-                "error": format!("no model {model:?} is being served"),
+                "error": format!("no group serves model {model:?}"),
                 "available": models.keys().collect::<Vec<_>>(),
             }),
         );
@@ -112,8 +112,8 @@ pub async fn count(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<Box
         return json_response(
             StatusCode::BAD_REQUEST,
             &json!({"error": format!(
-                "cannot count tokens for {model}: group {group} {said}, and only \
-                 {SUPPORTED:?} is supported. Set MENTAT_MODEL_PROVIDER on the container."
+                "cannot count tokens for {model}: group {group} {said}, and the router \
+                 only counts for {SUPPORTED:?}. Set MENTAT_MODEL_PROVIDER on the container"
             )}),
         );
     }

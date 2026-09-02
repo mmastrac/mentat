@@ -79,7 +79,7 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
         return json_response(
             StatusCode::NOT_FOUND,
             &json!({
-                "error": format!("no model {model:?} is being served"),
+                "error": format!("no group serves model {model:?}"),
                 "available": models.keys().collect::<Vec<_>>(),
                 "not_ready": pending,
             }),
@@ -119,7 +119,7 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
         Err(e) => {
             return json_response(
                 StatusCode::BAD_GATEWAY,
-                &json!({"error": format!("building upstream request: {e}")}),
+                &json!({"error": format!("cannot build the upstream request: {e}")}),
             )
         }
     };
@@ -146,7 +146,7 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
         Err(e) => {
             return json_response(
                 StatusCode::BAD_GATEWAY,
-                &json!({"error": format!("{group} upstream error: {e}")}),
+                &json!({"error": format!("{group} did not answer: {e}")}),
             )
         }
     };
@@ -177,7 +177,7 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
         Ok(r) => r,
         Err(e) => json_response(
             StatusCode::BAD_GATEWAY,
-            &json!({"error": format!("relaying upstream response: {e}")}),
+            &json!({"error": format!("cannot relay the upstream response: {e}")}),
         ),
     }
 }

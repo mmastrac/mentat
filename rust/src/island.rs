@@ -303,8 +303,9 @@ fn run(shared: SharedRef) {
                             ("addr", a.clone()),
                             (
                                 "why",
-                                "tagged rdma, but no probe over it has succeeded -- \
-                                 a cable that is out, or a tag on the wrong interface"
+                                "tagged rdma, and no probe over it has succeeded. \
+                                 Either the cable is out or the tag is on the wrong \
+                                 interface"
                                     .to_string(),
                             ),
                         ],

@@ -49,7 +49,7 @@ def _claim(gpu_bundles):
         try:
             shape = json.loads(raw)
         except ValueError as e:
-            raise _client.MentatError(f"MENTAT_CLAIM_SHAPE is not JSON: {e}") from None
+            raise _client.MentatError(f"mentat: MENTAT_CLAIM_SHAPE is not JSON: {e}") from None
     else:
         shape = {"sets": [{"name": "all", "bundles": gpu_bundles, "link": "rdma"}]}
     _client.get_conn().request({"t": "claim", "name": name, "shape": shape})

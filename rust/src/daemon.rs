@@ -252,7 +252,7 @@ fn sweep_lifecycle(shared: &SharedRef) {
                 &mut st,
                 &shared.cv,
                 &id,
-                &format!("agent link lost for {down}ms (MENTAT_AGENT_DEAD_AFTER_MS); giving up"),
+                &format!("agent link lost for {down}ms, past MENTAT_AGENT_DEAD_AFTER_MS"),
             );
         }
     }
@@ -347,7 +347,9 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
         other => {
             let _ = writer.send(
                 Msg::Err {
-                    error: format!("expected hello or agent_register, got {other:?}"),
+                    error: format!(
+                        "first frame must be hello, agent_register, peer_hello or probe, got {other:?}"
+                    ),
                 },
                 first.0.req,
                 &[],
@@ -388,8 +390,8 @@ fn client_conn(
                 let _ = writer.send(
                     Msg::Err {
                         error: format!(
-                            "group '{group}' already has an active driver session; \
-                             run a second instance under a distinct MENTAT_GROUP"
+                            "group '{group}' already has an active driver session. \
+                             Run a second instance under a different MENTAT_GROUP"
                         ),
                     },
                     hello.req,
@@ -721,7 +723,7 @@ fn handle_client_msg(
                         }
                         None => {
                             let r = new_ref(RefState::ActorDied {
-                                reason: "agent connection lost".into(),
+                                reason: format!("agent {} is not registered", actor.agent),
                             });
                             st.refs.insert(ref_id.clone(), r);
                         }
@@ -837,14 +839,14 @@ fn claim(
             .map(|p| p.control_addr.clone())
             .unwrap_or_default();
         return Err(format!(
-            "claims are answered by the head, which is {} at {addr}",
+            "this node is not the head. Send claims to {} at {addr}",
             st.head_node_id
         ));
     }
     if let Some(c) = st.claims.get_mut(name) {
         if &c.shape != shape {
             return Err(format!(
-                "claim {name:?} is held for a different shape; release it or use another name"
+                "claim {name:?} is held for a different shape. Release it or use another name"
             ));
         }
         c.holders.insert(client_id.to_string());
@@ -933,8 +935,9 @@ fn misfiled(
         return None;
     }
     Some(format!(
-        "claimed {node_ip}, which is {owner_name}, known here as a different \
-         node; its GPUs join no island and its group takes no fabric"
+        "claimed {node_ip}, an address of {owner_name}, which this daemon knows \
+         as a different node. Its GPUs would join no island and its group \
+         would take no fabric"
     ))
 }
 
@@ -989,7 +992,9 @@ fn create_actor(
         return err(format!("placement group {pg_id} is not ready"));
     }
     let Some(Some(bundle)) = pg.assignment.get(bundle_index).cloned() else {
-        return err(format!("bundle {bundle_index} of pg {pg_id} is not placed"));
+        return err(format!(
+            "bundle {bundle_index} of placement group {pg_id} is not placed"
+        ));
     };
     // The address this rank answers on inside the fabric its group was
     // placed on. Only set when the group spans a fabric. A group on one
@@ -1007,7 +1012,10 @@ fn create_actor(
     }
 
     let Some(agent) = st.agents.get(&bundle.agent).filter(|a| a.alive) else {
-        return err(format!("agent for bundle {bundle_index} is gone"));
+        return err(format!(
+            "agent {} for bundle {bundle_index} is gone",
+            bundle.agent
+        ));
     };
     let agent_id = agent.id.clone();
     let agent_writer = agent.writer.clone();
@@ -1071,9 +1079,9 @@ fn create_actor(
             &mut st,
             &shared.cv,
             &actor_id,
-            &format!("spawn send failed: {e}"),
+            &format!("spawn did not reach agent {agent_id}: {e}"),
         );
-        return err(format!("agent send failed: {e}"));
+        return err(format!("spawn did not reach agent {agent_id}: {e}"));
     }
 
     (
@@ -1243,7 +1251,12 @@ fn kill_actor(shared: &SharedRef, actor_id: &str, why: &str) {
             );
         }
         None => {
-            mark_actor_dead(&mut st, &shared.cv, actor_id, "killed with agent gone");
+            mark_actor_dead(
+                &mut st,
+                &shared.cv,
+                actor_id,
+                "killed while its agent was down",
+            );
         }
     }
 }

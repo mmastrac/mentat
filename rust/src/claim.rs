@@ -342,7 +342,8 @@ pub fn solve(t: &Topology, req: &Request) -> Result<Solution, String> {
         }
         sets.insert(s.name.clone(), members);
     }
-    let between = paths_between(t, req, &chosen).ok_or("between requirement failed")?;
+    let between =
+        paths_between(t, req, &chosen).ok_or("no probed link satisfies a between entry")?;
     Ok(Solution { sets, between })
 }
 
@@ -434,7 +435,7 @@ fn why_not(t: &Topology, req: &Request) -> String {
     if parts.is_empty() {
         parts.push("no assignment satisfies every set and link together".into());
     }
-    parts.join("; ")
+    parts.join(". ")
 }
 
 // ---------------------------------------------------------------------------

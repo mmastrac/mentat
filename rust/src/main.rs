@@ -202,7 +202,7 @@ fn main() {
                 head_json,
                 peers,
             }) {
-                eprintln!("mentatd daemon failed: {e}");
+                eprintln!("mentatd: daemon exited: {e}");
                 std::process::exit(1);
             }
         }
@@ -217,7 +217,7 @@ fn main() {
                     "object_store_flag_ignored",
                     &[(
                         "why",
-                        "mentat has no object store; unified memory belongs to the model"
+                        "mentat has no object store, so unified memory stays with the model"
                             .to_string(),
                     )],
                 );
@@ -254,12 +254,12 @@ fn main() {
                             &serde_json::json!({ "pid": c.id(), "group": group }),
                         );
                         println!(
-                            "mentatd agent started (group={group}, daemon={daemon_addr}); \
-                             registration retries until the daemon is reachable"
+                            "mentatd agent started (group={group}, daemon={daemon_addr}). \
+                             Registration retries until the daemon answers"
                         );
                     }
                     Err(e) => {
-                        eprintln!("failed to start mentatd agent: {e}");
+                        eprintln!("mentatd: cannot start the agent: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -292,11 +292,11 @@ fn main() {
                     }
                 }
                 Ok((other, _)) => {
-                    eprintln!("unexpected reply: {other:?}");
+                    eprintln!("mentatd: unexpected reply: {other:?}");
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("mentatd: cannot reach daemon at {addr}: {e}");
+                    eprintln!("mentatd: daemon at {addr}: {e}");
                     std::process::exit(1);
                 }
             }
@@ -306,7 +306,7 @@ fn main() {
             match cli_request(&addr, Msg::StopAll { group }) {
                 Ok(_) => println!("stop sent"),
                 Err(e) => {
-                    eprintln!("mentatd: cannot reach daemon at {addr}: {e}");
+                    eprintln!("mentatd: daemon at {addr}: {e}");
                     std::process::exit(1);
                 }
             }
@@ -364,14 +364,22 @@ fn cli_request(addr: &str, msg: Msg) -> std::io::Result<(Msg, Vec<u8>)> {
         },
         &[],
     )?;
-    let (hello, _) = read_frame(&mut reader)?
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at hello"))?;
+    let (hello, _) = read_frame(&mut reader)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "daemon closed the connection before answering hello",
+        )
+    })?;
     if let Msg::Err { error } = hello.msg {
         return Err(std::io::Error::other(error));
     }
     write_frame(&mut writer, &Frame { req: 2, msg }, &[])?;
-    let (resp, payload) = read_frame(&mut reader)?
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at reply"))?;
+    let (resp, payload) = read_frame(&mut reader)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "daemon closed the connection before replying",
+        )
+    })?;
     if let Msg::Err { error } = resp.msg {
         return Err(std::io::Error::other(error));
     }

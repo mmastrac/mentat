@@ -874,7 +874,7 @@ fn spawn_actor(
                         Msg::ActorResult {
                             ref_id,
                             ok: false,
-                            error: "actor host socket write failed".into(),
+                            error: "could not write the call to the actor's host socket".into(),
                         },
                         &[],
                     );

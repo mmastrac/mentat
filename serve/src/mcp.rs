@@ -30,7 +30,7 @@ pub async fn handle(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<Bo
         Err(_) => {
             return json_response(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                &json!({"error": format!("body over {MAX_BODY} bytes")}),
+                &json!({"error": format!("request body over {MAX_BODY} bytes")}),
             )
         }
     };
@@ -190,7 +190,7 @@ async fn call(shared: &Arc<Shared>, rid: Value, params: Value) -> Value {
     let Some((group, tool)) = name.split_once(SEP) else {
         return tool_err(
             &rid,
-            format!("unknown tool {name:?}; merged names are <group>{SEP}<tool>"),
+            format!("unknown tool {name:?}. Merged names are <group>{SEP}<tool>"),
         );
     };
     let table = group_table(shared);
@@ -203,7 +203,7 @@ async fn call(shared: &Arc<Shared>, rid: Value, params: Value) -> Value {
         return tool_err(
             &rid,
             format!(
-                "no group {group:?} with an MCP endpoint; groups: {}",
+                "no group {group:?} with an MCP endpoint. Groups with one: {}",
                 table
                     .values()
                     .filter(|e| e.mcp.is_some())
@@ -219,7 +219,10 @@ async fn call(shared: &Arc<Shared>, rid: Value, params: Value) -> Value {
                      "params": {"name": tool, "arguments": params["arguments"]}});
     match http_post_json(&shared.client, &url, &fwd, shared.cfg.mcp_timeout).await {
         Ok(v) if v.get("result").is_some() || v.get("error").is_some() => v,
-        Ok(v) => tool_err(&rid, format!("malformed reply from {group}: {v}")),
+        Ok(v) => tool_err(
+            &rid,
+            format!("{group} replied with neither result nor error: {v}"),
+        ),
         Err(e) => tool_err(&rid, format!("{group} did not answer: {e}")),
     }
 }

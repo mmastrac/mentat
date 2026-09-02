@@ -53,7 +53,7 @@ def remote(target=None, **kwargs):
     if isinstance(target, type):
         return ActorClass(target, kwargs)
     raise AttributeError(
-        "mentat: ray.remote on plain functions (tasks) is not implemented -- "
+        "mentat: ray.remote on a plain function (a task) is not implemented. "
         "vLLM's executor only uses actor classes"
     )
 
@@ -145,6 +145,6 @@ def __getattr__(name):
     if name.startswith("__"):
         raise AttributeError(name)
     raise AttributeError(
-        f"mentat: ray.{name} is not implemented -- vLLM's audited ray surface "
-        "does not use it; if vLLM changed, re-audit before adding it"
+        f"mentat: ray.{name} is not implemented. vLLM's audited ray surface "
+        "does not use it. If vLLM changed, re-audit before adding it"
     )

@@ -280,7 +280,7 @@ def get_conn():
             ensure_init()
         else:
             raise MentatError(
-                "ray.init() has not been called (mentat shim refuses implicit init)"
+                "mentat: ray.init() has not been called. The shim does not connect implicitly"
             )
     ensure_session()
     conn = getattr(GLOBAL.tls, "conn", None)

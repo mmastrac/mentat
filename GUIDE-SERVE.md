@@ -59,8 +59,9 @@ An engine is admitted as soon as its API answers, which on some models is
 during its self-test.
 
 `/status.json` says why a model is missing. Each group carries `healthy`
-and, when false, `why_not` specifying the failed gate: no endpoint, no running
-actors, unprobed, probe failed, or probe stale. A probe failure quotes every
+and, when false, `why_not` naming the failed gate: `no announced OpenAI
+endpoint`, `no running actors`, `not probed yet`, `endpoint probe failed`, or
+`endpoint probe stale`. A probe failure quotes every
 candidate address it tried and appends the agent's own bind finding when
 there is one.
 
@@ -164,8 +165,8 @@ list covers addresses the router derived for itself.
 | `GET /`, `/healthz`, `/status.json` | Route table, per-group health and endpoints, `uptime_s` |
 | `GET /stats.json` | Per-model engine and router counters, for the status page |
 
-`GET /` from a browser (an `Accept` header specifying HTML) returns the status
-page instead of the document.
+`GET /` from a browser (an `Accept` header that asks for HTML) returns the
+status page instead of the document.
 
 ```bash
 curl -s http://<node>:6381/v1/models          # what routes right now
@@ -224,7 +225,7 @@ the media and running the engine's preprocessor. An attachment that is
 neither, such as a PDF, contributes only the text that accompanies it.
 
 The route needs `MENTAT_MODEL_PROVIDER=vllm` on the container. A group that
-announced no provider, or one the router does not know, gets a 400 specifying
+announced no provider, or one the router does not know, gets a 400 naming
 the group.
 
 ### The MCP merge
@@ -266,7 +267,7 @@ positive number. Anything else takes the default.
   every address it advertises must match one before the router acts on it.
   The address a node calls its own is not checked, since nothing acts on it.
   `172.` covers bridge-networked clients, which keep a `172.x` source. A
-  rejected source logs `announce_source_not_allowed` once, specifying the
+  rejected source logs `announce_source_not_allowed` once, with the
   prefixes in force.
 
   A router that shares no wire with a fabric should leave that fabric's
@@ -294,7 +295,7 @@ positive number. Anything else takes the default.
 - `PROBE_FRESH_S` (default: three probe intervals plus one timeout)
 
   How long a probe result stays valid. Past it the group reads
-  `probe stale`. The default clears one round that walks every candidate
+  `endpoint probe stale`. The default clears one round that walks every candidate
   address, since each dead one costs a whole `PROBE_TIMEOUT_S`. Setting it
   alone makes groups flap in and out of the route table.
 

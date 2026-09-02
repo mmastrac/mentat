@@ -392,7 +392,7 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<(Frame, Vec<u8>)>> {
     if hlen > MAX_FRAME || plen > MAX_FRAME {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("frame too large: header={hlen} payload={plen}"),
+            format!("frame over {MAX_FRAME} bytes: header={hlen} payload={plen}"),
         ));
     }
     let mut header = vec![0u8; hlen as usize];

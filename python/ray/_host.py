@@ -62,8 +62,8 @@ def _watch_agent(agent_pid):
             os.kill(agent_pid, 0)
         except OSError:
             print(
-                f"mentat host: agent pid {agent_pid} is gone; exiting to avoid "
-                "an orphaned actor",
+                f"mentat host: agent pid {agent_pid} is gone. Exiting so this "
+                "actor is not orphaned",
                 file=sys.stderr,
                 flush=True,
             )

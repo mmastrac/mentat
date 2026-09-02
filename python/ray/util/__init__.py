@@ -55,9 +55,9 @@ def get_node_ip_address():
             s.close()
     except OSError as e:
         raise _client.MentatError(
-            f"mentat: no route to the daemon at {target} ({e}), so this node's "
-            "address cannot be determined. Set MENTAT_NODE_IP. "
-            "Answering 127.0.0.1 here would have every other rank dial itself."
+            f"mentat: no route to the daemon at {target} ({e}), so this node "
+            "cannot learn its own address. Set MENTAT_NODE_IP. Answering "
+            "127.0.0.1 here would have every other rank dial itself."
         ) from None
     # A daemon on loopback answers loopback, which is this node's address
     # only to itself. Outside an actor that is a driver asking about a
@@ -77,6 +77,6 @@ def __getattr__(name):
     if name.startswith("__"):
         raise AttributeError(name)
     raise AttributeError(
-        f"mentat: ray.util.{name} is not implemented -- vLLM's audited ray "
-        "surface does not use it; if vLLM changed, re-audit before adding it"
+        f"mentat: ray.util.{name} is not implemented. vLLM's audited ray "
+        "surface does not use it. If vLLM changed, re-audit before adding it"
     )

@@ -30,8 +30,8 @@ The header is a JSON object:
 {"req": 41, "t": "call_actor", ...}
 ```
 
-`t` selects the message. `req` correlates a response with its request;
-unsolicited messages use 0. Remaining fields are the message's own.
+`t` selects the message. `req` correlates a response with its request.
+Unsolicited messages use 0. Remaining fields are the message's own.
 
 Unknown fields are ignored, and fields marked `#[serde(default)]` in
 `rust/src/proto.rs` may be absent. Adding an optional field is
@@ -110,8 +110,8 @@ Request and response, all `req`-correlated. `err` may replace any response.
 | `pg_table` | `pg_table_ok` | Placement group state |
 | `remove_pg` | — | Release |
 | `create_actor` | `create_actor_ok` | Payload is a pickled `(cls, args, kwargs)` |
-| `call` | `call_ok` | Method call; payload is pickled args. `call_ok` carries a ref id, resolved later by `get` |
-| `get` | `get_ok` | Resolve refs; payload is the pickled result |
+| `call` | `call_ok` | Method call. Payload is pickled args. `call_ok` carries a ref id, resolved later by `get` |
+| `get` | `get_ok` | Resolve refs. Payload is the pickled result |
 | `wait` | `wait_ok` | Which refs are ready |
 | `kill_actor` | — | Terminate one actor |
 | `status` | `status_ok` | Cluster snapshot |
@@ -270,7 +270,7 @@ trip: integers and strings only. An `f64` does not round-trip and will fail
 the signature for some values.
 
 `t` is integer seconds and must be within 30 s of the receiver's clock.
-`seq` must exceed the last accepted value for the same `boot_id`; a restart
+`seq` must exceed the last accepted value for the same `boot_id`. A restart
 issues a new `boot_id` and restarts `seq`.
 
 Receiver rules, in order:
@@ -283,7 +283,7 @@ Receiver rules, in order:
 4. Check the source address against `ALLOWED_SOURCES`, and each advertised
    address before choosing it. The address the announcement calls its own is
    not checked, because nothing acts on it. A rejected source is logged once,
-   specifying the configured prefixes.
+   with the configured prefixes.
 
 An announcement is a hint. It adds one address to watch, and every claim in
 it is re-read over TCP and probed before it affects routing.
@@ -371,7 +371,7 @@ Derivation, in order:
    and some address of Y tagged `rdma` have a probe-ok pair between them.
 2. Connected components of that graph are pruned, least-connected node first,
    until every member reaches every other. A group must fit a set whose
-   members can all talk; a component alone does not guarantee that.
+   members can all talk, and a component alone does not guarantee that.
 3. A change in membership is committed only after
    `MENTAT_ISLAND_HOLD_DOWN_MS` of stability, so a flapping cable cannot send
    consecutive placements to different islands.
@@ -407,9 +407,9 @@ set to that node's address on that island. The `ray` shim resolves
 to this daemon, so a hand-set node address always wins and removing it is how
 a deployment opts in. No engine's own address variable is read.
 
-The route is asked only when a daemon is known to aim it at, and its answer
-is refused when it is loopback and this is a rank: that address is this
-node's only to itself, and every peer dialling it would reach themselves.
+The shim asks the route only when it knows a daemon to aim at. Inside a rank
+it refuses a loopback answer, since that address reaches this node only from
+itself and every peer dialling it would reach themselves.
 
 ## HTTP
 

@@ -49,15 +49,15 @@ class ActorClass:
             pg = getattr(strategy, "placement_group", None)
             if pg is None:
                 raise _client.MentatError(
-                    "mentat: only PlacementGroupSchedulingStrategy is supported; "
-                    f"got {strategy!r}"
+                    "mentat: scheduling_strategy must be a "
+                    f"PlacementGroupSchedulingStrategy, got {strategy!r}"
                 )
             pg_id = pg.id
             bundle_index = getattr(strategy, "placement_group_bundle_index", 0) or 0
         if pg_id is None:
             raise _client.MentatError(
-                "mentat: actors must be scheduled into a placement group "
-                "(vLLM always does; this call did not)"
+                "mentat: this actor names no placement group. Pass a "
+                "PlacementGroupSchedulingStrategy, as vLLM does"
             )
 
         env_vars = {}
