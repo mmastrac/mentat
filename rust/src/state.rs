@@ -116,6 +116,10 @@ pub struct AgentInfo {
     /// What serves the announced `openai` endpoint (`vllm`). Stored and
     /// republished verbatim, like the endpoints themselves.
     pub provider: String,
+    /// Set when this agent claimed an address the mesh files under another
+    /// node. Advisory, like the service notes: it explains a group that
+    /// takes no fabric, and leaves every placement decision alone.
+    pub node_note: Option<String>,
     pub writer: FrameWriter,
     pub alive: bool,
     /// When the agent link EOFed (degrade window start). None while

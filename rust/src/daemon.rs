@@ -875,6 +875,50 @@ fn release_all(st: &mut State, client_id: &str) {
     }
 }
 
+/// Whether an agent claimed an address the mesh files under another node.
+///
+/// A node id is the hash of an address, so a container told to call itself
+/// by its LAN address registers a node distinct from the box it runs on. Its
+/// GPUs land on a node no island contains, the group never opts into fabric
+/// placement, and the ranks talk over whichever link the address named. That
+/// reads as a slow model rather than as a misconfiguration.
+///
+/// Advisory only, like the agent's own bind finding. A refusal here would
+/// stop a deployment that is running, badly, and being told which address to
+/// use is the operator's job to correct.
+fn misfiled_node(st: &State, node_ip: &str, node_id: &str) -> Option<String> {
+    let mut boxes: Vec<(String, String, Vec<String>)> = vec![(
+        st.node_id.clone(),
+        st.hostname.clone(),
+        crate::announce::local_addrs(),
+    )];
+    for p in st.peers.values().filter(|p| p.alive) {
+        boxes.push((p.node_id.clone(), p.node_ip.clone(), p.addrs.clone()));
+    }
+    misfiled(node_ip, node_id, &boxes)
+}
+
+/// The matching half, over what the mesh knows of each box.
+fn misfiled(
+    node_ip: &str,
+    node_id: &str,
+    boxes: &[(String, String, Vec<String>)],
+) -> Option<String> {
+    if node_ip.is_empty() || crate::state::is_loopback(node_ip) {
+        return None;
+    }
+    let (owner_id, owner_name, _) = boxes
+        .iter()
+        .find(|(_, _, addrs)| addrs.iter().any(|a| a == node_ip))?;
+    if owner_id == node_id {
+        return None;
+    }
+    Some(format!(
+        "claimed {node_ip}, which is {owner_name}, known here as a different \
+         node; its GPUs join no island and its group takes no fabric"
+    ))
+}
+
 fn client_group(st: &State, client_id: &str) -> String {
     st.clients
         .get(client_id)
@@ -1624,6 +1668,16 @@ fn agent_conn(
             node_id_for(&node_ip)
         }
     };
+    let node_note = {
+        let st = shared.st.lock().unwrap();
+        misfiled_node(&st, &node_ip, &node_id)
+    };
+    if let Some(note) = &node_note {
+        log(
+            "agent_node_misfiled",
+            &[("agent", agent_id.clone()), ("why", note.clone())],
+        );
+    }
 
     {
         let mut st = shared.st.lock().unwrap();
@@ -1648,6 +1702,7 @@ fn agent_conn(
                 services_ports: services_ports.clone(),
                 service_notes,
                 provider,
+                node_note,
                 writer: writer.clone(),
                 alive: true,
                 lost_at_ms: None,
@@ -1935,4 +1990,60 @@ fn agent_conn(
         );
     }
     shared.cv.notify_all();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::misfiled;
+
+    fn boxes() -> Vec<(String, String, Vec<String>)> {
+        vec![
+            (
+                "id-10.100.0.2".into(),
+                "gx10-5818".into(),
+                vec!["10.100.0.2".into(), "192.168.1.77".into()],
+            ),
+            (
+                "id-10.100.0.1".into(),
+                "gx10-2353".into(),
+                vec!["10.100.0.1".into(), "192.168.1.70".into()],
+            ),
+        ]
+    }
+
+    /// The reported shape: a container told to call itself by the LAN
+    /// address of the box it runs on. Its GPUs land on a node no island
+    /// contains, and the group then takes no fabric.
+    #[test]
+    fn a_lan_address_for_a_fabric_box_is_named() {
+        let note = misfiled("192.168.1.77", "id-192.168.1.77", &boxes())
+            .expect("the LAN address of a known box under another id");
+        assert!(note.contains("gx10-5818"), "{note}");
+        assert!(note.contains("192.168.1.77"), "{note}");
+    }
+
+    /// The address the box is filed under is what it should claim.
+    #[test]
+    fn the_matching_address_is_quiet() {
+        assert_eq!(misfiled("10.100.0.2", "id-10.100.0.2", &boxes()), None);
+    }
+
+    /// An address no box in the mesh owns says nothing about identity: it
+    /// may be a node whose daemon has not been seen yet.
+    #[test]
+    fn an_unknown_address_is_quiet() {
+        assert_eq!(misfiled("10.42.0.9", "id-10.42.0.9", &boxes()), None);
+    }
+
+    /// Loopback belongs to every box, so it identifies none.
+    #[test]
+    fn loopback_is_quiet() {
+        let b = vec![(
+            "id-a".into(),
+            "a".into(),
+            vec!["127.0.0.1".into(), "10.0.0.1".into()],
+        )];
+        assert_eq!(misfiled("127.0.0.1", "id-b", &b), None);
+        assert_eq!(misfiled("", "id-b", &b), None);
+    }
 }
