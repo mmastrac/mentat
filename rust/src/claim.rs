@@ -548,6 +548,20 @@ pub fn topology(st: &crate::state::State) -> Topology {
     // A node with no agent has no GPUs to give.
     for a in st.agents.values().filter(|a| a.alive) {
         *t.free_gpus.entry(a.node_id.clone()).or_insert(0.0) += st.free_gpus_of(&a.id).len() as f64;
+        // An agent can register a node no daemon peers for, which leaves it
+        // holding GPUs with no address to bind. What it told us on register
+        // is an address, so it stands in. It carries no tag, which limits
+        // that node to plain links.
+        t.ports.entry(a.node_id.clone()).or_insert_with(|| {
+            vec![Port {
+                addr: a.node_ip.clone(),
+                iface: None,
+                tags: Vec::new(),
+            }]
+        });
+        t.hosts
+            .entry(a.node_id.clone())
+            .or_insert_with(|| a.node_ip.clone());
     }
     t
 }

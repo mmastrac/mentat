@@ -73,6 +73,16 @@ A claim ends when its last holder goes, so a driver that dies gives its nodes
 back with no explicit release. Holders re-send `claim` on reconnect, which is
 what rebuilds the table after the head moves.
 
+`create_pg` takes the claim's name, and placement then picks among the nodes
+the claim chose rather than from the cluster. A group asking for more than its
+claim holds stays pending: the claim answered for every holder of that name,
+so spilling outside it would split ranks that agreed on one view.
+
+`ray.placement_group` takes bundles and a strategy, neither of which can carry
+a shape, so the shim reads `MENTAT_CLAIM` and `MENTAT_CLAIM_SHAPE` from the
+environment. A stock vLLM asks for a shaped placement by being launched with
+them set. Without `MENTAT_CLAIM` a group places as it always did.
+
 ## Connection start
 
 The first frame identifies the link type:

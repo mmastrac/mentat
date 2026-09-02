@@ -153,6 +153,9 @@ pub struct PgInfo {
     /// Why a Removed pg failed (pending timeout etc.); surfaced as the
     /// RayActorError reason when the driver gets the ready ref.
     pub fail_reason: Option<String>,
+    /// The claim whose nodes this group was placed inside, empty when it
+    /// was placed from the whole cluster.
+    pub claim: String,
     /// The fabric island this group was placed inside, when placement had
     /// to pick one. None for a single-bundle group, for a group that fits
     /// on one node, and on a cluster with no derived islands.

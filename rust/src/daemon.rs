@@ -558,7 +558,11 @@ fn handle_client_msg(
                 Vec::new(),
             )
         }
-        Msg::CreatePg { bundles, strategy } => {
+        Msg::CreatePg {
+            bundles,
+            strategy,
+            claim,
+        } => {
             let mut st = shared.st.lock().unwrap();
             let group = client_group(&st, client_id);
             let pg_id = random_hex_id();
@@ -571,6 +575,7 @@ fn handle_client_msg(
                     owner: client_id.to_string(),
                     bundles,
                     strategy,
+                    claim,
                     assignment: vec![None; n],
                     state: PgState::Pending,
                     created_ms: crate::state::now_ms_u64(),
@@ -767,6 +772,20 @@ fn handle_client_msg(
         }
         other => err(format!("unexpected client message: {other:?}")),
     }
+}
+
+/// Every node a claim placed, across all its sets.
+fn claimed_nodes(view: &Value) -> Vec<String> {
+    let mut out: Vec<String> = view["sets"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .flat_map(|(_, members)| members.as_array().into_iter().flatten())
+        .filter_map(|m| m["node"].as_str().map(str::to_string))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Answer a claim on `name`, solving it the first time and repeating that
@@ -1299,9 +1318,14 @@ pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
         .map(|p| p.id.clone())
         .collect();
     for pg_id in pending {
-        let (group, owner, bundles) = {
+        let (group, owner, bundles, claim) = {
             let pg = &st.pgs[&pg_id];
-            (pg.group.clone(), pg.owner.clone(), pg.bundles.clone())
+            (
+                pg.group.clone(),
+                pg.owner.clone(),
+                pg.bundles.clone(),
+                pg.claim.clone(),
+            )
         };
         let driver_node = st
             .clients
@@ -1309,7 +1333,7 @@ pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
             .map(|c| c.node_id.clone())
             .unwrap_or_default();
 
-        let placed = match placement_scopes(st, &group, &bundles, &driver_node) {
+        let placed = match placement_scopes(st, &group, &bundles, &driver_node, &claim) {
             Ok(scopes) => scopes.into_iter().find_map(|(island, nodes)| {
                 fit(st, &group, &bundles, &driver_node, nodes.as_deref()).map(|a| (island, a))
             }),
@@ -1366,7 +1390,21 @@ fn placement_scopes(
     group: &str,
     bundles: &[f64],
     driver_node: &str,
+    claim: &str,
 ) -> Result<Vec<(Option<crate::island::Island>, Option<Vec<String>>)>, String> {
+    // A claim already answered where this group goes, and it answered for
+    // every holder of that name. Re-deriving here could pick different
+    // nodes and split ranks that agreed on the claim's view.
+    if !claim.is_empty() {
+        let Some(c) = st.claims.get(claim) else {
+            return Err(format!("claim {claim:?} is not held here"));
+        };
+        let nodes = claimed_nodes(&c.view);
+        if nodes.is_empty() {
+            return Err(format!("claim {claim:?} names no nodes"));
+        }
+        return Ok(vec![(None, Some(nodes))]);
+    }
     let opted_in = cfg().island_placement
         && st
             .agents

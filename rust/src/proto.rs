@@ -57,6 +57,11 @@ pub enum Msg {
         /// GPUs per bundle, e.g. [1.0, 1.0].
         bundles: Vec<f64>,
         strategy: String,
+        /// A claim this group must be placed inside. The claim already
+        /// chose nodes, so placement picks among those rather than from
+        /// the cluster. Empty places as before.
+        #[serde(default)]
+        claim: String,
     },
     PgTable {
         pg_id: String,

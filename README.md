@@ -302,6 +302,8 @@ has the selection order.
 | `MENTAT_OPENAI_API` | unset | Announced OpenAI endpoint (head rank only) |
 | `MENTAT_MCP_API` | unset | Announced MCP endpoint (every rank) |
 | `MENTAT_MODEL_PROVIDER` | unset | What serves `MENTAT_OPENAI_API`, e.g. `vllm` |
+| `MENTAT_CLAIM` | unset | Claim this name before placing, and place inside it |
+| `MENTAT_CLAIM_SHAPE` | one fabric set | The shape to claim, as JSON |
 | `MENTAT_FABRIC_IP` | set by the daemon | This rank's address on the fabric its group was placed on |
 | `MENTAT_HOST_CONNECT_TIMEOUT_MS` | 60000 | Wait for a spawned actor host to dial back |
 | `MENTAT_AGENT_PING_INTERVAL_MS` | 2000 | Agent → daemon ping interval |

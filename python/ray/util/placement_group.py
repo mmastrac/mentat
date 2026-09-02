@@ -1,6 +1,9 @@
 """Placement groups, mentat-style: bundles of GPUs placed onto a group's
 agents by the daemon. The object shape mirrors what vLLM reads."""
 
+import json
+import os
+
 from ray import _client
 from ray._refs import ObjectRef
 
@@ -24,11 +27,42 @@ class PlacementGroup:
         return f"PlacementGroup({self.id}, {self.bundle_specs})"
 
 
+def _claim(gpu_bundles):
+    """Claim the placement named by MENTAT_CLAIM, returning its name.
+
+    ray.placement_group takes bundles and a strategy, and neither can say "a
+    cabled pair here and a cabled pair there". The shape comes from the
+    environment instead, so a stock vLLM asks for one by being launched with
+    the variables set.
+
+    MENTAT_CLAIM_SHAPE is the shape from PROTOCOL.md. Without it the shape is
+    one set covering these bundles over a fabric, which is what a
+    tensor-parallel group wants and what placement did before claims existed.
+
+    Returns "" when MENTAT_CLAIM is unset, which places exactly as before.
+    """
+    name = os.environ.get("MENTAT_CLAIM", "").strip()
+    if not name:
+        return ""
+    raw = os.environ.get("MENTAT_CLAIM_SHAPE", "").strip()
+    if raw:
+        try:
+            shape = json.loads(raw)
+        except ValueError as e:
+            raise _client.MentatError(f"MENTAT_CLAIM_SHAPE is not JSON: {e}") from None
+    else:
+        shape = {"sets": [{"name": "all", "bundles": gpu_bundles, "link": "rdma"}]}
+    _client.get_conn().request({"t": "claim", "name": name, "shape": shape})
+    return name
+
+
 def placement_group(bundles, strategy="PACK", name="", lifetime=None):
     gpu_bundles = [float(b.get("GPU", 0)) for b in bundles]
-    resp, _ = _client.get_conn().request(
-        {"t": "create_pg", "bundles": gpu_bundles, "strategy": strategy}
-    )
+    req = {"t": "create_pg", "bundles": gpu_bundles, "strategy": strategy}
+    claimed = _claim(gpu_bundles)
+    if claimed:
+        req["claim"] = claimed
+    resp, _ = _client.get_conn().request(req)
     return PlacementGroup(resp["pg_id"], bundles, resp["ready_ref"])
 
 

@@ -24,6 +24,11 @@ cluster = Cluster()
 for i in range(4):
     cluster.start_agent("tp4", gpus=1, container="tp4c", node_ip=f"127.0.0.{i + 1}")
 cluster.wait_group_gpus("tp4", 4)
+# A group of its own for the claim test: the module holds tp4's driver
+# session, and a group takes only one.
+for i in range(2):
+    cluster.start_agent("claimed", gpus=1, container="cc", node_ip=f"127.0.0.{i + 1}")
+cluster.wait_group_gpus("claimed", 2)
 
 ray = fresh_shim(cluster.address, "tp4")
 from ray.util.placement_group import placement_group, placement_group_table  # noqa: E402
@@ -139,12 +144,71 @@ def t04_metrics_per_group():
     assert 'mentat_gpus_total{group="qwen-b"} 1' in m, m
 
 
+def t05_a_claim_fences_placement():
+    """MENTAT_CLAIM names a placement and placement stays inside it.
+
+    ray.placement_group takes bundles and a strategy, neither of which can
+    say which nodes a group may use, so the claim comes from the
+    environment. The fence is the point: a group asking for more than its
+    claim holds waits rather than spilling onto a node the claim did not
+    choose.
+    """
+    import json
+
+    driver = """
+import os, sys, json
+sys.path[:0] = os.environ["PYTHONPATH"].split(os.pathsep)
+import ray
+from ray.util.placement_group import placement_group, placement_group_table
+ray.init()
+pg = placement_group([{"GPU": 1.0}] * int(os.environ["WANT"]))
+if not ray.wait([pg.ready()], timeout=20)[0]:
+    print("PLACED null", flush=True)
+else:
+    t = placement_group_table(pg)
+    print("PLACED " + json.dumps(
+        sorted(set(t.get("bundles_to_node_id", {}).values()))), flush=True)
+"""
+
+    def run(want, extra):
+        env = {
+            **os.environ,
+            "RAY_ADDRESS": cluster.address,
+            "MENTAT_GROUP": "claimed",
+            "WANT": str(want),
+            "PYTHONPATH": os.pathsep.join([tl.PYTHON_PKG, HERE]),
+            **extra,
+        }
+        r = subprocess.run(
+            [sys.executable, "-c", driver], env=env,
+            capture_output=True, text=True, timeout=120,
+        )
+        for line in r.stdout.splitlines():
+            if line.startswith("PLACED"):
+                return json.loads(line[7:])
+        raise AssertionError((r.stdout + r.stderr)[-400:])
+
+    free = run(2, {})
+    assert free is not None and len(free) == 2, free
+
+    solo = {"sets": [{"name": "solo", "bundles": [1.0], "link": "ip"}]}
+    fenced = run(2, {"MENTAT_CLAIM": "fence-test",
+                     "MENTAT_CLAIM_SHAPE": json.dumps(solo)})
+    assert fenced is None, f"two bundles escaped a one-node claim: {fenced}"
+
+    # The same claim, asked for what it actually holds, places.
+    inside = run(1, {"MENTAT_CLAIM": "fence-test",
+                     "MENTAT_CLAIM_SHAPE": json.dumps(solo)})
+    assert inside is not None and len(inside) == 1, inside
+
+
 def main():
     tests = [
         t01_tp4_placement_and_serving,
         t02_liveness_at_tp4,
         t03_parallel_groups_share_nodes,
         t04_metrics_per_group,
+        t05_a_claim_fences_placement,
     ]
     try:
         for t in tests:
