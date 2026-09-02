@@ -533,6 +533,10 @@ pub fn topology(st: &crate::state::State) -> Topology {
             }
         }
         for (_, q) in p.last_status["peers"].as_object().into_iter().flatten() {
+            // A dead peer's last probes describe a box that has since gone.
+            if !q["alive"].as_bool().unwrap_or(false) {
+                continue;
+            }
             for (local, remotes) in q["probes"].as_object().into_iter().flatten() {
                 for (remote, r) in remotes.as_object().into_iter().flatten() {
                     if r["ok"].as_bool().unwrap_or(false) {

@@ -232,6 +232,12 @@ fn note(v: &mut FabricView, node: &str, addrs: Vec<String>, tags: BTreeMap<Strin
 /// and a four-node cluster saw two halves.
 fn merge_published(v: &mut FabricView, peers: &Value) {
     for (id, q) in peers.as_object().into_iter().flatten() {
+        // A dead peer keeps its row so an operator can see a box that is
+        // down, and its last probes are whatever was true before it went.
+        // Placing a group on it would put ranks on a node nobody can reach.
+        if !q["alive"].as_bool().unwrap_or(false) {
+            continue;
+        }
         note(v, id, str_list(&q["addrs"]), tag_map(&q["addr_tags"]));
         for (local, remotes) in q["probes"].as_object().into_iter().flatten() {
             for (remote, r) in remotes.as_object().into_iter().flatten() {
@@ -368,12 +374,14 @@ mod tests {
         let peers = json!({
             "6d656e7461743a31302e3130302e302e31": {
                 "node_ip": "10.100.0.1",
+                "alive": true,
                 "addrs": ["192.168.1.70", "10.100.0.1"],
                 "addr_tags": {"10.100.0.1": ["connectx", "rdma"], "192.168.1.70": ["lan"]},
                 "probes": {"10.100.0.1": {"10.100.0.2": {"ok": true}}}
             },
             "6d656e7461743a31302e3130302e302e32": {
                 "node_ip": "10.100.0.2",
+                "alive": true,
                 "addrs": ["192.168.1.77", "10.100.0.2"],
                 "addr_tags": {"10.100.0.2": ["connectx", "rdma"], "192.168.1.77": ["lan"]},
                 "probes": {"10.100.0.2": {"10.100.0.1": {"ok": true}}}
@@ -395,14 +403,57 @@ mod tests {
         );
     }
 
+    /// The reported bug: a box that went down kept contributing. A dead
+    /// peer keeps its row so an operator can see it, and the probes on that
+    /// row are whatever was true before it went. Placing on it would put
+    /// ranks on a node nobody can reach.
+    #[test]
+    fn a_dead_published_peer_forms_no_island() {
+        let peers = json!({
+            "n1": {
+                "alive": false,
+                "addrs": ["10.100.0.1"],
+                "addr_tags": {"10.100.0.1": ["rdma"]},
+                "probes": {"10.100.0.1": {"10.100.0.2": {"ok": true}}}
+            },
+            "n2": {
+                "alive": false,
+                "addrs": ["10.100.0.2"],
+                "addr_tags": {"10.100.0.2": ["rdma"]},
+                "probes": {"10.100.0.2": {"10.100.0.1": {"ok": true}}}
+            }
+        });
+        let mut v = FabricView::default();
+        merge_published(&mut v, &peers);
+        assert!(v.rdma.is_empty(), "a dead node offered a fabric address");
+        assert!(islands(&v).is_empty());
+    }
+
+    /// One of a cabled pair going down leaves no pair.
+    #[test]
+    fn half_a_dead_pair_leaves_no_island() {
+        let peers = json!({
+            "n1": {"alive": true, "addrs": ["10.100.0.1"],
+                   "addr_tags": {"10.100.0.1": ["rdma"]},
+                   "probes": {"10.100.0.1": {"10.100.0.2": {"ok": true}}}},
+            "n2": {"alive": false, "addrs": ["10.100.0.2"],
+                   "addr_tags": {"10.100.0.2": ["rdma"]}, "probes": {}}
+        });
+        let mut v = FabricView::default();
+        merge_published(&mut v, &peers);
+        assert_eq!(v.rdma.len(), 1, "only the live half offers an address");
+        assert!(islands(&v).is_empty(), "an island of one is not a fabric");
+    }
+
     /// A LAN address every box shares is not a fabric, tagged or not.
     #[test]
     fn an_untagged_published_peer_contributes_nothing() {
         let peers = json!({
-            "n1": {"addrs": ["192.168.1.70"], "addr_tags": {"192.168.1.70": ["lan"]},
+            "n1": {"alive": true, "addrs": ["192.168.1.70"],
+                   "addr_tags": {"192.168.1.70": ["lan"]},
                    "probes": {"192.168.1.70": {"192.168.1.77": {"ok": true}}}},
-            "n2": {"addrs": ["192.168.1.77"], "addr_tags": {"192.168.1.77": ["lan"]},
-                   "probes": {}}
+            "n2": {"alive": true, "addrs": ["192.168.1.77"],
+                   "addr_tags": {"192.168.1.77": ["lan"]}, "probes": {}}
         });
         let mut v = FabricView::default();
         merge_published(&mut v, &peers);
