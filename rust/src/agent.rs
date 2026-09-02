@@ -204,10 +204,16 @@ fn parse_announcement(v: &str) -> Announcement {
 /// over loopback, which is such a string: a node beside the daemon's own,
 /// holding this agent's GPUs.
 ///
-/// An agent that reaches its daemon over loopback is on that daemon's node, so
-/// it claims nothing and the daemon fills in its own. A container then needs
+/// An agent whose daemon is on this box is on that daemon's node, so it
+/// claims nothing and the daemon fills in its own. A container then needs
 /// MENTAT_NODE_IP only when it is telling the truth about a node the daemon
 /// cannot see for itself.
+///
+/// The daemon's own address answers whether it is on this box. The route to
+/// it does not. Loopback is the obvious case, and a container told to reach
+/// its own daemon by one of the box's other addresses is the same case: the
+/// route then answers with that address, which need not be the one the
+/// daemon is known by, and the agent would claim a node beside it.
 ///
 /// MENTAT_NODE_IP is the only variable read. An engine's own address setting
 /// is that engine's business: it names the address the engine binds, which is
@@ -221,9 +227,42 @@ fn claimed_node_ip(daemon_addr: &str) -> String {
             return v.to_string();
         }
     }
+    if on_this_box(daemon_addr, &crate::announce::all_local_addrs()) {
+        return String::new();
+    }
     match local_ip_toward(daemon_addr) {
         Some(ip) if !is_loopback(&ip) => ip,
         _ => String::new(),
+    }
+}
+
+/// Whether a daemon address names this box.
+///
+/// A host with no port is taken whole, since an address is what it is with
+/// or without one. A name that is not an address answers false: it may
+/// resolve here, and resolving it to find out would make a claim depend on
+/// DNS.
+fn on_this_box(daemon_addr: &str, mine: &[String]) -> bool {
+    let host = host_of(daemon_addr);
+    is_loopback(host) || mine.iter().any(|a| a == host)
+}
+
+/// The host half of an address that may or may not carry a port.
+///
+/// A bare IPv6 address is all colons, so splitting on the last one would
+/// take `::1` for a host of `:` on port 1. Anything that parses whole is
+/// therefore taken whole, and a bracketed host is read out of its brackets.
+fn host_of(addr: &str) -> &str {
+    let a = addr.trim();
+    if a.parse::<std::net::IpAddr>().is_ok() {
+        return a;
+    }
+    if let Some((h, _)) = a.strip_prefix('[').and_then(|r| r.split_once(']')) {
+        return h;
+    }
+    match a.rsplit_once(':') {
+        Some((h, _)) => h,
+        None => a,
     }
 }
 
@@ -950,6 +989,42 @@ fn kill_actor_process(shared: &Arc<AgentShared>, actor_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::on_this_box;
+
+    fn mine() -> Vec<String> {
+        vec!["10.100.0.2".into(), "192.168.1.77".into()]
+    }
+
+    /// The reported shape: a container told to reach its own daemon by the
+    /// box's LAN address. The route then answers with that address, which is
+    /// not the one the daemon is known by, so claiming it puts this agent on
+    /// a node beside the daemon's own.
+    #[test]
+    fn any_address_of_this_box_is_this_box() {
+        assert!(on_this_box("192.168.1.77:6379", &mine()));
+        assert!(on_this_box("10.100.0.2:6379", &mine()));
+        assert!(on_this_box("127.0.0.1:6379", &mine()));
+        assert!(on_this_box("::1", &mine()), "a bare v6 loopback");
+        assert!(on_this_box("[::1]:6379", &mine()), "bracketed with a port");
+    }
+
+    /// A daemon on another box is another box, and this agent claims the
+    /// address that reaches it.
+    #[test]
+    fn another_box_is_not_this_one() {
+        assert!(!on_this_box("10.100.0.1:6379", &mine()));
+        assert!(!on_this_box("192.168.1.70:6379", &mine()));
+    }
+
+    /// A port is optional, and a name is not an address: resolving one to
+    /// find out would make this agent's identity depend on DNS.
+    #[test]
+    fn a_bare_address_counts_and_a_name_does_not() {
+        assert!(on_this_box("10.100.0.2", &mine()));
+        assert!(!on_this_box("gx10-5818:6379", &mine()));
+        assert!(!on_this_box("", &mine()));
+    }
+
     use super::*;
 
     /// The form every existing deployment uses. It must keep meaning

@@ -1671,8 +1671,16 @@ fn agent_conn(
     };
 
     let node_ip = if node_ip.is_empty() {
-        if peer_ip == "127.0.0.1" || peer_ip == "::1" {
-            shared.st.lock().unwrap().node_ip.clone()
+        // An agent that claimed nothing is on the node of whichever daemon
+        // it reached. That is this one whenever the connection arrived on an
+        // address this box owns, loopback among them: a container told to
+        // reach its own daemon by the box's LAN address is still on this
+        // box, and filing it under that address would put its GPUs on a node
+        // beside this one.
+        let mine = crate::announce::all_local_addrs();
+        let st = shared.st.lock().unwrap();
+        if crate::state::is_loopback(&peer_ip) || mine.contains(&peer_ip) {
+            st.node_ip.clone()
         } else {
             peer_ip.clone()
         }

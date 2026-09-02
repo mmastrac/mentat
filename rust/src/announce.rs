@@ -324,6 +324,19 @@ fn broadcast_targets(port: u16) -> Vec<String> {
 /// Every address this node answers on, for consumers that cannot reach the
 /// one it calls itself. A listener should still prefer the address a packet
 /// actually arrived from; this list is what to fall back to.
+/// Every IPv4 address this box answers on, whatever the announce settings
+/// select. `local_addrs` is the announced subset and answers a different
+/// question: this one is "is that host me".
+pub fn all_local_addrs() -> Vec<String> {
+    let Ok(ifaces) = getifaddrs::InterfaceFilter::new().v4().get() else {
+        return Vec::new();
+    };
+    ifaces
+        .filter(|i| i.flags.contains(InterfaceFlags::UP))
+        .filter_map(|i| i.address.ip_addr().map(|a| a.to_string()))
+        .collect()
+}
+
 pub fn local_addrs() -> Vec<String> {
     if let Some(o) = announced_override() {
         return o.into_iter().map(|(a, _)| a).collect();
