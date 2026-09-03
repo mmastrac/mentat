@@ -143,6 +143,9 @@ pub struct Config {
     pub serving_timeout: Duration,
     pub mcp_timeout: Duration,
     pub tools_ttl: Duration,
+    /// How long a group stays listed while nothing it announces can serve.
+    /// See `group_table`.
+    pub model_ttl: Duration,
     pub allowed_sources: Vec<String>,
     pub discover_peers: bool,
 }
@@ -204,6 +207,9 @@ impl Config {
             // (up to 120s), so the MCP forward allows more than that.
             mcp_timeout: env_secs("MCP_TIMEOUT_S", 180.0),
             tools_ttl: env_secs("TOOLS_TTL_S", 60.0),
+            // An hour sits out a reboot, a weight reload or a fabric
+            // outage without a model vanishing mid-repair.
+            model_ttl: env_secs("MODEL_TTL_S", 3600.0),
             // Own subnets plus the docker bridge ranges: a bridge-networked
             // client (OpenWebUI) reaching this host keeps its 172.x source.
             allowed_sources: env_str("ALLOWED_SOURCES", "10.100.0.,192.168.1.,127.0.0.1,::1,172.")
@@ -267,6 +273,10 @@ pub struct Shared {
     pub next_req: AtomicU64,
     /// group -> its last `/metrics` scrape, shared across pollers.
     pub metrics: Mutex<HashMap<String, (Instant, String)>>,
+    /// group -> its serving clock. Past `model_ttl` a group is retired: it
+    /// leaves the table, the listing and the routes. Maintained by the
+    /// prober, since that is what decides whether a group can serve.
+    pub live: Mutex<HashMap<String, Liveness>>,
 }
 
 /// One announced service, resolved into the base URLs that could serve it.
@@ -456,10 +466,15 @@ fn best_openai(announced: Vec<(Endpoint, String)>) -> (Option<Endpoint>, String)
     }
 }
 
-/// Merge the daemon views into one group table. A group's agents all register with one daemon (the rendezvous rule), so
+/// Every group any watched daemon still describes, retired ones included.
+///
+/// Only the prober reads this. It probes retired groups too, which is how
+/// one that comes back un-retires. Every other caller wants `group_table`.
+///
+/// A group's agents all register with one daemon (the rendezvous rule), so
 /// overlap only happens around a stale view -- resolved toward the daemon
 /// with more running actors.
-pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
+pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
     let stale = shared.cfg.poll_interval * 3;
     let subnets = local_subnets();
     let daemons = shared.daemons.lock().unwrap();
@@ -546,6 +561,104 @@ pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
         }
     }
     out
+}
+
+/// One group's serving clock, as the prober keeps it.
+pub struct Liveness {
+    /// The last round the group could serve, or the round it was first seen
+    /// if it never has.
+    ok_at: Instant,
+    /// The retirement has been logged.
+    told: bool,
+}
+
+impl Liveness {
+    fn new(now: Instant) -> Liveness {
+        Liveness {
+            ok_at: now,
+            told: false,
+        }
+    }
+
+    fn retired(&self, ttl: Duration) -> bool {
+        self.ok_at.elapsed() > ttl
+    }
+
+    /// Fold in one probe round. True on the round that retires the group,
+    /// which is the one round worth a log line.
+    fn round(&mut self, now: Instant, ok: bool, ttl: Duration) -> bool {
+        if ok {
+            *self = Liveness::new(now);
+            return false;
+        }
+        if self.told || !self.retired(ttl) {
+            return false;
+        }
+        self.told = true;
+        true
+    }
+}
+
+/// The groups a caller may see: announced, minus the ones retired for being
+/// unable to serve for `model_ttl`.
+///
+/// A daemon never says a group is over. It keeps the agent and actor rows of
+/// a container that is long gone, so a model dropped from an operator's
+/// compose file would otherwise sit in `/v1/models` until that daemon
+/// restarted, advertised and unroutable. The clock is the router's own and
+/// starts when a group is first seen, so one that never comes up is retired
+/// on the same terms as one that stopped.
+pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
+    let mut out = announced_groups(shared);
+    let live = shared.live.lock().unwrap();
+    out.retain(|name, _| match live.get(name) {
+        Some(l) => !l.retired(shared.cfg.model_ttl),
+        // Announced since the prober last ran. Keep it: the group has not
+        // had a chance to be judged yet, and the next round gives it one.
+        None => true,
+    });
+    out
+}
+
+/// Note which announced groups can serve right now, and retire the ones that
+/// have not been able to for `model_ttl`. Called once per probe round, after
+/// the probes land, so `health_of` reads this round's results.
+fn age_groups(shared: &Shared, announced: &BTreeMap<String, GroupEntry>) {
+    let now = Instant::now();
+    let mut retired: Vec<(String, String)> = Vec::new();
+    {
+        let mut live = shared.live.lock().unwrap();
+        // A group no daemon mentions any more is gone rather than retired,
+        // and keeping its clock would retire it the moment it came back.
+        live.retain(|name, _| announced.contains_key(name));
+        for (name, e) in announced {
+            let l = live
+                .entry(name.clone())
+                .or_insert_with(|| Liveness::new(now));
+            match health_of(shared, e) {
+                Ok(_) => {
+                    l.round(now, true, shared.cfg.model_ttl);
+                }
+                Err(why) => {
+                    if l.round(now, false, shared.cfg.model_ttl) {
+                        retired.push((name.clone(), why));
+                    }
+                }
+            }
+        }
+    }
+    // Once per retirement. A group that comes back and goes again says so
+    // again, because the clock reset when it came back.
+    for (group, why) in retired {
+        log(
+            "group_retired",
+            &[
+                ("group", group),
+                ("after_s", shared.cfg.model_ttl.as_secs().to_string()),
+                ("why", why),
+            ],
+        );
+    }
 }
 
 /// Ok(model names) when the group may take traffic; Err(why) otherwise.
@@ -1138,7 +1251,7 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) {
 /// without either transition needing an operator.
 async fn prober(shared: Arc<Shared>) {
     loop {
-        let table = group_table(&shared);
+        let table = announced_groups(&shared);
         {
             let mut probes = shared.probes.lock().unwrap();
             probes.retain(|k, _| table.get(k).map(|e| e.openai.is_some()).unwrap_or(false));
@@ -1234,6 +1347,7 @@ async fn prober(shared: Arc<Shared>) {
             }
             shared.probes.lock().unwrap().insert(group, pr);
         }
+        age_groups(&shared, &table);
         tokio::select! {
             _ = tokio::time::sleep(shared.cfg.probe_interval) => {}
             _ = shared.refresh.notified() => {}
@@ -1435,6 +1549,7 @@ async fn main() {
         daemons: Mutex::new(HashMap::new()),
         watched: Mutex::new(HashSet::new()),
         probes: Mutex::new(HashMap::new()),
+        live: Mutex::new(HashMap::new()),
         tools: Mutex::new(HashMap::new()),
         refresh: tokio::sync::Notify::new(),
         inflight: Mutex::new(BTreeMap::new()),
@@ -1787,6 +1902,42 @@ mod tests {
         let (none, provider) = best_openai(Vec::new());
         assert!(none.is_none());
         assert_eq!(provider, "");
+    }
+
+    /// The reported shape: a group whose container is long gone stays in
+    /// every daemon snapshot, so the router has to be the one that calls it
+    /// over.
+    #[test]
+    fn a_group_that_never_serves_is_retired_once_the_ttl_passes() {
+        let ttl = Duration::from_secs(3600);
+        let mut l = Liveness::new(Instant::now() - Duration::from_secs(3599));
+        assert!(!l.round(Instant::now(), false, ttl), "still inside the ttl");
+        assert!(!l.retired(ttl));
+
+        l.ok_at = Instant::now() - Duration::from_secs(3601);
+        assert!(l.round(Instant::now(), false, ttl), "the retiring round");
+        assert!(l.retired(ttl));
+        assert!(
+            !l.round(Instant::now(), false, ttl),
+            "retirement is said once per outage"
+        );
+    }
+
+    /// One good round is the whole recovery: a model brought back after a
+    /// day down is servable on the next probe.
+    #[test]
+    fn serving_again_un_retires_a_group() {
+        let ttl = Duration::from_secs(3600);
+        let mut l = Liveness::new(Instant::now() - Duration::from_secs(86_400));
+        assert!(l.round(Instant::now(), false, ttl));
+        assert!(l.retired(ttl));
+
+        assert!(!l.round(Instant::now(), true, ttl));
+        assert!(!l.retired(ttl), "back the round it answers");
+
+        // And going down again is a new outage, so it says so again.
+        l.ok_at = Instant::now() - Duration::from_secs(3601);
+        assert!(l.round(Instant::now(), false, ttl));
     }
 
     /// An advertised address is a claim. Without the allowlist check on the

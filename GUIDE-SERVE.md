@@ -71,6 +71,21 @@ endpoint`, `no running actors`, `not probed yet`, `endpoint probe failed`, or
 `endpoint probe stale`. A probe failure quotes every candidate address it
 tried and appends the agent's own bind finding when there is one.
 
+### Retirement
+
+A daemon never says a group is over. It keeps the agent and actor rows of a
+container that is long gone, so a model removed from a compose file stays in
+every snapshot until that daemon restarts.
+
+The router therefore keeps its own clock per group, starting when the group
+is first seen and reset by every round the group can serve. After
+`MODEL_TTL_S` with no such round the group is retired: it leaves
+`/v1/models`, `/status.json`, the status page and the routes, and
+`group_retired` is logged once with the last reason it could not serve.
+
+Retirement is not a decision, only a listing. The group is still probed every
+round, and one answering probe brings it back before the next request.
+
 ### Candidate addresses
 
 A port-form announcement (see "Announcing endpoints") resolves to one
@@ -325,6 +340,12 @@ positive number. Anything else takes the default.
 - `TOOLS_TTL_S` (default 60)
 
   How long a group's `tools/list` answer is cached.
+
+- `MODEL_TTL_S` (default 3600)
+
+  How long a group stays listed while nothing it announces can serve. See
+  "Retirement". The default sits out a reboot, a weight reload or a fabric
+  outage without a model disappearing mid-repair.
 
 - `MENTAT_SECRET` (default: unset)
 

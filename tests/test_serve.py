@@ -647,6 +647,9 @@ def models_at(port):
     return None if body is None else sorted(m["id"] for m in body["data"])
 
 
+def groups_at(port):
+    return _get(port, "/status.json", {}).get("groups", {})
+
 
 def t11_a_registration_with_no_actors_is_served():
     """The single-rank path: no driver, no placement group, no actors, and no
@@ -667,7 +670,10 @@ def t11_a_registration_with_no_actors_is_served():
              "MENTAT_MODEL_PROVIDER": "vllm"},
     )
     tl._children.append(reg)
-    port = start_router(d.http_port)
+    # Short enough that the retirement below fits in a test run, long enough
+    # that one slow probe round cannot retire a healthy group.
+    port = start_router(d.http_port, MODEL_TTL_S="5")
+    state["stub_router"] = port
 
     wait_until(lambda: models_at(port) == ["model-s"], 25,
                "model-s never served from a registration with no actors")
@@ -676,6 +682,29 @@ def t11_a_registration_with_no_actors_is_served():
     assert agents[0]["gpus"] == 0, agents
     assert agents[0]["provider"] == "vllm", agents
     assert d.status_json()["groups"]["gs"]["actors"] == [], "the stub hosts no actors"
+
+
+def t12_an_unservable_group_is_retired_then_comes_back():
+    """A daemon keeps a dead container's rows forever, so the router has to be
+    what calls a model over -- and one answering probe has to undo it."""
+    port, mS = state["stub_router"], state["stub_model"]
+    mS.stop()
+
+    def unhealthy():
+        g = groups_at(port).get("gs")
+        return bool(g) and not g["healthy"]
+
+    wait_until(unhealthy, 20, "gs still healthy after its endpoint died")
+    assert models_at(port) == [], models_at(port)
+    # Still listed, with the reason. Retirement is what removes it.
+    assert "probe failed" in groups_at(port)["gs"]["why_not"]
+
+    wait_until(lambda: "gs" not in groups_at(port), 25,
+               "gs never retired past MODEL_TTL_S")
+
+    mS.start()
+    wait_until(lambda: models_at(port) == ["model-s"], 25,
+               "a retired group never came back after its endpoint returned")
 
 
 def main():
@@ -693,6 +722,7 @@ def main():
         t09_membership_follows_the_mesh,
         t10_udp_announce_replaces_the_seed_list,
         t11_a_registration_with_no_actors_is_served,
+        t12_an_unservable_group_is_retired_then_comes_back,
     ]
     try:
         for t in tests:
