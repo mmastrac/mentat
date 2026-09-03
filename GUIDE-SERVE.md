@@ -50,10 +50,17 @@ about a group, the one reporting more running actors wins.
 
 ### Admission
 
-A group is routable on `/v1` when it has a running actor and its announced
-OpenAI endpoint answers a `/models` probe. The probe is also where model
+A group is routable on `/v1` when a live agent announces an OpenAI endpoint
+and that endpoint answers a `/models` probe. The probe is also where model
 names come from: whatever the engine lists under `/v1/models` is what routes
 to it. Nothing announces model names.
+
+A group whose agents offer GPUs must also have a running actor. Offering GPUs
+is what makes a group a placement target, so its engine runs inside actors
+mentat spawned and their state says something: an endpoint that outlives every
+rank still answers `/models` from a process whose ranks are gone. A group whose
+agents offer none had nothing placed -- a single-rank engine registered by
+`python -m ray.register` -- so the probe is the whole test.
 
 An engine is admitted as soon as its API answers, which on some models is
 during its self-test.
@@ -61,9 +68,8 @@ during its self-test.
 `/status.json` says why a model is missing. Each group carries `healthy`
 and, when false, `why_not` naming the failed gate: `no announced OpenAI
 endpoint`, `no running actors`, `not probed yet`, `endpoint probe failed`, or
-`endpoint probe stale`. A probe failure quotes every
-candidate address it tried and appends the agent's own bind finding when
-there is one.
+`endpoint probe stale`. A probe failure quotes every candidate address it
+tried and appends the agent's own bind finding when there is one.
 
 ### Candidate addresses
 

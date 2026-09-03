@@ -139,13 +139,23 @@ class FakeModel:
                                      "error": {"code": -32601,
                                                "message": "no such method"}})
 
-        self.srv = ThreadingHTTPServer(("127.0.0.1", self.port), H)
+        self.handler = H
+        self.srv = None
+        self.start()
+
+    def start(self):
+        """Bind the same port again. Restarting is what proves a group the
+        router retired comes back on its own."""
+        self.srv = ThreadingHTTPServer(("127.0.0.1", self.port), self.handler)
         self.srv.daemon_threads = True
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
     def stop(self):
+        if self.srv is None:
+            return
         self.srv.shutdown()
         self.srv.server_close()
+        self.srv = None
 
 
 # A driver that spawns one actor and then stays alive holding it -- the
@@ -605,6 +615,69 @@ def t10_udp_announce_replaces_the_seed_list():
     wait_until(discovered, 20, "announcement never reached the seedless router")
 
 
+def start_router(daemon_http, **env_extra):
+    """A router of this test's own, so it can carry its own timings."""
+    port = free_port()
+    proc = subprocess.Popen(
+        [SERVE_BINARY],
+        env={**os.environ,
+             "MENTAT_DAEMONS": f"127.0.0.1:{daemon_http}",
+             "SERVE_PORT": str(port),
+             "POLL_INTERVAL_S": "1",
+             "PROBE_INTERVAL_S": "0.5",
+             "ALLOWED_SOURCES": "127.",
+             **env_extra},
+    )
+    tl._children.append(proc)
+    return port
+
+
+def _get(port, path, absent):
+    """A router that has not bound yet has nothing to say. Answer `absent`
+    so a wait can keep waiting."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
+            return json.load(r)
+    except OSError:
+        return absent
+
+
+def models_at(port):
+    body = _get(port, "/v1/models", None)
+    return None if body is None else sorted(m["id"] for m in body["data"])
+
+
+
+def t11_a_registration_with_no_actors_is_served():
+    """The single-rank path: no driver, no placement group, no actors, and no
+    GPUs offered -- just `python -m ray.register` holding a link open. The
+    actor gate must not apply to a group that never had anything placed."""
+    d = Daemon("127.0.0.1").wait_up()
+    state["stub"] = d
+    mS = FakeModel("model-s", "tool_s")
+    state["stub_model"] = mS
+    reg = subprocess.Popen(
+        [sys.executable, "-m", "ray.register"],
+        env={**os.environ,
+             "PYTHONPATH": tl.PYTHON_PKG,
+             "RAY_ADDRESS": d.address,
+             "MENTAT_GROUP": "gs",
+             "CONTAINER_NAME": "cs",
+             "MENTAT_OPENAI_API": f"http://127.0.0.1:{mS.port}/v1",
+             "MENTAT_MODEL_PROVIDER": "vllm"},
+    )
+    tl._children.append(reg)
+    port = start_router(d.http_port)
+
+    wait_until(lambda: models_at(port) == ["model-s"], 25,
+               "model-s never served from a registration with no actors")
+    agents = d.status_json()["groups"]["gs"]["agents"]
+    assert len(agents) == 1, agents
+    assert agents[0]["gpus"] == 0, agents
+    assert agents[0]["provider"] == "vllm", agents
+    assert d.status_json()["groups"]["gs"]["actors"] == [], "the stub hosts no actors"
+
+
 def main():
     tests = [
         t01_announcement_reaches_status,
@@ -619,6 +692,7 @@ def main():
         t08b_port_announcement_resolves_and_falls_through,
         t09_membership_follows_the_mesh,
         t10_udp_announce_replaces_the_seed_list,
+        t11_a_registration_with_no_actors_is_served,
     ]
     try:
         for t in tests:
@@ -632,6 +706,8 @@ def main():
             state["port_daemon"].cleanup()
         if "announce_daemon" in state:
             state["announce_daemon"].cleanup()
+        if "stub" in state:
+            state["stub"].cleanup()
 
 
 if __name__ == "__main__":

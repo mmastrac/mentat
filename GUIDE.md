@@ -186,6 +186,39 @@ A name that is not built in runs `mentatd-NAME` with the remaining
 arguments, looked up beside the `mentatd` executable and then on `PATH`.
 `mentatd serve` runs `mentatd-serve`.
 
+### Registering without ray
+
+A single-rank engine needs nothing mentat provides at runtime -- no placement
+group, no actors, no cross-node collectives -- but it still has to appear in
+mentatd-serve, and the only way into that listing is an agent registration.
+
+```
+python -m ray.register
+```
+
+ships in the shim package and is that registration and nothing else: one
+connection to the daemon, held open for as long as the endpoint is meant to
+be served, redialled when the daemon restarts. It reads the same environment
+as `mentatd start` (`MENTAT_GROUP`, `MENTAT_OPENAI_API`, `MENTAT_MCP_API`,
+`MENTAT_MODEL_PROVIDER`, `CONTAINER_NAME`, `MENTAT_NODE_IP`, and the daemon
+address), and each has a flag of the same name. Run it beside the engine:
+
+```
+python -m ray.register &
+exec vllm serve ...
+```
+
+It offers no GPUs. An agent with none is never chosen for a bundle, which is
+what keeps a placement from arriving somewhere with nothing to host it. What
+it announces is an endpoint and nothing else. A box whose GPUs should be
+placeable runs `mentatd start` instead. mentatd-serve applies its actor gate
+only to groups that offer GPUs, so a group registered this way is admitted on
+its endpoint probe alone.
+
+`MENTAT_NODE_IP` is usually better left unset here: an agent that claims no
+address is filed under the daemon's own node when it connected from that box,
+and under the address the daemon saw otherwise, which is right in both cases.
+
 ### The ray symlink
 
 Invoked through a symlink named `ray`, the binary accepts the same commands.

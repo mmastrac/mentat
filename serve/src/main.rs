@@ -308,6 +308,15 @@ pub struct GroupEntry {
     /// from the agent whose endpoint won, since it describes the engine
     /// behind that endpoint. Empty when the container did not say.
     pub provider: String,
+    /// Whether any live agent offers GPUs, which is what makes the group a
+    /// placement target: its engine then runs inside actors mentat spawned,
+    /// and their state says something about whether it is up.
+    ///
+    /// A group whose agents offer none had nothing placed -- a single-rank
+    /// engine registered by `python -m ray.register` -- so mentat knows
+    /// nothing about it beyond the endpoint, and the probe is the whole
+    /// test.
+    pub placed: bool,
 }
 
 /// Ranked addresses per node, added to `out` from one daemon's snapshot.
@@ -447,10 +456,9 @@ fn best_openai(announced: Vec<(Endpoint, String)>) -> (Option<Endpoint>, String)
     }
 }
 
-/// Merge the daemon views into one group table. A group's agents all
-/// register with one daemon (the rendezvous rule), so overlap only happens
-/// around a stale view -- resolved toward the daemon with more running
-/// actors.
+/// Merge the daemon views into one group table. A group's agents all register with one daemon (the rendezvous rule), so
+/// overlap only happens around a stale view -- resolved toward the daemon
+/// with more running actors.
 pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
     let stale = shared.cfg.poll_interval * 3;
     let subnets = local_subnets();
@@ -521,6 +529,7 @@ pub fn group_table(shared: &Shared) -> BTreeMap<String, GroupEntry> {
                 openai,
                 mcp,
                 provider,
+                placed: agents.iter().any(|a| a["gpus"].as_u64().unwrap_or(0) > 0),
             };
             let replace = match out.get(name) {
                 None => true,
@@ -550,7 +559,11 @@ pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<Value>, String> 
             ep.announced
         ));
     }
-    if e.running == 0 {
+    // Only where actors are how the engine runs. An endpoint that outlives
+    // every rank still answers /models from a process whose ranks are gone,
+    // and this catches it. A group that never had actors would fail this
+    // gate forever.
+    if e.placed && e.running == 0 {
         return Err("no running actors".into());
     }
     let probes = shared.probes.lock().unwrap();
@@ -1128,18 +1141,10 @@ async fn prober(shared: Arc<Shared>) {
         let table = group_table(&shared);
         {
             let mut probes = shared.probes.lock().unwrap();
-            probes.retain(|k, _| {
-                table
-                    .get(k)
-                    .map(|e| e.openai.is_some() && e.running > 0)
-                    .unwrap_or(false)
-            });
+            probes.retain(|k, _| table.get(k).map(|e| e.openai.is_some()).unwrap_or(false));
         }
         let mut set = tokio::task::JoinSet::new();
         for e in table.values() {
-            if e.running == 0 {
-                continue;
-            }
             let Some(ep) = e.openai.clone().filter(|x| !x.candidates.is_empty()) else {
                 continue;
             };
