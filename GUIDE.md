@@ -69,6 +69,12 @@ is a warning. After `MENTAT_AGENT_DEAD_AFTER_MS` its actors are dead, their
 A driver session ending reaps its group's actors and placement groups after
 `MENTAT_SESSION_REAP_GRACE_MS`.
 
+A dead actor keeps its row in `/status`, which is what turns a later call on
+it into `RayActorError` carrying the reason it died. Only its owner can make
+that call, so once the owner is gone the row is history: after
+`MENTAT_ACTOR_KEEP_MS` it is dropped, along with any refs left pointing at
+it, and `actors_swept` says how many went.
+
 ### Head election
 
 The head is the lowest node id visible, after `MENTAT_ELECTION_HOLD_DOWN_MS`
@@ -518,6 +524,13 @@ process start.
   How long an agent's daemon link may be closed before its actors are marked
   dead, which resolves their `run()` refs and restarts the driver. The gap
   between this and the degrade threshold allows for short outages.
+
+- `MENTAT_ACTOR_KEEP_MS` (default 3600000)
+
+  How long a dead actor's row is kept once its owner is gone. The age is
+  counted from the death rather than from the owner leaving, so a daemon
+  restart, which rebuilds the table before any driver reconnects, does not
+  erase reasons the drivers have yet to ask for.
 
 - `MENTAT_PEER_STALE_AFTER_MS` (default 30000)
 

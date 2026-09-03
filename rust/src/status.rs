@@ -89,7 +89,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                 let state = match &a.state {
                     ActorState::Spawning => "spawning".to_string(),
                     ActorState::Running => "running".to_string(),
-                    ActorState::Dead { reason } => format!("dead ({reason})"),
+                    ActorState::Dead { reason, .. } => format!("dead ({reason})"),
                 };
                 json!({
                     "id": a.id,

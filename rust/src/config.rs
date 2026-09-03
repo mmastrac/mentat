@@ -6,7 +6,7 @@
 //!
 //! The defaults are sized for the serving pair: model boot legitimately takes
 //! minutes (weights, container pulls), while an agent link blip should heal in
-//! seconds. README.md carries the same table for operators.
+//! seconds. GUIDE.md carries the same table for operators.
 
 use std::sync::OnceLock;
 
@@ -30,6 +30,12 @@ pub struct Cfg {
     /// completes their run() sentinel refs so the driver restarts and the
     /// system returns to the initial state.
     pub agent_dead_after_ms: u64,
+    /// MENTAT_ACTOR_KEEP_MS, default 3_600_000. How long a dead actor's row
+    /// stays in the table once its owner is gone. The row is what turns a
+    /// call on a dead actor into RayActorError with the reason it died, so
+    /// it outlives the actor on purpose. Once the owner has gone nobody can
+    /// make that call, and an hour is longer than an operator looks.
+    pub actor_keep_ms: u64,
     /// MENTAT_PEER_STALE_AFTER_MS, default 30_000. A mesh peer that has not
     /// been heard from (status push or pong) for this long is logged stale --
     /// the mesh analog of the agent degrade window.
@@ -148,6 +154,7 @@ pub fn cfg() -> &'static Cfg {
         pg_pending_timeout_ms: env_ms("MENTAT_PG_PENDING_TIMEOUT_MS", 600_000),
         agent_degraded_after_ms: env_ms("MENTAT_AGENT_DEGRADED_AFTER_MS", 30_000),
         agent_dead_after_ms: env_ms("MENTAT_AGENT_DEAD_AFTER_MS", 60_000),
+        actor_keep_ms: env_ms("MENTAT_ACTOR_KEEP_MS", 3_600_000),
         peer_stale_after_ms: env_ms("MENTAT_PEER_STALE_AFTER_MS", 30_000),
         peer_dead_after_ms: env_ms("MENTAT_PEER_DEAD_AFTER_MS", 60_000),
         election_hold_down_ms: env_ms("MENTAT_ELECTION_HOLD_DOWN_MS", 5_000),

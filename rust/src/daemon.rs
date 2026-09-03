@@ -88,9 +88,10 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
     crate::island::start(shared.clone());
     crate::announce::start(shared.clone());
 
-    // Lifecycle sweeper: slow-call warnings, the pending-pg timeout, and the
-    // agent degrade/give-up windows. A single thread ticking every 200 ms,
-    // cheap enough that the short windows the tests use still fire on time.
+    // Lifecycle sweeper: slow-call warnings, the pending-pg timeout, the
+    // agent degrade/give-up windows and the dead-actor sweep. A single
+    // thread ticking every 200 ms, cheap enough that the short windows the
+    // tests use still fire on time.
     {
         let shared = shared.clone();
         std::thread::spawn(move || loop {
@@ -256,6 +257,51 @@ fn sweep_lifecycle(shared: &SharedRef) {
             );
         }
     }
+
+    sweep_dead_actors(&mut st);
+}
+
+/// Drop the rows of dead actors nobody can ask about any more.
+///
+/// A dead actor's row outlives the process on purpose: it is what turns a
+/// call on that actor into RayActorError carrying the reason it died, rather
+/// than "no such actor". Only its owner can make that call, so once the
+/// owner is gone the row is history, and nothing prunes history here -- a box
+/// that has booted a model forty times carries forty of these, plus whatever
+/// refs were adopted for owners that never came back.
+///
+/// The age floor is what makes the owner check safe across a daemon restart:
+/// the table is rebuilt from the agents before the drivers reconnect, so for
+/// a moment every owner looks gone.
+fn sweep_dead_actors(st: &mut State) {
+    let (now, keep) = (crate::state::now_ms_u64(), cfg().actor_keep_ms);
+    let gone: Vec<String> = st
+        .actors
+        .values()
+        .filter(|a| !st.clients.contains_key(&a.owner))
+        .filter(|a| match &a.state {
+            ActorState::Dead { at_ms, .. } => now.saturating_sub(*at_ms) > keep,
+            _ => false,
+        })
+        .map(|a| a.id.clone())
+        .collect();
+    if gone.is_empty() {
+        return;
+    }
+    let before = st.refs.len();
+    for id in &gone {
+        st.actors.remove(id);
+    }
+    st.refs
+        .retain(|_, r| r.actor.as_ref().is_none_or(|a| st.actors.contains_key(a)));
+    log(
+        "actors_swept",
+        &[
+            ("actors", gone.len().to_string()),
+            ("refs", (before - st.refs.len()).to_string()),
+            ("kept_ms", keep.to_string()),
+        ],
+    );
 }
 
 pub fn hostname() -> String {
@@ -693,7 +739,7 @@ fn handle_client_msg(
                 warned: false,
             };
             match &actor.state {
-                ActorState::Dead { reason } => {
+                ActorState::Dead { reason, .. } => {
                     let r = new_ref(RefState::ActorDied {
                         reason: reason.clone(),
                     });
@@ -1272,6 +1318,7 @@ pub fn mark_actor_dead(st: &mut State, cv: &std::sync::Condvar, actor_id: &str, 
         }
         actor.state = ActorState::Dead {
             reason: reason.to_string(),
+            at_ms: crate::state::now_ms_u64(),
         };
         // Held calls die with the actor. Their refs resolve in the fan-out
         // below.
@@ -2176,7 +2223,72 @@ fn agent_conn(
 
 #[cfg(test)]
 mod tests {
-    use super::misfiled;
+    use super::{misfiled, sweep_dead_actors};
+    use crate::state::{ActorInfo, ActorState, ClientInfo, State};
+
+    fn state_with(owner: &str, at_ms: u64) -> State {
+        let mut st = State::new("10.0.0.1".into(), "box".into(), "10.0.0.1:6379".into());
+        st.actors.insert(
+            "a1".into(),
+            ActorInfo {
+                id: "a1".into(),
+                name: "w0".into(),
+                group: "g".into(),
+                agent: "ag".into(),
+                node_id: st.node_id.clone(),
+                gpu_ids: vec![0],
+                owner: owner.into(),
+                state: ActorState::Dead {
+                    reason: "exited".into(),
+                    at_ms,
+                },
+                pid: None,
+                queued_calls: Vec::new(),
+            },
+        );
+        st
+    }
+
+    fn with_driver(mut st: State, client: &str) -> State {
+        st.clients.insert(
+            client.into(),
+            ClientInfo {
+                id: client.into(),
+                group: "g".into(),
+                node_id: st.node_id.clone(),
+                has_session: true,
+            },
+        );
+        st
+    }
+
+    /// The reported shape: a box that has booted a model dozens of times
+    /// carries a row per boot, each from a driver long gone.
+    #[test]
+    fn a_dead_actor_goes_once_its_driver_has() {
+        let mut st = state_with("driver-1", 0);
+        sweep_dead_actors(&mut st);
+        assert!(st.actors.is_empty());
+    }
+
+    /// The row is what turns a call on a dead actor into the reason it died,
+    /// and only its owner can make that call.
+    #[test]
+    fn a_dead_actor_stays_while_its_driver_is_connected() {
+        let mut st = with_driver(state_with("driver-1", 0), "driver-1");
+        sweep_dead_actors(&mut st);
+        assert_eq!(st.actors.len(), 1);
+    }
+
+    /// A restarted daemon rebuilds its tables from the agents before any
+    /// driver reconnects, so for a moment every owner looks gone. Without
+    /// the age floor that moment would erase the reasons.
+    #[test]
+    fn a_recent_death_survives_a_daemon_restart() {
+        let mut st = state_with("driver-1", crate::state::now_ms_u64());
+        sweep_dead_actors(&mut st);
+        assert_eq!(st.actors.len(), 1);
+    }
 
     fn boxes() -> Vec<(String, String, Vec<String>)> {
         vec![

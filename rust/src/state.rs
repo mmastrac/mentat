@@ -72,7 +72,13 @@ impl UnixFrameWriter {
 pub enum ActorState {
     Spawning,
     Running,
-    Dead { reason: String },
+    /// `at_ms` is when this daemon recorded the death, which the agent
+    /// give-up path puts a degrade window after the process actually went.
+    /// It is what `sweep_dead_actors` ages.
+    Dead {
+        reason: String,
+        at_ms: u64,
+    },
 }
 
 pub struct ActorInfo {
