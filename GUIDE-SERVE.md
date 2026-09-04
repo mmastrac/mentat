@@ -117,6 +117,14 @@ model, so `/v1/chat/completions`, `/tokenize`, `/detokenize` and any other
 endpoint the engine exposes all work. A body with no `model` is refused
 with 400.
 
+The body is read to find that name and forwarded byte for byte, with its
+`Content-Type` as the client sent it. Two forms carry a name. JSON has it as
+a top-level field. `multipart/form-data` has it as a text field, which is how
+the audio endpoints are spelled: `/v1/audio/transcriptions` posts the upload
+beside `model`. The form's parts are walked rather than its bytes searched,
+so an upload that happens to contain `name="model"` routes on the real field.
+An upload itself is never read. A body in neither form is refused with 400.
+
 The announced base ends in `/v1`. A root-level path such as `/tokenize` is
 resolved against the base with the `/v1` removed.
 
