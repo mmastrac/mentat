@@ -30,12 +30,14 @@ pub struct Cfg {
     /// completes their run() sentinel refs so the driver restarts and the
     /// system returns to the initial state.
     pub agent_dead_after_ms: u64,
-    /// MENTAT_ACTOR_KEEP_MS, default 3_600_000. How long a dead actor's row
-    /// stays in the table once its owner is gone. The row is what turns a
-    /// call on a dead actor into RayActorError with the reason it died, so
-    /// it outlives the actor on purpose. Once the owner has gone nobody can
-    /// make that call, and an hour is longer than an operator looks.
-    pub actor_keep_ms: u64,
+    /// MENTAT_HISTORY_KEEP_MS, default 600_000. How long a record nobody can
+    /// act on any more stays in the tables for an operator to read: a dead
+    /// actor or removed placement group whose owner is gone, an agent whose
+    /// link has been down past the give-up threshold, a mesh peer that has
+    /// been dead. Each is history the moment it stops mattering, and one
+    /// knob ages all of it so a daemon that has watched a model boot forty
+    /// times does not carry forty of each.
+    pub history_keep_ms: u64,
     /// MENTAT_PEER_STALE_AFTER_MS, default 30_000. A mesh peer that has not
     /// been heard from (status push or pong) for this long is logged stale --
     /// the mesh analog of the agent degrade window.
@@ -154,7 +156,7 @@ pub fn cfg() -> &'static Cfg {
         pg_pending_timeout_ms: env_ms("MENTAT_PG_PENDING_TIMEOUT_MS", 600_000),
         agent_degraded_after_ms: env_ms("MENTAT_AGENT_DEGRADED_AFTER_MS", 30_000),
         agent_dead_after_ms: env_ms("MENTAT_AGENT_DEAD_AFTER_MS", 60_000),
-        actor_keep_ms: env_ms("MENTAT_ACTOR_KEEP_MS", 3_600_000),
+        history_keep_ms: env_ms("MENTAT_HISTORY_KEEP_MS", 600_000),
         peer_stale_after_ms: env_ms("MENTAT_PEER_STALE_AFTER_MS", 30_000),
         peer_dead_after_ms: env_ms("MENTAT_PEER_DEAD_AFTER_MS", 60_000),
         election_hold_down_ms: env_ms("MENTAT_ELECTION_HOLD_DOWN_MS", 5_000),

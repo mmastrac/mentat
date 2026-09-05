@@ -58,6 +58,7 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
     }
     let hostname = hostname();
     let gcs_address = format!("{}:{}", opts.node_ip, opts.port);
+    crate::testnet::set_node_ip(&opts.node_ip);
     let shared: SharedRef = Arc::new(Shared {
         st: std::sync::Mutex::new(State::new(
             opts.node_ip.clone(),
@@ -174,6 +175,7 @@ fn sweep_lifecycle(shared: &SharedRef) {
             why.unwrap_or_else(|| format!("group '{group}' never had enough registered GPUs"));
         if let Some(pg) = st.pgs.get_mut(&pg_id) {
             pg.state = PgState::Removed;
+            pg.removed_ms = Some(now);
             pg.fail_reason = Some(format!(
                 "placement group still PENDING after {age}ms: {why} \
                  (MENTAT_PG_PENDING_TIMEOUT_MS)"
@@ -258,46 +260,86 @@ fn sweep_lifecycle(shared: &SharedRef) {
         }
     }
 
-    sweep_dead_actors(&mut st);
+    sweep_history(&mut st);
 }
 
-/// Drop the rows of dead actors nobody can ask about any more.
+/// Drop the rows nobody can act on any more, once they have sat for
+/// MENTAT_HISTORY_KEEP_MS.
 ///
 /// A dead actor's row outlives the process on purpose: it is what turns a
 /// call on that actor into RayActorError carrying the reason it died, rather
 /// than "no such actor". Only its owner can make that call, so once the
-/// owner is gone the row is history, and nothing prunes history here -- a box
-/// that has booted a model forty times carries forty of these, plus whatever
-/// refs were adopted for owners that never came back.
+/// owner is gone the row is history. The same holds for a removed placement
+/// group, whose fail reason is read by its owner's ready ref and by nobody
+/// else. An agent whose link has been down past the give-up threshold has
+/// nothing left to hold: its actors are dead and a container that comes back
+/// registers afresh under the same id. Nothing else prunes any of these, and
+/// a box that has booted a model forty times would otherwise carry forty of
+/// each, plus whatever refs were adopted for owners that never came back.
+///
+/// A group is whatever agents and actors mention it, so once its last row
+/// goes the group is gone from every snapshot, which is what lets the router
+/// drop a model that was removed from a compose file.
 ///
 /// The age floor is what makes the owner check safe across a daemon restart:
 /// the table is rebuilt from the agents before the drivers reconnect, so for
 /// a moment every owner looks gone.
-fn sweep_dead_actors(st: &mut State) {
-    let (now, keep) = (crate::state::now_ms_u64(), cfg().actor_keep_ms);
-    let gone: Vec<String> = st
+fn sweep_history(st: &mut State) {
+    let (now, keep) = (crate::state::now_ms_u64(), cfg().history_keep_ms);
+    let aged = |at: u64| now.saturating_sub(at) > keep;
+
+    let gone_actors: Vec<String> = st
         .actors
         .values()
         .filter(|a| !st.clients.contains_key(&a.owner))
         .filter(|a| match &a.state {
-            ActorState::Dead { at_ms, .. } => now.saturating_sub(*at_ms) > keep,
+            ActorState::Dead { at_ms, .. } => aged(*at_ms),
             _ => false,
         })
         .map(|a| a.id.clone())
         .collect();
-    if gone.is_empty() {
+    let gone_pgs: Vec<String> = st
+        .pgs
+        .values()
+        .filter(|p| p.state == PgState::Removed && !st.clients.contains_key(&p.owner))
+        .filter(|p| p.removed_ms.is_some_and(aged))
+        .map(|p| p.id.clone())
+        .collect();
+    // An agent goes only once every actor it hosted has: a dead actor's row
+    // names its agent, and an operator reading one wants to find the other.
+    let gone_agents: Vec<String> = st
+        .agents
+        .values()
+        .filter(|a| !a.alive && a.gone_since_ms.is_some_and(aged))
+        .filter(|a| {
+            !st.actors
+                .values()
+                .any(|ac| ac.agent == a.id && !gone_actors.contains(&ac.id))
+        })
+        .map(|a| a.id.clone())
+        .collect();
+    if gone_actors.is_empty() && gone_pgs.is_empty() && gone_agents.is_empty() {
         return;
     }
     let before = st.refs.len();
-    for id in &gone {
+    for id in &gone_actors {
         st.actors.remove(id);
+    }
+    for id in &gone_pgs {
+        st.pgs.remove(id);
+    }
+    for id in &gone_agents {
+        st.agents.remove(id);
+        st.misfiled_warned.remove(id);
     }
     st.refs
         .retain(|_, r| r.actor.as_ref().is_none_or(|a| st.actors.contains_key(a)));
     log(
-        "actors_swept",
+        "history_swept",
         &[
-            ("actors", gone.len().to_string()),
+            ("actors", gone_actors.len().to_string()),
+            ("placement_groups", gone_pgs.len().to_string()),
+            ("agents", gone_agents.len().to_string()),
             ("refs", (before - st.refs.len()).to_string()),
             ("kept_ms", keep.to_string()),
         ],
@@ -447,18 +489,7 @@ fn client_conn(
             }
         }
 
-        // The client's node: loopback means "same box as this daemon";
-        // otherwise match the source address against registered agent nodes,
-        // falling back to a node id derived from the source ip itself.
-        let node_id = if peer_ip == "127.0.0.1" || peer_ip == "::1" || peer_ip == st.node_ip {
-            st.node_id.clone()
-        } else {
-            st.agents
-                .values()
-                .find(|a| a.node_ip == peer_ip)
-                .map(|a| a.node_id.clone())
-                .unwrap_or_else(|| node_id_for(&peer_ip))
-        };
+        let node_id = client_node(&st, &peer_ip);
 
         let entry = st
             .clients
@@ -534,6 +565,14 @@ fn client_conn(
     );
     if is_session {
         reap_client(&shared, &client_id);
+    } else {
+        // A connection that carried no session was a CLI call, or one of a
+        // driver's worker threads. The driver's row belongs to its session
+        // and leaves with it. A CLI row has nothing to wait for.
+        let mut st = shared.st.lock().unwrap();
+        if st.clients.get(&client_id).is_some_and(|c| !c.has_session) {
+            st.clients.remove(&client_id);
+        }
     }
 }
 
@@ -649,6 +688,7 @@ fn handle_client_msg(
                     fail_reason: None,
                     island: None,
                     pending_reason: None,
+                    removed_ms: None,
                 },
             );
             st.emit(
@@ -703,6 +743,7 @@ fn handle_client_msg(
             let mut st = shared.st.lock().unwrap();
             if let Some(pg) = st.pgs.get_mut(&pg_id) {
                 pg.state = PgState::Removed;
+                pg.removed_ms = Some(crate::state::now_ms_u64());
             }
             try_place(&mut st, &shared.cv);
             (Msg::Ok0, Vec::new())
@@ -987,6 +1028,38 @@ fn misfiled(
     ))
 }
 
+/// The node a client connected from, by its source address.
+///
+/// A driver is on this box when it arrived over loopback or over any address
+/// this box owns. Otherwise the address is matched against every box the
+/// mesh knows, by every address each announces: a driver that reaches the
+/// daemon over the fabric arrives from an address the node is not named by,
+/// and filing it under a node of its own would put rank 0 nowhere near the
+/// engine. An agent that registered under that address answers the same
+/// question. An address nobody claims is a node of its own.
+fn client_node(st: &State, peer_ip: &str) -> String {
+    if crate::state::is_loopback(peer_ip)
+        || peer_ip == st.node_ip
+        || crate::announce::all_local_addrs()
+            .iter()
+            .any(|a| a == peer_ip)
+    {
+        return st.node_id.clone();
+    }
+    if let Some(p) = st
+        .peers
+        .values()
+        .find(|p| p.node_ip == peer_ip || p.addrs.iter().any(|a| a == peer_ip))
+    {
+        return p.node_id.clone();
+    }
+    st.agents
+        .values()
+        .find(|a| a.node_ip == peer_ip)
+        .map(|a| a.node_id.clone())
+        .unwrap_or_else(|| node_id_for(peer_ip))
+}
+
 fn client_group(st: &State, client_id: &str) -> String {
     st.clients
         .get(client_id)
@@ -1065,6 +1138,7 @@ fn create_actor(
     };
     let agent_id = agent.id.clone();
     let agent_writer = agent.writer.clone();
+    let agent_node_ip = agent.node_ip.clone();
     let node_id = bundle.node_id.clone();
     let gpu_ids = bundle.gpu_ids.clone();
 
@@ -1081,6 +1155,13 @@ fn create_actor(
             .join(","),
     );
     spawn_env.insert("MENTAT_GCS_ADDRESS".into(), st.gcs_address.clone());
+    // The rank's cluster identity, which is its node's, so a container
+    // needs no MENTAT_NODE_IP of its own: what the daemon filed the agent
+    // under is what its peers can dial. A fabric address, when placement
+    // chose one, sits above it in the shim's order.
+    if !agent_node_ip.is_empty() {
+        spawn_env.insert("MENTAT_NODE_IP".into(), agent_node_ip);
+    }
     if let Some(ip) = fabric_ip {
         spawn_env.insert("MENTAT_FABRIC_IP".into(), ip);
     }
@@ -1392,9 +1473,11 @@ fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
             .filter(|a| a.owner == client_id && !matches!(a.state, ActorState::Dead { .. }))
             .map(|a| a.id.clone())
             .collect();
+        let now = crate::state::now_ms_u64();
         for pg in st.pgs.values_mut() {
-            if pg.owner == client_id {
+            if pg.owner == client_id && pg.state != PgState::Removed {
                 pg.state = PgState::Removed;
+                pg.removed_ms = Some(now);
             }
         }
         if !ids.is_empty() {
@@ -1762,29 +1845,34 @@ fn agent_conn(
         unreachable!()
     };
 
-    let node_ip = if node_ip.is_empty() {
-        // An agent that claimed nothing is on the node of whichever daemon
-        // it reached. That is this one whenever the connection arrived on an
-        // address this box owns, loopback among them: a container told to
-        // reach its own daemon by the box's LAN address is still on this
-        // box, and filing it under that address would put its GPUs on a node
-        // beside this one.
-        let mine = crate::announce::all_local_addrs();
+    let (node_ip, node_id) = {
         let st = shared.st.lock().unwrap();
-        if crate::state::is_loopback(&peer_ip) || mine.contains(&peer_ip) {
-            st.node_ip.clone()
+        if node_ip.is_empty() {
+            // An agent that claimed nothing is on the box it connected
+            // from. That is this one whenever the connection arrived on an
+            // address this box owns, loopback among them: a container told
+            // to reach its own daemon by the box's LAN address is still on
+            // this box. Otherwise it is whichever box in the mesh owns the
+            // source address, under that box's own name, so a container on
+            // a peer box needs no MENTAT_NODE_IP whatever link it came in
+            // on. An address no box claims names a node of its own.
+            let mine = crate::announce::all_local_addrs();
+            if crate::state::is_loopback(&peer_ip) || mine.contains(&peer_ip) {
+                (st.node_ip.clone(), st.node_id.clone())
+            } else if let Some(p) = st
+                .peers
+                .values()
+                .find(|p| p.node_ip == peer_ip || p.addrs.contains(&peer_ip))
+            {
+                (p.node_ip.clone(), p.node_id.clone())
+            } else {
+                (peer_ip.clone(), node_id_for(&peer_ip))
+            }
+        } else if node_ip == st.node_ip {
+            (node_ip, st.node_id.clone())
         } else {
-            peer_ip.clone()
-        }
-    } else {
-        node_ip
-    };
-    let node_id = {
-        let st = shared.st.lock().unwrap();
-        if node_ip == st.node_ip {
-            st.node_id.clone()
-        } else {
-            node_id_for(&node_ip)
+            let id = node_id_for(&node_ip);
+            (node_ip, id)
         }
     };
     // A container claiming an address that belongs to a box the mesh files
@@ -1846,6 +1934,7 @@ fn agent_conn(
                 alive: true,
                 lost_at_ms: None,
                 degraded: false,
+                gone_since_ms: None,
                 seq,
             },
         );
@@ -2206,7 +2295,9 @@ fn agent_conn(
     if owned {
         let group = if let Some(a) = st.agents.get_mut(&agent_id) {
             a.alive = false;
-            a.lost_at_ms = Some(crate::state::now_ms_u64());
+            let now = crate::state::now_ms_u64();
+            a.lost_at_ms = Some(now);
+            a.gone_since_ms = Some(now);
             a.degraded = false;
             a.group.clone()
         } else {
@@ -2223,7 +2314,7 @@ fn agent_conn(
 
 #[cfg(test)]
 mod tests {
-    use super::{misfiled, sweep_dead_actors};
+    use super::{misfiled, sweep_history};
     use crate::state::{ActorInfo, ActorState, ClientInfo, State};
 
     fn state_with(owner: &str, at_ms: u64) -> State {
@@ -2267,7 +2358,7 @@ mod tests {
     #[test]
     fn a_dead_actor_goes_once_its_driver_has() {
         let mut st = state_with("driver-1", 0);
-        sweep_dead_actors(&mut st);
+        sweep_history(&mut st);
         assert!(st.actors.is_empty());
     }
 
@@ -2276,7 +2367,7 @@ mod tests {
     #[test]
     fn a_dead_actor_stays_while_its_driver_is_connected() {
         let mut st = with_driver(state_with("driver-1", 0), "driver-1");
-        sweep_dead_actors(&mut st);
+        sweep_history(&mut st);
         assert_eq!(st.actors.len(), 1);
     }
 
@@ -2286,7 +2377,7 @@ mod tests {
     #[test]
     fn a_recent_death_survives_a_daemon_restart() {
         let mut st = state_with("driver-1", crate::state::now_ms_u64());
-        sweep_dead_actors(&mut st);
+        sweep_history(&mut st);
         assert_eq!(st.actors.len(), 1);
     }
 

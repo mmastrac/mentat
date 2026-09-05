@@ -180,9 +180,16 @@ empty or false for daemons that predate it.
 daemon never probes a peer whose hello did not set it, so an older peer
 receives no frame it would log as unknown.
 
-Links are keep-first: if a live link to that `node_id` exists, the new one is
-refused. Two daemons dialing each other under different addresses would
-otherwise churn links.
+One link per `node_id`. When two exist, the one dialed by the lower node id
+is kept and the other closed, which both ends can decide alike from who
+dialed and both ids. Two daemons dialing each other at once would otherwise
+churn links.
+
+A daemon dials `MENTAT_PEERS` and every `control_addr` its live peers
+publish under `peers` in their status pushes. A peer that cannot be reached
+at its seed address is dialed at each address it last announced, on the
+seed's port. `addrs`, `addr_tags` and `addr_ifaces` are taken from the hello
+and refreshed from every status push.
 
 The head is the lowest node id currently visible, after a hold-down.
 
@@ -205,9 +212,11 @@ result reports that table's preference. Reachability is therefore a property
 of an address pair.
 
 One probe per (own address × peer address) pair, every
-`MENTAT_PROBE_INTERVAL_MS`, bounded by `MENTAT_PROBE_TIMEOUT_MS`. Results are
-published per peer under `probes` in `/status` (see "HTTP"). A pair with no
-entry has not been tried.
+`MENTAT_PROBE_INTERVAL_MS`, bounded by `MENTAT_PROBE_TIMEOUT_MS`, peers in
+parallel. Results are published per peer under `probes` in `/status` (see
+"HTTP"). A pair with no entry has not been tried. A row whose local address
+this box has lost, or whose remote address is missing from the peer's
+current list, is dropped after the round.
 
 ## Host messages
 
@@ -330,7 +339,8 @@ A consumer picks one address per node, in this order:
 3. `link_ip`, then the rest of `addrs`, then `node_ip`.
 
 One watch per `node_id`. A node with two links broadcasts on both, and the
-datagrams differ only in source address.
+datagrams differ only in source address; the address not watched is kept as
+an alternate for when the watched one stops answering.
 
 ### Resolving a port-announced service
 

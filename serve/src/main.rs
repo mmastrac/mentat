@@ -21,11 +21,12 @@ mod logfmt;
 mod mcp;
 mod proxy;
 mod secret;
+mod testnet;
 mod tokens;
 mod ui;
 mod ws;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -226,6 +227,35 @@ pub struct DaemonView {
     pub status: Option<Value>,
     pub seen: Option<Instant>,
     pub error: Option<String>,
+    /// The daemon's own id, once a poll has answered.
+    pub node_id: Option<String>,
+    /// Named in MENTAT_DAEMONS. Watched for the life of the process.
+    pub seed: bool,
+}
+
+impl DaemonView {
+    fn empty(seed: bool) -> DaemonView {
+        DaemonView {
+            status: None,
+            seen: None,
+            error: None,
+            node_id: None,
+            seed,
+        }
+    }
+}
+
+/// One node's watch: the address being polled and the others it is known
+/// by, which the watcher falls through to when the polled one stops
+/// answering.
+///
+/// A node has as many addresses as links, and each source of discovery
+/// hands over whichever it saw. Watching every one of them polls a daemon
+/// once per link and lists it that many times, so a node is watched on one
+/// address and remembers the rest.
+pub struct NodeWatch {
+    pub addr: String,
+    pub alternates: BTreeSet<String>,
 }
 
 pub struct ProbeResult {
@@ -259,6 +289,8 @@ pub struct Shared {
     /// One entry per daemon HTTP address being watched.
     pub daemons: Mutex<HashMap<String, DaemonView>>,
     pub watched: Mutex<HashSet<String>>,
+    /// node_id -> the watch that owns it. See `NodeWatch`.
+    pub nodes: Mutex<HashMap<String, NodeWatch>>,
     /// group -> latest endpoint probe. Present only for probe candidates
     /// (openai announced, actors running).
     pub probes: Mutex<HashMap<String, ProbeResult>>,
@@ -318,14 +350,13 @@ pub struct GroupEntry {
     /// from the agent whose endpoint won, since it describes the engine
     /// behind that endpoint. Empty when the container did not say.
     pub provider: String,
-    /// Whether any live agent offers GPUs, which is what makes the group a
-    /// placement target: its engine then runs inside actors mentat spawned,
-    /// and their state says something about whether it is up.
-    ///
-    /// A group whose agents offer none had nothing placed -- a single-rank
-    /// engine registered by `python -m ray.register` -- so mentat knows
-    /// nothing about it beyond the endpoint, and the probe is the whole
-    /// test.
+    /// Whether the group has actor rows, running or dead. An engine that
+    /// runs inside actors mentat spawned has its ranks' state to answer
+    /// for it: an endpoint that outlives every rank still answers `/models`
+    /// from a process whose ranks are gone. A group with no rows had
+    /// nothing placed, whether it registered with GPUs a ray driver never
+    /// used or with none through `python -m ray.register`, so the probe is
+    /// the whole test.
     pub placed: bool,
 }
 
@@ -499,10 +530,9 @@ pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
                 .flatten()
                 .filter(|a| a["alive"].as_bool().unwrap_or(false))
                 .collect();
-            let running = g["actors"]
-                .as_array()
-                .into_iter()
-                .flatten()
+            let actors = g["actors"].as_array().into_iter().flatten();
+            let placed = g["actors"].as_array().is_some_and(|a| !a.is_empty());
+            let running = actors
                 .filter(|a| a["state"].as_str() == Some("running"))
                 .count();
             let resolve = |a: &Value, svc: &str| {
@@ -544,7 +574,7 @@ pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
                 openai,
                 mcp,
                 provider,
-                placed: agents.iter().any(|a| a["gpus"].as_u64().unwrap_or(0) > 0),
+                placed,
             };
             let replace = match out.get(name) {
                 None => true,
@@ -674,8 +704,8 @@ pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<Value>, String> 
     }
     // Only where actors are how the engine runs. An endpoint that outlives
     // every rank still answers /models from a process whose ranks are gone,
-    // and this catches it. A group that never had actors would fail this
-    // gate forever.
+    // and this catches it. A group that never had actors has no rank state
+    // to consult.
     if e.placed && e.running == 0 {
         return Err("no running actors".into());
     }
@@ -797,6 +827,11 @@ pub fn status_view(shared: &Shared) -> Value {
                     "connected": v.status.is_some(),
                     "age_s": v.seen.map(|s| s.elapsed().as_secs()),
                     "error": v.error,
+                    "node_id": v.node_id,
+                    "seed": v.seed,
+                    "alternates": v.node_id.as_ref().and_then(|id| {
+                        shared.nodes.lock().unwrap().get(id).map(|w| w.alternates.clone())
+                    }),
                 }),
             )
         })
@@ -844,7 +879,20 @@ pub fn status_view(shared: &Shared) -> Value {
 // Daemon watchers and the endpoint prober
 // ---------------------------------------------------------------------------
 
-pub fn ensure_watched(shared: &Arc<Shared>, addr: String) {
+/// Watch a daemon at `addr`, with `others` to fall back to before the
+/// first answer, best first.
+pub fn ensure_watched(shared: &Arc<Shared>, addr: String, others: Vec<String>) {
+    // An address already remembered as another way to reach a watched node
+    // needs no watch of its own.
+    if shared
+        .nodes
+        .lock()
+        .unwrap()
+        .values()
+        .any(|w| w.alternates.contains(&addr))
+    {
+        return;
+    }
     {
         let mut w = shared.watched.lock().unwrap();
         if !w.insert(addr.clone()) {
@@ -853,46 +901,264 @@ pub fn ensure_watched(shared: &Arc<Shared>, addr: String) {
     }
     log("daemon_watch", &[("daemon", addr.clone())]);
     let shared = shared.clone();
-    tokio::spawn(async move { watch_daemon(shared, addr).await });
+    tokio::spawn(async move { watch_daemon(shared, addr, others).await });
 }
 
 /// Hold one daemon fresh: poll /status, and keep a /events WebSocket open so
 /// any cluster event (an actor dying, an agent registering) triggers an
 /// immediate re-read instead of waiting out the poll interval.
-async fn watch_daemon(shared: Arc<Shared>, addr: String) {
+///
+/// The first answer names the node. If another watch already owns that
+/// node and is fresh, this one hands its address over as an alternate and
+/// stops: one node, one poll. When the polled address stops answering, the
+/// alternates are tried and the watch moves to whichever answers, which is
+/// how a router follows a node whose fabric link dropped onto its LAN
+/// address. An address no seed named, that has answered nothing for
+/// `model_ttl` and that no live daemon lists as a peer, is forgotten.
+async fn watch_daemon(shared: Arc<Shared>, mut addr: String, others: Vec<String>) {
+    let seed = shared.cfg.daemons.contains(&addr);
+    let mut node: Option<String> = None;
+    let mut failing_since: Option<Instant> = None;
+    // Addresses to try before the node has answered on any. A discovered
+    // peer arrives with several, and the best-ranked one may be on a link
+    // this box cannot use.
+    let mut untried: std::collections::VecDeque<String> =
+        others.into_iter().filter(|o| *o != addr).collect();
+    shared
+        .daemons
+        .lock()
+        .unwrap()
+        .entry(addr.clone())
+        .or_insert_with(|| DaemonView::empty(seed));
     loop {
-        poll_status(&shared, &addr).await;
-        match ws::EventStream::connect(&addr).await {
-            Ok(mut es) => loop {
-                match es.next(shared.cfg.poll_interval).await {
-                    Ok(Some(_event)) => {
-                        // Coalesce a burst (boot emits many events at once)
-                        // into one re-read.
-                        while let Ok(Some(_)) = es.next(Duration::from_millis(200)).await {}
-                        poll_status(&shared, &addr).await;
-                    }
-                    Ok(None) => poll_status(&shared, &addr).await,
-                    Err(e) => {
+        match poll_status(&shared, &addr).await {
+            Some(id) => {
+                failing_since = None;
+                if node.as_deref() != Some(id.as_str()) {
+                    if !claim_node(&shared, &id, &addr) {
                         log(
-                            "daemon_events_lost",
-                            &[("daemon", addr.clone()), ("error", e.to_string())],
+                            "daemon_watch_merged",
+                            &[("daemon", addr.clone()), ("node", id.clone())],
                         );
-                        break;
+                        drop_watch(&shared, &addr);
+                        return;
+                    }
+                    if let Some(w) = shared.nodes.lock().unwrap().get_mut(&id) {
+                        w.alternates.extend(untried.drain(..));
+                    }
+                    node = Some(id);
+                }
+                match ws::EventStream::connect(&testnet::mapped(&addr)).await {
+                    Ok(mut es) => loop {
+                        match es.next(shared.cfg.poll_interval).await {
+                            Ok(Some(_event)) => {
+                                // Coalesce a burst (boot emits many events
+                                // at once) into one re-read.
+                                while let Ok(Some(_)) = es.next(Duration::from_millis(200)).await {}
+                                if poll_status(&shared, &addr).await.is_none() {
+                                    break;
+                                }
+                            }
+                            Ok(None) => {
+                                if poll_status(&shared, &addr).await.is_none() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                log(
+                                    "daemon_events_lost",
+                                    &[("daemon", addr.clone()), ("error", e.to_string())],
+                                );
+                                break;
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        let mut d = shared.daemons.lock().unwrap();
+                        let v = d
+                            .entry(addr.clone())
+                            .or_insert_with(|| DaemonView::empty(seed));
+                        v.error = Some(format!("/events: {e}"));
                     }
                 }
-            },
-            Err(e) => {
-                let mut d = shared.daemons.lock().unwrap();
-                let v = d.entry(addr.clone()).or_insert(DaemonView {
-                    status: None,
-                    seen: None,
-                    error: None,
-                });
-                v.error = Some(format!("/events: {e}"));
+            }
+            None => {
+                let since = *failing_since.get_or_insert_with(Instant::now);
+                if node.is_none() {
+                    if let Some(next) = untried.pop_front() {
+                        log(
+                            "daemon_watch_moved",
+                            &[
+                                ("node", String::new()),
+                                ("from", addr.clone()),
+                                ("to", next.clone()),
+                            ],
+                        );
+                        drop_watch(&shared, &addr);
+                        shared.watched.lock().unwrap().insert(next.clone());
+                        shared
+                            .daemons
+                            .lock()
+                            .unwrap()
+                            .insert(next.clone(), DaemonView::empty(seed));
+                        untried.push_back(addr);
+                        addr = next;
+                        continue;
+                    }
+                }
+                if let Some(id) = &node {
+                    if let Some(next) = try_alternates(&shared, id, &addr).await {
+                        log(
+                            "daemon_watch_moved",
+                            &[
+                                ("node", id.clone()),
+                                ("from", addr.clone()),
+                                ("to", next.clone()),
+                            ],
+                        );
+                        move_watch(&shared, id, &addr, &next);
+                        addr = next;
+                        failing_since = None;
+                        continue;
+                    }
+                }
+                if !seed
+                    && since.elapsed() > shared.cfg.model_ttl
+                    && !published_alive(&shared, node.as_deref(), &addr)
+                {
+                    log(
+                        "daemon_forgotten",
+                        &[
+                            ("daemon", addr.clone()),
+                            ("node", node.clone().unwrap_or_default()),
+                            ("after_s", shared.cfg.model_ttl.as_secs().to_string()),
+                        ],
+                    );
+                    drop_watch(&shared, &addr);
+                    if let Some(id) = &node {
+                        shared.nodes.lock().unwrap().remove(id);
+                    }
+                    return;
+                }
             }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+}
+
+/// Take a node for this watch. False when another fresh watch holds it, in
+/// which case this address becomes one of its alternates.
+fn claim_node(shared: &Shared, id: &str, addr: &str) -> bool {
+    let mut nodes = shared.nodes.lock().unwrap();
+    match nodes.get_mut(id) {
+        None => {
+            nodes.insert(
+                id.to_string(),
+                NodeWatch {
+                    addr: addr.to_string(),
+                    alternates: BTreeSet::new(),
+                },
+            );
+            true
+        }
+        Some(w) if w.addr == addr => true,
+        Some(w) => {
+            let stale = shared.cfg.poll_interval * 3;
+            let fresh = shared
+                .daemons
+                .lock()
+                .unwrap()
+                .get(&w.addr)
+                .and_then(|v| v.seen)
+                .is_some_and(|s| s.elapsed() <= stale);
+            if fresh {
+                w.alternates.insert(addr.to_string());
+                false
+            } else {
+                // The holder has gone quiet and this address answers, so
+                // this watch takes over and the old address joins the
+                // alternates.
+                let old = std::mem::replace(&mut w.addr, addr.to_string());
+                w.alternates.remove(addr);
+                w.alternates.insert(old.clone());
+                drop(nodes);
+                drop_watch(shared, &old);
+                true
+            }
+        }
+    }
+}
+
+/// Poll each alternate of a node once. The first that answers as that node
+/// is the new address.
+async fn try_alternates(shared: &Arc<Shared>, id: &str, current: &str) -> Option<String> {
+    let alts: Vec<String> = shared
+        .nodes
+        .lock()
+        .unwrap()
+        .get(id)
+        .map(|w| {
+            w.alternates
+                .iter()
+                .filter(|a| *a != current)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    for alt in alts {
+        if poll_status(shared, &alt).await.as_deref() == Some(id) {
+            return Some(alt);
+        }
+    }
+    None
+}
+
+fn move_watch(shared: &Shared, id: &str, from: &str, to: &str) {
+    if let Some(w) = shared.nodes.lock().unwrap().get_mut(id) {
+        w.addr = to.to_string();
+        w.alternates.remove(to);
+        w.alternates.insert(from.to_string());
+    }
+    let mut d = shared.daemons.lock().unwrap();
+    d.remove(from);
+    let mut w = shared.watched.lock().unwrap();
+    w.remove(from);
+    w.insert(to.to_string());
+}
+
+fn drop_watch(shared: &Shared, addr: &str) {
+    shared.daemons.lock().unwrap().remove(addr);
+    shared.watched.lock().unwrap().remove(addr);
+}
+
+/// Whether any fresh daemon view still lists this node, or this address,
+/// as a live peer. A daemon its peers can see is unreachable from here
+/// rather than gone, and is kept.
+fn published_alive(shared: &Shared, node: Option<&str>, addr: &str) -> bool {
+    let stale = shared.cfg.poll_interval * 3;
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+    let daemons = shared.daemons.lock().unwrap();
+    daemons.values().any(|v| {
+        let fresh = v.seen.is_some_and(|s| s.elapsed() <= stale);
+        let Some(snap) = v.status.as_ref().filter(|_| fresh) else {
+            return false;
+        };
+        snap["peers"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .any(|(id, p)| {
+                p["alive"].as_bool().unwrap_or(false)
+                    && (Some(id.as_str()) == node
+                        || p["node_ip"].as_str() == Some(host)
+                        || p["link_ip"].as_str() == Some(host)
+                        || p["addrs"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|a| a.as_str() == Some(host)))
+            })
+    })
 }
 
 /// Listen for the daemons' UDP announcements. An announcement is a hint: it
@@ -949,10 +1215,6 @@ async fn udp_listener(shared: Arc<Shared>) {
     // Sources whose advertised address has already been reported as
     // unroutable-looking, so the note lands once rather than every round.
     let mut noted: HashSet<String> = HashSet::new();
-    // node_id -> the address chosen for it. A dual-homed daemon broadcasts on
-    // every interface, so without this the same node is watched once per
-    // link.
-    let mut chosen: HashMap<String, String> = HashMap::new();
     let universe = secret::universe();
     let mut buf = [0u8; 2048];
     loop {
@@ -1065,12 +1327,7 @@ async fn udp_listener(shared: Arc<Shared>) {
             }
             continue;
         }
-        // One watch per node. A node with two links broadcasts on both, and
-        // the datagrams differ only in source address.
         let node = v["node_id"].as_str().unwrap_or_default().to_string();
-        if !node.is_empty() && chosen.contains_key(&node) {
-            continue;
-        }
         // The node ranks its own addresses, most preferred first, because
         // only it knows which link is the fast one. Take the best it offers
         // that lands on a subnet we are attached to. Failing that, the
@@ -1107,10 +1364,32 @@ async fn udp_listener(shared: Arc<Shared>) {
                 ],
             );
         }
-        if !node.is_empty() {
-            chosen.insert(node, pick.clone());
+        // One watch per node. A node with two links broadcasts on both, and
+        // the datagrams differ only in source address. A watched node
+        // learns the other address as an alternate.
+        let target = format!("{pick}:{http_port}");
+        let watched = !node.is_empty()
+            && shared
+                .nodes
+                .lock()
+                .unwrap()
+                .get_mut(&node)
+                .map(|w| {
+                    if w.addr != target {
+                        w.alternates.insert(target.clone());
+                    }
+                    true
+                })
+                .unwrap_or(false);
+        if !watched {
+            let others: Vec<String> = ranked
+                .iter()
+                .filter(|a| prefix_allowed(&shared.cfg.allowed_sources, a))
+                .map(|a| format!("{a}:{http_port}"))
+                .chain(std::iter::once(format!("{src_ip}:{http_port}")))
+                .collect();
+            ensure_watched(&shared, target, others);
         }
-        ensure_watched(&shared, format!("{pick}:{http_port}"));
     }
 }
 
@@ -1165,14 +1444,14 @@ fn announce_address(
         .unwrap_or_else(|| src_ip.to_string())
 }
 
-/// Which address to reach a peer on, given what a daemon reports about it.
+/// The addresses a daemon reports for a peer, best first, and the best one.
 ///
 /// Candidates run in order of evidence: link_ip carried the mesh link, addrs
 /// is what the peer says it answers on, node_ip is only the name it calls
 /// itself. An address on one of our own subnets beats that order outright,
 /// since the pair's cluster identity is a subnet a LAN-only box cannot route
-/// to. Old daemons report neither link_ip nor addrs, leaving node_ip.
-fn peer_address(p: &Value, subnets: &[(u32, u32)]) -> Option<String> {
+/// to.
+fn peer_addresses(p: &Value, subnets: &[(u32, u32)]) -> (Option<String>, Vec<String>) {
     let mut cands: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     let mut push = |v: Option<&str>| {
@@ -1187,53 +1466,88 @@ fn peer_address(p: &Value, subnets: &[(u32, u32)]) -> Option<String> {
         push(a.as_str());
     }
     push(p["node_ip"].as_str());
-    cands
+    // Loopback is the source of a link from a daemon on this box, and
+    // names the reporting box rather than the peer. It goes last: the
+    // right answer only when router, reporter and peer share one box.
+    let lo = |c: &String| c.starts_with("127.") || c == "::1";
+    cands.sort_by_key(lo);
+    let best = cands
         .iter()
-        .find(|c| on_local_subnet(c, subnets))
+        .find(|c| on_local_subnet(c, subnets) && !lo(c))
+        .or_else(|| cands.iter().find(|c| !lo(c)))
         .or_else(|| cands.first())
-        .cloned()
+        .cloned();
+    (best, cands)
 }
 
-async fn poll_status(shared: &Arc<Shared>, addr: &str) {
-    let url = format!("http://{addr}/status");
+/// One /status read. Returns the daemon's node id on success.
+async fn poll_status(shared: &Arc<Shared>, addr: &str) -> Option<String> {
+    let url = format!("http://{}/status", testnet::mapped(addr));
     match http_get_json(&shared.client, &url, Duration::from_secs(5)).await {
         Ok(snap) => {
+            let node_id = snap["node_id"].as_str().map(str::to_string);
             if shared.cfg.discover_peers {
                 // Membership follows the mesh: every peer entry carries its
                 // HTTP address (PeerHello inbound, PeerHelloOk outbound), so
-                // one seed daemon reveals the rest. http_port 0 means the
-                // peer daemon predates the PeerHelloOk address echo.
+                // one seed daemon reveals the rest.
                 let subnets = local_subnets();
-                for (_, p) in snap["peers"].as_object().into_iter().flatten() {
+                for (id, p) in snap["peers"].as_object().into_iter().flatten() {
                     let Some(port) = p["http_port"].as_u64() else {
                         continue;
                     };
-                    if port == 0 {
+                    if port == 0 || !p["alive"].as_bool().unwrap_or(false) {
                         continue;
                     }
-                    if let Some(ip) = peer_address(p, &subnets) {
-                        ensure_watched(shared, format!("{ip}:{port}"));
+                    // A node already watched learns this as another
+                    // address. An unwatched one gets a watch.
+                    let (best, all) = peer_addresses(p, &subnets);
+                    let mut nodes = shared.nodes.lock().unwrap();
+                    match nodes.get_mut(id) {
+                        Some(w) => {
+                            for a in all {
+                                let a = format!("{a}:{port}");
+                                if a != w.addr {
+                                    w.alternates.insert(a);
+                                }
+                            }
+                        }
+                        None => {
+                            drop(nodes);
+                            if let Some(ip) = best {
+                                ensure_watched(
+                                    shared,
+                                    format!("{ip}:{port}"),
+                                    all.iter().map(|a| format!("{a}:{port}")).collect(),
+                                );
+                            }
+                        }
                     }
                 }
             }
-            shared.daemons.lock().unwrap().insert(
+            let mut d = shared.daemons.lock().unwrap();
+            let seed = d.get(addr).map(|v| v.seed).unwrap_or(false);
+            d.insert(
                 addr.to_string(),
                 DaemonView {
                     status: Some(snap),
                     seen: Some(Instant::now()),
                     error: None,
+                    node_id: node_id.clone(),
+                    seed,
                 },
             );
+            drop(d);
             shared.refresh.notify_one();
+            node_id
         }
         Err(e) => {
-            let mut d = shared.daemons.lock().unwrap();
-            let v = d.entry(addr.to_string()).or_insert(DaemonView {
-                status: None,
-                seen: None,
-                error: None,
-            });
-            v.error = Some(e);
+            // Only a watched address keeps a row. An alternate that was
+            // tried and failed is not being watched, and a row for it
+            // would list a daemon nobody polls.
+            if let Some(v) = shared.daemons.lock().unwrap().get_mut(addr) {
+                v.error = Some(e);
+            }
+            None
         }
     }
 }
@@ -1547,6 +1861,7 @@ async fn main() {
         started: Instant::now(),
         client: HttpClients::new(),
         daemons: Mutex::new(HashMap::new()),
+        nodes: Mutex::new(HashMap::new()),
         watched: Mutex::new(HashSet::new()),
         probes: Mutex::new(HashMap::new()),
         live: Mutex::new(HashMap::new()),
@@ -1565,7 +1880,7 @@ async fn main() {
         ],
     );
     for d in shared.cfg.daemons.clone() {
-        ensure_watched(&shared, d);
+        ensure_watched(&shared, d, Vec::new());
     }
     {
         let shared = shared.clone();
@@ -1799,7 +2114,7 @@ mod tests {
             "addrs": ["10.100.0.1", "192.168.1.11"],
         });
         assert_eq!(
-            peer_address(&p, &subnets()).as_deref(),
+            peer_addresses(&p, &subnets()).0.as_deref(),
             Some("192.168.1.11")
         );
     }
@@ -1813,7 +2128,10 @@ mod tests {
             "link_ip": "172.16.4.4",
             "addrs": ["172.16.9.9"],
         });
-        assert_eq!(peer_address(&p, &subnets()).as_deref(), Some("172.16.4.4"));
+        assert_eq!(
+            peer_addresses(&p, &subnets()).0.as_deref(),
+            Some("172.16.4.4")
+        );
     }
 
     /// The reported gap: a client reading /v1/models through the router got
@@ -2186,9 +2504,24 @@ mod tests {
     fn an_old_daemon_reports_node_ip_alone() {
         let p = serde_json::json!({"node_ip": "192.168.1.11"});
         assert_eq!(
-            peer_address(&p, &subnets()).as_deref(),
+            peer_addresses(&p, &subnets()).0.as_deref(),
             Some("192.168.1.11")
         );
-        assert_eq!(peer_address(&serde_json::json!({}), &subnets()), None);
+        assert_eq!(peer_addresses(&serde_json::json!({}), &subnets()).0, None);
+    }
+
+    /// A daemon on this box reaches its peers from loopback, and the peer
+    /// reports that as the link address. It names this box, and watching
+    /// it would poll the local daemon under the peer's name.
+    #[test]
+    fn a_loopback_link_address_is_not_the_peer() {
+        let p = serde_json::json!({
+            "node_ip": "192.168.1.77",
+            "link_ip": "127.0.0.1",
+            "addrs": ["10.100.0.2", "192.168.1.77"],
+        });
+        let (best, all) = peer_addresses(&p, &subnets());
+        assert_eq!(best.as_deref(), Some("192.168.1.77"));
+        assert_eq!(all.last().map(String::as_str), Some("127.0.0.1"), "{all:?}");
     }
 }

@@ -1,15 +1,16 @@
-# mentatd: the host-level daemon, one per node. Deploy with a per-node .env
-# setting MENTAT_NODE_IP and MENTAT_PEERS:
+# mentatd: the host-level daemon, one per node. Deploy with one .env for the
+# fleet:
 #
-#   MENTAT_NODE_IP=10.0.0.1
-#   MENTAT_PEERS=10.0.0.2:6379,10.0.0.3:6379
+#   MENTAT_PEERS=10.0.0.1:6379
+#   MENTAT_ANNOUNCE_IFACES=en*f*np*=connectx+rdma,en*=lan
 #
-# MENTAT_NODE_IP is this node's cluster identity: the address the driver sees
-# itself on, which on a multi-homed node is the fabric address that matches
-# VLLM_HOST_IP in the model containers. Left empty, the daemon takes the
-# default route's address, which on a multi-homed node breaks the driver-node
-# match. The mesh dedupes peers by node id, so a peer may be dialed on any of
-# its addresses.
+# One MENTAT_PEERS entry that reaches any live daemon is enough: the mesh is
+# learned from it, a peer is dialed on any of its addresses, and the entry
+# naming this daemon itself is skipped. MENTAT_NODE_IP is this node's
+# cluster identity and defaults to the default route's address, which is the
+# LAN on these boxes. Set it only when that is the wrong link. Containers
+# need no address: the daemon files each under the box it connected from and
+# hands every rank its node's address.
 #
 # MENTAT_ANNOUNCE_IFACES lets the daemons probe which links are cabled
 # together and hand each rank MENTAT_FABRIC_IP, which retires the per-node
@@ -44,6 +45,7 @@ services:
       - MENTAT_ELECTION_HOLD_DOWN_MS=${MENTAT_ELECTION_HOLD_DOWN_MS:-}
       - MENTAT_PEER_STATUS_INTERVAL_MS=${MENTAT_PEER_STATUS_INTERVAL_MS:-}
       - MENTAT_SLOW_CALL_WARN_MS=${MENTAT_SLOW_CALL_WARN_MS:-}
+      - MENTAT_HISTORY_KEEP_MS=${MENTAT_HISTORY_KEEP_MS:-}
       - MENTAT_SESSION_REAP_GRACE_MS=${MENTAT_SESSION_REAP_GRACE_MS:-}
       - MENTAT_TCP_DEAD_AFTER_MS=${MENTAT_TCP_DEAD_AFTER_MS:-}
       # UDP self-announcement for mentatd-serve discovery. Empty = broadcast

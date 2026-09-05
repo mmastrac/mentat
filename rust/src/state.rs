@@ -74,7 +74,7 @@ pub enum ActorState {
     Running,
     /// `at_ms` is when this daemon recorded the death, which the agent
     /// give-up path puts a degrade window after the process actually went.
-    /// It is what `sweep_dead_actors` ages.
+    /// It is what `sweep_history` ages.
     Dead {
         reason: String,
         at_ms: u64,
@@ -129,6 +129,10 @@ pub struct AgentInfo {
     pub lost_at_ms: Option<u64>,
     /// The degrade event has been emitted for the current outage.
     pub degraded: bool,
+    /// When the link went, kept through the give-up so the row can be aged
+    /// out. None while connected. `lost_at_ms` is cleared at give-up, since
+    /// it drives the degrade window, and this one is not.
+    pub gone_since_ms: Option<u64>,
     /// Registration order; placement uses it for deterministic bundle order.
     pub seq: u64,
 }
@@ -169,6 +173,8 @@ pub struct PgInfo {
     /// Why the last placement attempt did not fit, kept so the pending
     /// timeout can name the constraint rather than guess at it.
     pub pending_reason: Option<String>,
+    /// When the group became Removed, which is what `sweep_history` ages.
+    pub removed_ms: Option<u64>,
 }
 
 pub enum RefState {
@@ -247,6 +253,8 @@ pub type ProbeTable =
 
 pub struct PeerInfo {
     pub node_id: NodeId,
+    /// This daemon dialed the link that is up. See mesh::register_peer.
+    pub outbound: bool,
     pub node_ip: String,
     /// The address this link actually uses: the socket's peer address
     /// inbound, the address we dialed outbound. node_ip is what the peer
@@ -272,6 +280,9 @@ pub struct PeerInfo {
     pub writer: FrameWriter,
     pub alive: bool,
     pub last_seen_ms: u64,
+    /// When the link was declared gone. 0 while alive. A dead row is kept
+    /// this long past it for an operator to see, then dropped.
+    pub dead_since_ms: u64,
     /// The staleness warning has fired for the current silence.
     pub stale: bool,
     pub last_status: Value,
@@ -287,6 +298,9 @@ pub struct State {
     pub http_port: u16,
     /// Mesh view. Key is the peer's node_id.
     pub peers: HashMap<NodeId, PeerInfo>,
+    /// Control addresses a connector thread is dialing: the seed list plus
+    /// whatever discovery added. One connector per address.
+    pub dialing: std::collections::BTreeSet<String>,
     /// Fabric islands and the nodes that claim one, committed after the
     /// island hold-down. A group none of whose nodes are tagged is placed
     /// without the constraint, so a deployment that has not opted in keeps
@@ -334,6 +348,7 @@ impl State {
             head_generation: 0,
             fabrics: crate::island::Fabrics::default(),
             peers: HashMap::new(),
+            dialing: std::collections::BTreeSet::new(),
             node_id,
             node_ip,
             hostname,

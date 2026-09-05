@@ -31,12 +31,20 @@ reach.
 
 ### Discovery
 
-The router builds a watch set of daemon HTTP addresses from three sources:
-UDP announcements on `MENTAT_ANNOUNCE_PORT`, the `MENTAT_DAEMONS` seed list,
-and the mesh membership each watched daemon reports. Each watched daemon is
+The router builds a watch set of daemons from three sources: UDP
+announcements on `MENTAT_ANNOUNCE_PORT`, the `MENTAT_DAEMONS` seed list, and
+the mesh membership each watched daemon reports. Each watched daemon is
 polled on `/status` every `POLL_INTERVAL_S` with its `/events` WebSocket
 held open, so a cluster event re-reads at once. A burst of events coalesces
 into one re-read.
+
+A daemon is watched on one address however many it is known by. The first
+answer names the node, a second address that answers as the same node is
+kept as an alternate rather than polled, and when the polled address stops
+answering the watch moves to an alternate that does. A watch no seed named,
+that has answered nothing for `MODEL_TTL_S` and that no live daemon lists as
+a peer, is forgotten. `/status.json` lists each watch with its `node_id`
+and `alternates`.
 
 An announcement is a hint. It adds one address to watch. Every claim in it
 is re-read over TCP and probed before it affects routing. The datagram's
@@ -55,12 +63,12 @@ and that endpoint answers a `/models` probe. The probe is also where model
 names come from: whatever the engine lists under `/v1/models` is what routes
 to it. Nothing announces model names.
 
-A group whose agents offer GPUs must also have a running actor. Offering GPUs
-is what makes a group a placement target, so its engine runs inside actors
-mentat spawned and their state says something: an endpoint that outlives every
-rank still answers `/models` from a process whose ranks are gone. A group whose
-agents offer none had nothing placed -- a single-rank engine registered by
-`python -m ray.register` -- so the probe is the whole test.
+A group with actor rows must also have a running one. An engine that runs
+inside actors mentat spawned has its ranks' state to answer for it: an
+endpoint that outlives every rank still answers `/models` from a process
+whose ranks are gone. A group with no rows had nothing placed, whether it
+ran `ray start` without asking for a placement or registered through
+`python -m ray.register`, so the probe is the whole test.
 
 An engine is admitted as soon as its API answers, which on some models is
 during its self-test.
@@ -73,12 +81,11 @@ tried and appends the agent's own bind finding when there is one.
 
 ### Retirement
 
-A daemon never says a group is over. It keeps the agent and actor rows of a
-container that is long gone, so a model removed from a compose file stays in
-every snapshot until that daemon restarts.
-
-The router therefore keeps its own clock per group, starting when the group
-is first seen and reset by every round the group can serve. After
+A daemon drops the agent and actor rows of a container that is long gone
+after its `MENTAT_HISTORY_KEEP_MS`, and a group with no rows left is gone
+from its snapshots. The router keeps its own clock per group as well,
+starting when the group is first seen and reset by every round the group
+can serve. After
 `MODEL_TTL_S` with no such round the group is retired: it leaves
 `/v1/models`, `/status.json`, the status page and the routes, and
 `group_retired` is logged once with the last reason it could not serve.
@@ -351,9 +358,10 @@ positive number. Anything else takes the default.
 
 - `MODEL_TTL_S` (default 3600)
 
-  How long a group stays listed while nothing it announces can serve. See
-  "Retirement". The default sits out a reboot, a weight reload or a fabric
-  outage without a model disappearing mid-repair.
+  How long a group stays listed while nothing it announces can serve, and
+  how long a daemon no seed named is watched while it answers nothing. See
+  "Retirement" and "Discovery". The default sits out a reboot, a weight
+  reload or a fabric outage without a model disappearing mid-repair.
 
 - `MENTAT_SECRET` (default: unset)
 

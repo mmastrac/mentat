@@ -18,20 +18,22 @@ def get_node_ip_address():
 
     MENTAT_FABRIC_IP wins. The daemon sets it per rank when it placed this
     group on a probed fabric, so it names the address that carries NCCL for
-    these particular ranks. MENTAT_NODE_IP comes next: the container's own
-    idea of its address, which is right on a single-fabric box and a guess
-    anywhere else.
+    these particular ranks. MENTAT_NODE_IP comes next. The daemon sets that
+    per rank too, to the identity of the node it filed the agent under, so
+    every rank answers with an address its peers can dial without the
+    container carrying one. A value set in the container's own environment
+    reaches the rank the same way and is the operator pinning the answer.
 
     Only those two are read. An engine's own address setting names what that
     engine binds, chosen for its own reasons, and is routinely the fabric
-    address while the node is known by another. An operator pinning this
-    answer sets MENTAT_NODE_IP.
+    address while the node is known by another.
 
-    With none of them set, the address that reaches this daemon is the
-    answer, since that is the link this container is already talking over.
-    Asking the route with no daemon to aim at would answer with whichever
-    interface reaches the public internet, which on a multi-homed box is the
-    one link that must not carry NCCL, so that case raises instead.
+    With neither set, which is the driver outside any actor, the address
+    that reaches this daemon is the answer, since that is the link this
+    process is already talking over. Asking the route with no daemon to aim
+    at would answer with whichever interface reaches the public internet,
+    which on a multi-homed box is the one link that must not carry NCCL, so
+    that case raises instead.
     """
     for var in ("MENTAT_FABRIC_IP", "MENTAT_NODE_IP"):
         v = os.environ.get(var)

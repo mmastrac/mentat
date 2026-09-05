@@ -21,6 +21,7 @@ mod proto;
 mod secret;
 mod state;
 mod status;
+mod testnet;
 
 use std::io::BufReader;
 use std::net::TcpStream;

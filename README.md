@@ -11,7 +11,9 @@ is unchanged: vLLM's workers exchange data over its own MessageQueue and NCCL,
 and after boot the only recurring Ray call is `ray.wait` every 5 seconds.
 
 Registration retries forever, so daemons and containers can start in any
-order. Both binaries are static executables.
+order. One `MENTAT_PEERS` entry that reaches any live daemon joins the whole
+mesh, and a container needs no address of its own: the daemon files it under
+the box it connected from. Both binaries are static executables.
 
 ## Components
 

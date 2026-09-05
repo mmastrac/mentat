@@ -44,6 +44,18 @@ twice means two groups. A second driver in one group is rejected at
 The driver and every agent of a group must reach the same daemon. Rendezvous
 follows `RAY_ADDRESS`. The mesh carries observability and head election.
 
+### Mesh
+
+Each daemon dials the addresses in `MENTAT_PEERS` and every daemon those
+peers publish in their status pushes, so one entry that reaches any live
+daemon joins the whole mesh. A peer is dialed by its seed address first and
+then by every other address it announces, on the same port, so a pair seeded
+over a fabric address stays linked over the LAN while the cable is out. A
+peer's address list is refreshed from its status pushes, so a renumbered or
+newly cabled link reaches the probes and the islands without a relink. Two
+daemons that dial each other at once keep the link the lower node id
+dialed.
+
 ### Placement
 
 A placement group of N single-GPU bundles takes N single-GPU agents or fewer
@@ -71,9 +83,12 @@ A driver session ending reaps its group's actors and placement groups after
 
 A dead actor keeps its row in `/status`, which is what turns a later call on
 it into `RayActorError` carrying the reason it died. Only its owner can make
-that call, so once the owner is gone the row is history: after
-`MENTAT_ACTOR_KEEP_MS` it is dropped, along with any refs left pointing at
-it, and `actors_swept` says how many went.
+that call, so once the owner is gone the row is history. History ages out:
+after `MENTAT_HISTORY_KEEP_MS` a dead actor whose owner is gone, a removed
+placement group whose owner is gone, an agent whose link is down and a dead
+mesh peer are all dropped, and `history_swept` and `peer_forgotten` say what
+went. A group is whatever agents and actors mention it, so a model taken out
+of a compose file leaves every snapshot on its own.
 
 ### Head election
 
@@ -217,9 +232,11 @@ exec vllm serve ...
 It offers no GPUs. An agent with none is never chosen for a bundle, which is
 what keeps a placement from arriving somewhere with nothing to host it. What
 it announces is an endpoint and nothing else. A box whose GPUs should be
-placeable runs `mentatd start` instead. mentatd-serve applies its actor gate
-only to groups that offer GPUs, so a group registered this way is admitted on
-its endpoint probe alone.
+placeable runs `mentatd start` instead, and that works for a single-rank
+engine too: mentatd-serve applies its actor gate only to groups that have
+actor rows, so a group that never asked for a placement is admitted on its
+endpoint probe alone either way. This module is for an image with no `ray`
+shim at all.
 
 `MENTAT_NODE_IP` is usually better left unset here: an agent that claims no
 address is filed under the daemon's own node when it connected from that box,
@@ -284,8 +301,6 @@ Export before `ray start`:
 export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
 export RAY_ADDRESS=10.0.0.1:6379      # the same daemon for driver and every agent
 export MENTAT_GROUP=mymodel           # one per model deployment
-export MENTAT_NODE_IP=10.0.0.1        # this rank's cluster address
-
 ray start --address=$RAY_ADDRESS      # detaches; the agent runs beside vllm
 ray status | grep -oE '[0-9.]+/[0-9.]+ GPU' | cut -d/ -f2 | cut -d. -f1
 vllm serve ... --distributed-executor-backend ray -tp 2
@@ -294,9 +309,10 @@ vllm serve ... --distributed-executor-backend ray -tp 2
 `ray status` prints exactly one line matching that regex, scoped to the
 group, so a `GPU >= TP` gate keeps working.
 
-`MENTAT_NODE_IP` is per rank and per container. A wrong value hangs at NCCL
-rendezvous, and one naming an address another node is known by is refused at
-register. "Fabrics" covers letting the daemon choose it.
+`MENTAT_NODE_IP` is per rank and per container, and is best left unset: the
+daemon files each container under the box it connected from and hands every
+rank its node's address. A wrong value hangs at NCCL rendezvous, and one
+naming an address another node is known by is refused at register.
 
 ### Workarounds to delete
 
@@ -353,8 +369,10 @@ this link into a fabric. Probing decides whether the claim holds.
 Each daemon opens one TCP connection per (own address × peer address) pair,
 with the source address bound, every `MENTAT_PROBE_INTERVAL_MS`. Binding the
 source is what makes the result describe the cabling rather than the routing
-table. A pair that fails logs `fabric_addr_unverified` once and stays out of
-placement.
+table. Peers are probed concurrently. A pair that fails logs
+`fabric_addr_unverified` once and stays out of placement. Rows for an
+address this box has lost, or one missing from the peer's current list, are
+dropped after the round.
 
 Compare the result against the patch panel:
 
@@ -384,22 +402,31 @@ The constraint applies per group: a group none of whose nodes carry an
 `rdma` tag is placed as before. Tagging one pair leaves a deployment on an
 untagged pair unchanged.
 
-Within a tagged pair, a deployment opts in by removing `MENTAT_NODE_IP` from
-its environment. The shim's `ray.util.get_node_ip_address()` resolves
-`MENTAT_FABRIC_IP`, then `MENTAT_NODE_IP`, so a hand-set node address always
-wins. No engine's own address variable is read: that names what the engine
-binds, chosen for its own reasons.
+Nothing else opts in. Each rank of a group placed on an island is spawned
+with `MENTAT_FABRIC_IP`, and the shim's `ray.util.get_node_ip_address()`
+resolves `MENTAT_FABRIC_IP`, then `MENTAT_NODE_IP`, which the daemon also
+sets per rank to the node's identity. No engine's own address variable is
+read: that names what the engine binds, chosen for its own reasons.
 
 `MENTAT_ISLAND_PLACEMENT=off` on a daemon places multi-bundle groups without
 the constraint. It is for a cluster whose probes disagree with its cabling.
 
 ### Node identity
 
-Islands are derived over node ids, and an agent joins its node by
-`MENTAT_NODE_IP`. A container that reaches its daemon over loopback claims no
-identity and takes the daemon's own, so it needs no setting. A container
-reaching its daemon across the network must set `MENTAT_NODE_IP` to the
-daemon's value.
+Islands are derived over node ids, and an agent joins its node by the box it
+is on. A container that reaches its daemon over loopback, or over any
+address of the daemon's own box, claims no identity and takes the daemon's.
+A container reaching a daemon on another box is filed under whichever box in
+the mesh owns the address it connected from, so it needs no setting either,
+whatever link it came in on. Only a container on a box no daemon runs on is
+a node of its own, named by its source address. `MENTAT_NODE_IP` on a
+container overrides all of this and is refused when it names an address of
+a box the mesh knows under another name.
+
+Each actor is spawned with `MENTAT_NODE_IP` set to its node's identity, so
+the shim's `get_node_ip_address()` answers the same on every rank with no
+setting in the container. A fabric address, when placement chose one, sits
+above it.
 
 ### Named placements
 
@@ -433,7 +460,11 @@ process start.
 
 - `MENTAT_PEERS` (default: empty)
 
-  Comma-separated control addresses of the other daemons.
+  Comma-separated control addresses of other daemons. One that reaches any
+  live daemon is enough: the rest of the mesh is learned from it. A seed is
+  dialed for the life of the process. A daemon learned from a peer stops
+  being dialed once it has been down for `MENTAT_HISTORY_KEEP_MS` and no
+  live peer lists it.
 
 - `MENTAT_ANNOUNCE_PORT` (default 6382)
 
@@ -525,12 +556,15 @@ process start.
   dead, which resolves their `run()` refs and restarts the driver. The gap
   between this and the degrade threshold allows for short outages.
 
-- `MENTAT_ACTOR_KEEP_MS` (default 3600000)
+- `MENTAT_HISTORY_KEEP_MS` (default 600000)
 
-  How long a dead actor's row is kept once its owner is gone. The age is
-  counted from the death rather than from the owner leaving, so a daemon
-  restart, which rebuilds the table before any driver reconnects, does not
-  erase reasons the drivers have yet to ask for.
+  How long a record nobody can act on stays in the tables for an operator
+  to read: a dead actor or removed placement group whose owner is gone, an
+  agent whose link has been down past `MENTAT_AGENT_DEAD_AFTER_MS`, a mesh
+  peer that has been dead. The age is counted from the event rather than
+  from the owner leaving, so a daemon restart, which rebuilds the table
+  before any driver reconnects, does not erase reasons the drivers have yet
+  to ask for.
 
 - `MENTAT_PEER_STALE_AFTER_MS` (default 30000)
 
@@ -540,8 +574,9 @@ process start.
 
   How long a mesh peer may be silent before `node_leave` fires and its link
   closes. The connector keeps re-dialing it. A dead peer keeps its row in
-  `/status` until the same node rejoins under a different node id, which
-  happens when its identity address changes.
+  `/status` for `MENTAT_HISTORY_KEEP_MS`, or until the same box rejoins
+  under a different node id, which happens when its identity address
+  changes.
 
 - `MENTAT_PEER_STATUS_INTERVAL_MS` (default 2000)
 
@@ -588,12 +623,11 @@ process start.
   The group this container belongs to. Read by the agent, the shim and the
   `status` command.
 
-- `MENTAT_NODE_IP` (default: the local address toward the daemon, unless
-  that is loopback)
+- `MENTAT_NODE_IP` (default: unset)
 
-  The node this agent belongs to, matched against the daemon's
-  `MENTAT_NODE_IP`. A container that reaches its daemon over loopback claims
-  no identity and takes the daemon's own.
+  The node this agent belongs to. Leave it unset: the daemon files the agent
+  under the box it connected from. See "Node identity". Set it only for a
+  container on a box no daemon runs on.
 
 - `CONTAINER_NAME` (default: the hostname)
 
@@ -711,6 +745,10 @@ Log lines are `key=value` pairs. Lines to know:
 - `object_store_flag_ignored` when `--object-store-memory` was passed.
 - `bad_env_ms` and `bad_env_flag` when a variable did not parse.
 - `announce_off` when `MENTAT_ANNOUNCE_PORT=0`.
+- `peer_discovered`, `peer_link_replaced`, `peer_addrs_changed` and
+  `peer_forgotten` as the mesh learns, settles, follows and drops peers.
+- `history_swept` with the counts of actors, placement groups, agents and
+  refs dropped.
 
 ## Limits
 

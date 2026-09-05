@@ -69,6 +69,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                     "container": a.container,
                     "alive": a.alive,
                     "degraded": a.degraded,
+                    "gone_since_ms": a.gone_since_ms,
                     "gpus": a.gpus.len(),
                     "gpus_free": st.free_gpus_of(&a.id).len(),
                     "gpu_vendor": a.gpu_vendor,
@@ -187,6 +188,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
                     "alive": p.alive,
                     "stale": p.stale,
                     "last_seen_ms": p.last_seen_ms,
+                    "dead_since_ms": p.dead_since_ms,
                     "groups": peer_groups,
                 }),
             )

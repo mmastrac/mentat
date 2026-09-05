@@ -286,7 +286,9 @@ fn selected_ifaces() -> Vec<Iface> {
 /// node using this and no MENTAT_ANNOUNCE_ADDR still announces where it
 /// always did.
 fn announced_override() -> Option<Vec<(String, Vec<String>)>> {
-    let raw = std::env::var("MENTAT_ANNOUNCE_ADDRS").unwrap_or_default();
+    let raw = crate::testnet::load()
+        .and_then(|n| n.announce())
+        .unwrap_or_else(|| std::env::var("MENTAT_ANNOUNCE_ADDRS").unwrap_or_default());
     let spec = parse_spec(&raw);
     if spec.is_empty() {
         return None;

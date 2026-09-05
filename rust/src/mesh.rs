@@ -9,7 +9,7 @@
 //! moving it onto the elected head is a later phase, on purpose.
 
 use std::io::BufReader;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -22,8 +22,11 @@ use crate::state::{is_loopback, now_ms_u64, FrameWriter, PairProbe, PeerInfo, Sh
 
 pub fn start(shared: SharedRef, seeds: Vec<String>, control_port: u16, http_port: u16) {
     for seed in seeds {
+        dial(&shared, seed, control_port, http_port, false);
+    }
+    {
         let shared = shared.clone();
-        std::thread::spawn(move || connector(shared, seed, control_port, http_port));
+        std::thread::spawn(move || discoverer(shared, control_port, http_port));
     }
     {
         let shared = shared.clone();
@@ -40,13 +43,71 @@ pub fn start(shared: SharedRef, seeds: Vec<String>, control_port: u16, http_port
     std::thread::spawn(move || status_pusher(shared));
 }
 
-/// Keep one link to a seed alive. A peer may be dialed by a different address
+/// Start a connector for one control address, unless one is already
+/// running for it.
+fn dial(shared: &SharedRef, target: String, control_port: u16, http_port: u16, discovered: bool) {
+    if !shared.st.lock().unwrap().dialing.insert(target.clone()) {
+        return;
+    }
+    if discovered {
+        log("peer_discovered", &[("control", target.clone())]);
+    }
+    let shared = shared.clone();
+    std::thread::spawn(move || connector(shared, target, control_port, http_port, discovered));
+}
+
+/// Dial the peers this daemon was never told about.
+///
+/// Every peer publishes its own peer table in its status pushes, control
+/// addresses included, so one seed reveals the rest of the mesh. Without
+/// this the mesh is only as connected as the seed lists, and a hub that
+/// goes down leaves the nodes that listed only it unable to see each
+/// other: each elects itself head, and each derives islands from half the
+/// probes.
+fn discoverer(shared: SharedRef, control_port: u16, http_port: u16) {
+    loop {
+        std::thread::sleep(Duration::from_secs(5));
+        let targets: Vec<String> = {
+            let st = shared.st.lock().unwrap();
+            let mut out = Vec::new();
+            for p in st.peers.values().filter(|p| p.alive) {
+                for (id, q) in p.last_status["peers"].as_object().into_iter().flatten() {
+                    if *id == st.node_id || st.peers.get(id).is_some_and(|x| x.alive) {
+                        continue;
+                    }
+                    if !q["alive"].as_bool().unwrap_or(false) {
+                        continue;
+                    }
+                    if let Some(addr) = q["control_addr"].as_str().filter(|a| !a.is_empty()) {
+                        out.push(addr.to_string());
+                    }
+                }
+            }
+            out
+        };
+        for t in targets {
+            dial(&shared, t, control_port, http_port, true);
+        }
+    }
+}
+
+/// Keep one link to a peer alive. A peer may be dialed by a different address
 /// than it announces (the pair talks over the QSFP subnet, n3 over the
 /// LAN), so "already covered" is judged by the node id learned on first
 /// contact, never by comparing address strings.
-fn connector(shared: SharedRef, seed: String, control_port: u16, http_port: u16) {
+///
+/// The seed is dialed first and every other address the peer was last seen
+/// with after it, on the seed's port. A peer seeded by its fabric address
+/// is otherwise lost to the mesh for as long as that cable is out, with the
+/// LAN between the two boxes carrying nothing.
+///
+/// A discovered target, one no seed list named, stops being dialed once its
+/// node has been forgotten and no live peer publishes it any more. A seed
+/// is dialed for the life of the process.
+fn connector(shared: SharedRef, seed: String, control_port: u16, http_port: u16, discovered: bool) {
     let mut attempt: u64 = 0;
     let mut known_id: Option<String> = None;
+    let mut uncovered_since: Option<Instant> = None;
     loop {
         let covered = {
             let st = shared.st.lock().unwrap();
@@ -55,30 +116,84 @@ fn connector(shared: SharedRef, seed: String, control_port: u16, http_port: u16)
                 None => st.peers.values().any(|p| p.alive && p.control_addr == seed),
             }
         };
-        if !covered {
-            attempt += 1;
-            match try_connect(&shared, &seed, control_port, http_port) {
-                Ok(peer_id) => {
-                    if let Some(id) = peer_id {
-                        known_id = Some(id);
-                    }
+        if covered {
+            uncovered_since = None;
+        } else {
+            let since = *uncovered_since.get_or_insert_with(Instant::now);
+            if discovered && since.elapsed() > Duration::from_millis(cfg().history_keep_ms) {
+                let published = {
+                    let st = shared.st.lock().unwrap();
+                    st.peers.values().filter(|p| p.alive).any(|p| {
+                        p.last_status["peers"]
+                            .as_object()
+                            .into_iter()
+                            .flatten()
+                            .any(|(_, q)| q["control_addr"].as_str() == Some(seed.as_str()))
+                    })
+                };
+                if !published {
+                    log("peer_dial_stopped", &[("control", seed.clone())]);
+                    shared.st.lock().unwrap().dialing.remove(&seed);
+                    return;
                 }
-                Err(e) => {
-                    if attempt % 20 == 1 {
-                        log(
-                            "peer_connect_retry",
-                            &[
-                                ("seed", seed.clone()),
-                                ("attempt", attempt.to_string()),
-                                ("error", e.to_string()),
-                            ],
-                        );
+            }
+            attempt += 1;
+            let mut last_err: Option<std::io::Error> = None;
+            for target in dial_targets(&shared, &seed, known_id.as_deref()) {
+                match try_connect(&shared, &target, control_port, http_port) {
+                    Ok(peer_id) => {
+                        if let Some(id) = peer_id {
+                            known_id = Some(id);
+                        }
+                        last_err = None;
+                        break;
                     }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            if let Some(e) = last_err {
+                if attempt % 20 == 1 {
+                    log(
+                        "peer_connect_retry",
+                        &[
+                            ("seed", seed.clone()),
+                            ("attempt", attempt.to_string()),
+                            ("error", e.to_string()),
+                        ],
+                    );
                 }
             }
         }
         std::thread::sleep(Duration::from_secs(3));
     }
+}
+
+/// The addresses to try for one seed, the seed first. The rest are every
+/// address the peer node last announced, on the seed's port, whether the
+/// node is known by id or only by having been dialed at this seed before.
+fn dial_targets(shared: &SharedRef, seed: &str, known_id: Option<&str>) -> Vec<String> {
+    let mut out = vec![seed.to_string()];
+    let (host, port) = match seed.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.to_string()),
+        None => return out,
+    };
+    let st = shared.st.lock().unwrap();
+    let peer = match known_id {
+        Some(id) => st.peers.get(id),
+        None => st
+            .peers
+            .values()
+            .find(|p| p.control_addr == seed || p.addrs.contains(&host)),
+    };
+    if let Some(p) = peer {
+        for a in p.addrs.iter().filter(|a| !is_loopback(a)) {
+            let t = format!("{a}:{port}");
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
 }
 
 /// Returns the peer's node id on contact (whether or not this link was kept).
@@ -88,7 +203,30 @@ fn try_connect(
     control_port: u16,
     http_port: u16,
 ) -> std::io::Result<Option<String>> {
-    let stream = TcpStream::connect(seed)?;
+    // A dropped SYN would otherwise hold this connector for the kernel's
+    // retry schedule, minutes during which the peer's other addresses go
+    // untried.
+    let dial = match crate::testnet::load() {
+        Some(net) => {
+            let host = seed.rsplit_once(':').map(|(h, _)| h).unwrap_or(seed);
+            if !net.link_up(&crate::announce::local_addrs(), host) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    format!("{host} is cut (MENTAT_TEST_NET)"),
+                ));
+            }
+            net.real(host).unwrap_or_else(|| seed.to_string())
+        }
+        None => seed.to_string(),
+    };
+    let addr = dial
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no address"))?;
+    let stream = TcpStream::connect_timeout(
+        &addr,
+        Duration::from_millis(cfg().probe_timeout_ms.max(500)),
+    )?;
     set_keepalive(&stream);
     let writer = FrameWriter::new(stream.try_clone()?);
     let mut reader = BufReader::new(stream);
@@ -172,6 +310,7 @@ fn try_connect(
         shared,
         PeerIdent {
             node_id: peer_id.clone(),
+            outbound: true,
             node_ip: peer_ip,
             link_ip,
             addrs: peer_addrs,
@@ -242,6 +381,7 @@ pub fn accept_peer(
         &shared,
         PeerIdent {
             node_id: node_id.clone(),
+            outbound: false,
             node_ip,
             link_ip,
             addrs,
@@ -258,12 +398,11 @@ pub fn accept_peer(
     peer_loop(&shared, reader, writer, node_id);
 }
 
-/// Keep-first semantics: an alive existing link wins and the new one is
-/// refused (returns false). Replacing a healthy link would let two daemons
-/// that dial each other under different addresses churn links forever.
 /// What a peer says about itself in its hello, plus what the link observed.
 struct PeerIdent {
     node_id: String,
+    /// This daemon dialed the link. The other side accepted it.
+    outbound: bool,
     node_ip: String,
     link_ip: String,
     addrs: Vec<String>,
@@ -290,9 +429,20 @@ fn same_box(arriving: &[String], existing: &[String]) -> bool {
         .any(|a| existing.contains(a))
 }
 
+/// Record a link to a peer, or refuse it. Returns whether the caller now
+/// owns the link.
+///
+/// Two daemons that dial each other at once produce two links, and each
+/// side must keep the same one or the other is closed under its owner and
+/// the mesh churns a node_leave at every boot. The rule is that the link
+/// dialed by the lower node id wins, which both sides can evaluate from
+/// what they know: who dialed, and both ids. An arriving link that loses is
+/// refused. One that wins replaces the old link and closes it, quietly,
+/// since the node itself never went anywhere.
 fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool {
     let PeerIdent {
         node_id,
+        outbound,
         node_ip,
         link_ip,
         addrs,
@@ -303,16 +453,29 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
         http_port,
     } = p;
     let mut st = shared.st.lock().unwrap();
+    let my_id = st.node_id.clone();
+    let dialer = |outbound: bool| if outbound { &my_id } else { &node_id };
     if let Some(old) = st.peers.get(&node_id) {
         if old.alive {
-            return false;
+            if dialer(outbound) >= dialer(old.outbound) {
+                return false;
+            }
+            log(
+                "peer_link_replaced",
+                &[
+                    ("peer", node_id.clone()),
+                    (
+                        "kept",
+                        if outbound { "outbound" } else { "inbound" }.to_string(),
+                    ),
+                ],
+            );
+            old.writer.shutdown();
         }
     }
     // A dead entry for this same box under an identity it has stopped
-    // using is dropped here. Nothing else removes a peer, so it would sit
-    // in /status for the life of the process as a node that never came
-    // back. Only dead entries go: two live links to one box is a different
-    // situation, and keep-first above already settles it.
+    // using is dropped here. Only dead entries go: two live links to one
+    // box is a different situation, and the tie-break above settles it.
     let superseded: Vec<String> = st
         .peers
         .values()
@@ -324,18 +487,20 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
         log("peer_superseded", &[("peer", old), ("by", node_id.clone())]);
     }
 
-    // A relink keeps the probed pairs. They describe cabling, which a
-    // dropped control link says nothing about, and discarding them would
-    // leave placement blind until the next probe round.
-    let probe_pairs = st
+    // A relink keeps the probed pairs and the last snapshot. The pairs
+    // describe cabling, which a dropped control link says nothing about,
+    // and discarding them would leave placement blind until the next probe
+    // round.
+    let (probe_pairs, last_status, was_alive) = st
         .peers
         .get(&node_id)
-        .map(|p| p.probe_pairs.clone())
+        .map(|p| (p.probe_pairs.clone(), p.last_status.clone(), p.alive))
         .unwrap_or_default();
     st.peers.insert(
         node_id.clone(),
         PeerInfo {
             node_id: node_id.clone(),
+            outbound,
             node_ip: node_ip.clone(),
             link_ip,
             addrs,
@@ -348,11 +513,14 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
             writer,
             alive: true,
             last_seen_ms: now_ms_u64(),
+            dead_since_ms: 0,
             stale: false,
-            last_status: serde_json::Value::Null,
+            last_status,
         },
     );
-    st.emit("node_join", json!({ "peer": node_id, "peer_ip": node_ip }));
+    if !was_alive {
+        st.emit("node_join", json!({ "peer": node_id, "peer_ip": node_ip }));
+    }
     shared.cv.notify_all();
     true
 }
@@ -379,6 +547,31 @@ fn peer_loop(
             Msg::PeerStatus { data } => {
                 let mut st = shared.st.lock().unwrap();
                 if let Some(p) = st.peers.get_mut(&peer_id) {
+                    // The hello said what the peer answered on when the
+                    // link came up. The push says what it answers on now,
+                    // and a renumbered or newly cabled address reaches the
+                    // prober and the islands only through this.
+                    let addrs = str_list(&data["addrs"]);
+                    if !addrs.is_empty() && addrs != p.addrs {
+                        log(
+                            "peer_addrs_changed",
+                            &[
+                                ("peer", peer_id.clone()),
+                                ("from", p.addrs.join(",")),
+                                ("to", addrs.join(",")),
+                            ],
+                        );
+                        p.addrs = addrs;
+                    }
+                    if let Some(t) = data["addr_tags"].as_object() {
+                        p.addr_tags = t.iter().map(|(k, v)| (k.clone(), str_list(v))).collect();
+                    }
+                    if let Some(t) = data["addr_ifaces"].as_object() {
+                        p.addr_ifaces = t
+                            .iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect();
+                    }
                     p.last_status = data;
                     p.last_seen_ms = now_ms_u64();
                     if p.stale {
@@ -418,6 +611,7 @@ fn peer_loop(
     if owned {
         if let Some(p) = st.peers.get_mut(&peer_id) {
             p.alive = false;
+            p.dead_since_ms = now_ms_u64();
         }
         st.emit(
             "node_leave",
@@ -425,6 +619,15 @@ fn peer_loop(
         );
     }
     shared.cv.notify_all();
+}
+
+fn str_list(v: &serde_json::Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.as_str())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The mesh analog of the agent degrade window: a peer that stops sending
@@ -435,10 +638,34 @@ fn peer_loop(
 fn staleness_sweeper(shared: SharedRef) {
     let stale_after = cfg().peer_stale_after_ms;
     let dead_after = cfg().peer_dead_after_ms;
+    let keep = cfg().history_keep_ms;
     loop {
         std::thread::sleep(Duration::from_millis(200));
         let now = now_ms_u64();
+        // The pretend network's cables: a link riding a cut one is closed
+        // here, since nothing else on one box would close it.
+        let cut_links: Vec<String> = match crate::testnet::load() {
+            Some(net) => {
+                let locals = crate::announce::local_addrs();
+                let st = shared.st.lock().unwrap();
+                st.peers
+                    .values()
+                    .filter(|p| p.alive && p.outbound && !net.link_up(&locals, &p.link_ip))
+                    .map(|p| p.node_id.clone())
+                    .collect()
+            }
+            None => Vec::new(),
+        };
         let mut st = shared.st.lock().unwrap();
+        for id in cut_links {
+            if let Some(p) = st.peers.get(&id) {
+                log(
+                    "peer_link_cut",
+                    &[("peer", id.clone()), ("link_ip", p.link_ip.clone())],
+                );
+                p.writer.shutdown();
+            }
+        }
         let mut gone: Vec<(String, u64)> = Vec::new();
         for p in st.peers.values_mut() {
             if !p.alive {
@@ -447,6 +674,7 @@ fn staleness_sweeper(shared: SharedRef) {
             let silent = now.saturating_sub(p.last_seen_ms);
             if silent >= dead_after {
                 p.alive = false;
+                p.dead_since_ms = now;
                 p.writer.shutdown();
                 gone.push((p.node_id.clone(), silent));
             } else if silent >= stale_after && !p.stale {
@@ -467,6 +695,22 @@ fn staleness_sweeper(shared: SharedRef) {
                 &[("peer", peer.clone()), ("silent_ms", silent.to_string())],
             );
             st.emit("node_leave", json!({ "peer": peer, "reason": "stale" }));
+        }
+        // A dead row is history after MENTAT_HISTORY_KEEP_MS. The connector
+        // for its seed keeps dialing regardless, so a box that comes back
+        // later joins as it did the first time.
+        let forget: Vec<String> = st
+            .peers
+            .values()
+            .filter(|p| !p.alive && now.saturating_sub(p.dead_since_ms) > keep)
+            .map(|p| p.node_id.clone())
+            .collect();
+        for id in forget {
+            st.peers.remove(&id);
+            log(
+                "peer_forgotten",
+                &[("peer", id), ("kept_ms", keep.to_string())],
+            );
         }
         if any_gone {
             shared.cv.notify_all();
@@ -555,11 +799,15 @@ fn status_pusher(shared: SharedRef) {
 /// pin its source address would report the routing table's preference and
 /// call it topology.
 ///
-/// Pairs are probed one at a time, so a round costs up to
-/// MENTAT_PROBE_TIMEOUT_MS per failing pair and the effective cadence is
-/// whichever is longer. A cluster with a dead fabric therefore refreshes its
-/// table more slowly than one with a live one, which the question being
-/// asked can afford.
+/// Peers are probed concurrently, one thread each, and a peer's pairs one
+/// after another. A pair with no route between a fabric address and a LAN
+/// address fails only at the timeout, and a five-node cluster has enough of
+/// those that probing them in one line would take longer than the interval.
+///
+/// After a round, rows for addresses out of play are dropped: a local
+/// address this box has lost, or a remote one missing from the peer's
+/// current list. A row that is never re-probed keeps whatever it last said,
+/// and a stale `ok` would put a cable on the map that was unplugged.
 fn prober(shared: SharedRef) {
     let interval = Duration::from_millis(cfg().probe_interval_ms.max(200));
     let timeout = Duration::from_millis(cfg().probe_timeout_ms.max(50));
@@ -581,58 +829,94 @@ fn prober(shared: SharedRef) {
                 })
                 .collect()
         };
-        for (peer_id, port, remotes) in targets {
-            for local in &locals {
-                for remote in &remotes {
-                    let r = probe_pair(&my_id, &peer_id, local, remote, port, timeout);
-                    let now = now_ms_u64();
-                    let mut st = shared.st.lock().unwrap();
-                    let Some(p) = st.peers.get_mut(&peer_id) else {
-                        continue;
-                    };
-                    let cell = p
-                        .probe_pairs
-                        .entry(local.clone())
-                        .or_default()
-                        .entry(remote.clone())
-                        .or_insert(PairProbe {
-                            ok: false,
-                            rtt_ms: 0,
-                            last_ok_ms: 0,
-                            error: String::new(),
-                        });
-                    let was = cell.ok;
-                    match r {
-                        Ok(rtt) => {
-                            cell.ok = true;
-                            cell.rtt_ms = rtt.as_millis() as u64;
-                            cell.last_ok_ms = now;
-                            cell.error.clear();
-                        }
-                        Err(e) => {
-                            cell.ok = false;
-                            cell.error = e.to_string();
-                        }
-                    }
-                    // One line per transition. The table is read from
-                    // /status, and a 15 s cadence times four pairs would
-                    // otherwise be the whole log.
-                    if was != cell.ok {
-                        log(
-                            "probe_pair",
-                            &[
-                                ("peer", peer_id.clone()),
-                                ("local", local.clone()),
-                                ("remote", remote.clone()),
-                                ("ok", cell.ok.to_string()),
-                                ("rtt_ms", cell.rtt_ms.to_string()),
-                                ("error", cell.error.clone()),
-                            ],
-                        );
-                    }
+        let workers: Vec<std::thread::JoinHandle<()>> = targets
+            .into_iter()
+            .map(|(peer_id, port, remotes)| {
+                let shared = shared.clone();
+                let my_id = my_id.clone();
+                let locals = locals.clone();
+                std::thread::spawn(move || {
+                    probe_peer(&shared, &my_id, &peer_id, port, &locals, &remotes, timeout)
+                })
+            })
+            .collect();
+        for w in workers {
+            let _ = w.join();
+        }
+    }
+}
+
+/// One round against one peer: every (local, remote) pair, then the prune.
+fn probe_peer(
+    shared: &SharedRef,
+    my_id: &str,
+    peer_id: &str,
+    port: u16,
+    locals: &[String],
+    remotes: &[String],
+    timeout: Duration,
+) {
+    for local in locals {
+        for remote in remotes {
+            let r = probe_pair(my_id, peer_id, local, remote, port, timeout);
+            let now = now_ms_u64();
+            let mut st = shared.st.lock().unwrap();
+            let Some(p) = st.peers.get_mut(peer_id) else {
+                return;
+            };
+            let cell = p
+                .probe_pairs
+                .entry(local.clone())
+                .or_default()
+                .entry(remote.clone())
+                .or_insert(PairProbe {
+                    ok: false,
+                    rtt_ms: 0,
+                    last_ok_ms: 0,
+                    error: String::new(),
+                });
+            let was = cell.ok;
+            match r {
+                Ok(rtt) => {
+                    cell.ok = true;
+                    cell.rtt_ms = rtt.as_millis() as u64;
+                    cell.last_ok_ms = now;
+                    cell.error.clear();
+                }
+                Err(e) => {
+                    cell.ok = false;
+                    cell.error = e.to_string();
                 }
             }
+            // One line per transition. The table is read from /status, and
+            // a 15 s cadence times four pairs would otherwise be the whole
+            // log.
+            if was != cell.ok {
+                log(
+                    "probe_pair",
+                    &[
+                        ("peer", peer_id.to_string()),
+                        ("local", local.clone()),
+                        ("remote", remote.clone()),
+                        ("ok", cell.ok.to_string()),
+                        ("rtt_ms", cell.rtt_ms.to_string()),
+                        ("error", cell.error.clone()),
+                    ],
+                );
+            }
         }
+    }
+    let mut st = shared.st.lock().unwrap();
+    if let Some(p) = st.peers.get_mut(peer_id) {
+        prune_pairs(&mut p.probe_pairs, locals, remotes);
+    }
+}
+
+/// Drop rows for addresses outside `locals` and `remotes`.
+fn prune_pairs(table: &mut crate::state::ProbeTable, locals: &[String], remotes: &[String]) {
+    table.retain(|local, _| locals.contains(local));
+    for row in table.values_mut() {
+        row.retain(|remote, _| remotes.contains(remote));
     }
 }
 
@@ -647,7 +931,24 @@ fn probe_pair(
     timeout: Duration,
 ) -> std::io::Result<Duration> {
     let started = Instant::now();
-    let stream = connect_from(local, remote, port, timeout)?;
+    let stream = match crate::testnet::load() {
+        Some(net) => {
+            if !net.reachable(local, remote) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    format!("{local} -> {remote} is cut (MENTAT_TEST_NET)"),
+                ));
+            }
+            let target = net
+                .real(remote)
+                .unwrap_or_else(|| format!("{remote}:{port}"));
+            let addr = target.to_socket_addrs()?.next().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "no address")
+            })?;
+            TcpStream::connect_timeout(&addr, timeout)?
+        }
+        None => connect_from(local, remote, port, timeout)?,
+    };
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     let writer = FrameWriter::new(stream.try_clone()?);

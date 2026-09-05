@@ -286,9 +286,10 @@ def t01_announcement_reaches_status():
         assert svc["mcp"] == f"http://127.0.0.1:{m.port}/mcp", svc
 
 
-def t02_no_actors_no_route_but_mcp_merged():
-    # The router is connected (its status view shows the daemon) but nothing
-    # has running actors, so nothing is routable.
+def t02_no_actors_yet_admits_on_the_probe_and_merges_mcp():
+    # No group has actors yet. Nothing was placed, so there is no rank
+    # state to gate on and the probe alone admits both: a single-rank
+    # engine that never asked ray for anything is served the same way.
     def connected():
         try:
             _, view = serve_get("/status.json")
@@ -297,12 +298,8 @@ def t02_no_actors_no_route_but_mcp_merged():
         return any(d.get("connected") for d in view["daemons"].values())
 
     wait_until(connected, 15, "mentatd-serve never connected to the daemon")
-    assert served_models() == [], served_models()
-    code, body = serve_post("/v1/chat/completions",
-                            {"model": "model-a", "messages": []})
-    assert code == 404, (code, body)
-    assert "ga" in body["not_ready"], body
-    assert "no running actors" in body["not_ready"]["ga"], body
+    wait_until(lambda: served_models() == ["model-a", "model-b"], 20,
+               "endpoints with no actors never admitted")
     # The management plane skips the health gate -- it matters most while
     # the engine is down.
     tools = {t["name"] for t in mcp({"jsonrpc": "2.0", "id": 1,
@@ -312,8 +309,10 @@ def t02_no_actors_no_route_but_mcp_merged():
 
 def t03_admit_on_running_actor():
     state["driver_a"], actor_pid = start_driver("ga")
-    wait_until(lambda: served_models() == ["model-a"], 20,
-               "model-a never admitted")
+    # ga now has actor rows, so its gate is the running one.
+    wait_until(lambda: serve_get("/status.json")[1]["groups"]["ga"]["actors_running"] == 1
+               and served_models() == ["model-a", "model-b"], 20,
+               "model-a never admitted on its running actor")
     # The pid piggyback: the daemon's actor table shows the real worker pid.
     actors = cluster.status_json()["groups"]["ga"]["actors"]
     assert [a["pid"] for a in actors] == [actor_pid], (actors, actor_pid)
@@ -710,7 +709,7 @@ def t12_an_unservable_group_is_retired_then_comes_back():
 def main():
     tests = [
         t01_announcement_reaches_status,
-        t02_no_actors_no_route_but_mcp_merged,
+        t02_no_actors_yet_admits_on_the_probe_and_merges_mcp,
         t03_admit_on_running_actor,
         t04_routing_by_model_name,
         t04b_root_level_endpoints_route,
