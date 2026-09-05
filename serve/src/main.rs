@@ -285,6 +285,9 @@ pub struct Shared {
     /// separates the two, and it does so for logs already written: a line
     /// stamped before now minus uptime came from an earlier process.
     pub started: Instant,
+    /// Announcements must be signed. Published in `/status.json` for the
+    /// same reason the daemon publishes `signing`.
+    pub verify: std::sync::atomic::AtomicBool,
     pub client: HttpClients,
     /// One entry per daemon HTTP address being watched.
     pub daemons: Mutex<HashMap<String, DaemonView>>,
@@ -869,6 +872,7 @@ pub fn status_view(shared: &Shared) -> Value {
         .collect();
     json!({
         "uptime_s": shared.started.elapsed().as_secs(),
+        "verify": shared.verify.load(std::sync::atomic::Ordering::Relaxed),
         "daemons": daemons,
         "groups": groups,
         "models": models,
@@ -1207,6 +1211,9 @@ async fn udp_listener(shared: Arc<Shared>) {
             ),
         ],
     );
+    shared
+        .verify
+        .store(key.is_some(), std::sync::atomic::Ordering::Relaxed);
     // node_id -> (boot_id, last accepted seq). Bounds replay within a boot.
     let mut seen: HashMap<String, (String, u64)> = HashMap::new();
     // Sources already complained about, so a 5s broadcast cannot flood the
@@ -1859,6 +1866,7 @@ async fn main() {
     let cfg = Config::from_env();
     let shared = Arc::new(Shared {
         started: Instant::now(),
+        verify: std::sync::atomic::AtomicBool::new(false),
         client: HttpClients::new(),
         daemons: Mutex::new(HashMap::new()),
         nodes: Mutex::new(HashMap::new()),
@@ -1891,9 +1899,16 @@ async fn main() {
         tokio::spawn(async move { udp_listener(shared).await });
     }
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", shared.cfg.port))
-        .await
-        .unwrap_or_else(|e| panic!("bind 0.0.0.0:{}: {e}", shared.cfg.port));
+    // The router is the front door, so its accept queue must not be the
+    // shallowest in the path. vLLM listens with 2048. The kernel clamps
+    // this to somaxconn.
+    let listener = (|| -> std::io::Result<tokio::net::TcpListener> {
+        let sock = tokio::net::TcpSocket::new_v4()?;
+        sock.set_reuseaddr(true)?;
+        sock.bind(std::net::SocketAddr::from(([0, 0, 0, 0], shared.cfg.port)))?;
+        sock.listen(4096)
+    })()
+    .unwrap_or_else(|e| panic!("bind 0.0.0.0:{}: {e}", shared.cfg.port));
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
             continue;

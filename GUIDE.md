@@ -461,10 +461,13 @@ process start.
 - `MENTAT_PEERS` (default: empty)
 
   Comma-separated control addresses of other daemons. One that reaches any
-  live daemon is enough: the rest of the mesh is learned from it. A seed is
-  dialed for the life of the process. A daemon learned from a peer stops
-  being dialed once it has been down for `MENTAT_HISTORY_KEEP_MS` and no
-  live peer lists it.
+  live daemon is enough: the rest of the mesh is learned from it. Seed by
+  the address a node identifies itself by, its `MENTAT_NODE_IP`. A fabric
+  address is renumbered when cables move and the seed then names a box that
+  is not there, which `peer_connect_retry` reports once a minute for as
+  long as it lasts. A seed is dialed for the life of the process. A daemon
+  learned from a peer stops being dialed once it has been down for
+  `MENTAT_HISTORY_KEEP_MS` and no live peer lists it.
 
 - `MENTAT_ANNOUNCE_PORT` (default 6382)
 
@@ -504,7 +507,11 @@ process start.
 - `MENTAT_SECRET` (default: unset)
 
   HMAC key for announcements. Set the same key on every daemon and router,
-  or on none. A keyed listener refuses unsigned announcements.
+  or on none. A keyed listener refuses unsigned announcements. Unset, the
+  mesh runs unauthenticated: `announce_signing state=off` is logged at
+  boot and `signing` in `/status` reads false. Give mentat a key of its
+  own. A key shared with another service is disclosed by whichever of them
+  is weaker.
 
 - `MENTAT_SECRET_FILE` (default: unset)
 
@@ -717,7 +724,7 @@ The daemon serves these on `--http-port`:
 
 | Path | Returns |
 | --- | --- |
-| `/status` | JSON snapshot: node, peers, islands, groups, counters. `?group=NAME` scopes it |
+| `/status` | JSON snapshot: node, `signing`, peers, islands, groups, counters. `?group=NAME` scopes it |
 | `/metrics` | Prometheus text |
 | `/events` | WebSocket: a snapshot, then one message per event |
 | `/healthz` | `ok` |

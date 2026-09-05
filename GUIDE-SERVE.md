@@ -198,7 +198,7 @@ list covers addresses the router derived for itself.
 | `POST /v1/responses/input_tokens` | A prompt token count. See "Counting tokens" |
 | `POST /mcp` | The merged MCP endpoint. See "The MCP merge" |
 | any other `POST` | Forwarded by the request's `model`, for root-level engine endpoints such as `/tokenize` |
-| `GET /`, `/healthz`, `/status.json` | Route table, per-group health and endpoints, `uptime_s` |
+| `GET /`, `/healthz`, `/status.json` | Route table, per-group health and endpoints, `uptime_s`, `verify` |
 | `GET /stats.json` | Per-model engine and router counters, for the status page |
 
 `GET /` from a browser (an `Accept` header that asks for HTML) returns the
@@ -367,7 +367,8 @@ positive number. Anything else takes the default.
 
   HMAC key for announcements. Must match the daemons'. A keyed router takes
   signed announcements only, so a half-applied rollout stops discovery until
-  the seed list finds the daemons instead.
+  the seed list finds the daemons instead. `verify` in `/status.json` says
+  whether a key is in force.
 
 - `MENTAT_SECRET_FILE` (default: unset)
 

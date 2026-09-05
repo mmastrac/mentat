@@ -79,6 +79,7 @@ pub fn start(shared: SharedRef) {
             },
         )],
     );
+    shared.st.lock().unwrap().signing = key.is_some();
     std::thread::spawn(move || run(shared, port, interval, extra, key));
 }
 

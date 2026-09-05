@@ -203,6 +203,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
         "addr_ifaces": crate::announce::local_addr_ifaces(),
         "hostname": st.hostname,
         "gcs_address": st.gcs_address,
+        "signing": st.signing,
         "head_node_id": st.head_node_id,
         "head_generation": st.head_generation,
         // Derived from probes rather than configuration: these are the sets a

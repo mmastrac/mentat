@@ -296,6 +296,9 @@ pub struct State {
     /// This daemon's own HTTP side-port, echoed on PeerHelloOk so the
     /// dialing side records full membership.
     pub http_port: u16,
+    /// Announcements are signed. Published in `/status`, since a box built
+    /// by someone else says nothing about its key after boot.
+    pub signing: bool,
     /// Mesh view. Key is the peer's node_id.
     pub peers: HashMap<NodeId, PeerInfo>,
     /// Control addresses a connector thread is dialing: the seed list plus
@@ -354,6 +357,7 @@ impl State {
             hostname,
             gcs_address,
             http_port: 0,
+            signing: false,
             agents: HashMap::new(),
             actors: HashMap::new(),
             pgs: HashMap::new(),
