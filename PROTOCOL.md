@@ -34,7 +34,7 @@ The header is a JSON object:
 Unsolicited messages use 0. Remaining fields are the message's own.
 
 Unknown fields are ignored, and fields marked `#[serde(default)]` in
-`rust/src/proto.rs` may be absent. Adding an optional field is
+`rust/mentatd/src/proto.rs` may be absent. Adding an optional field is
 compatible in both directions. Removing one or changing a type breaks
 older peers.
 

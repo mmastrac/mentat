@@ -1,0 +1,5 @@
+rust/target/
+python/build/
+python/*.egg-info/
+**/__pycache__/
+.git/

@@ -23,18 +23,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import mentat_testlib as tl  # noqa: E402
-from mentat_testlib import Cluster, Daemon, free_port, run_ok  # noqa: E402
-
-SERVE_RUST = os.path.join(tl.ROOT, "serve")
-SERVE_BINARY = os.environ.get("MENTAT_SERVE_TEST_BINARY") or os.path.join(
-    SERVE_RUST, "target", "debug", "mentatd-serve"
+from mentat_testlib import (  # noqa: E402
+    SERVE_BINARY,
+    Cluster,
+    Daemon,
+    build_serve,
+    free_port,
+    run_ok,
 )
-
-
-def build_serve():
-    if not os.environ.get("MENTAT_SERVE_TEST_BINARY"):
-        subprocess.run(["cargo", "build"], cwd=SERVE_RUST, check=True)
-    assert os.path.exists(SERVE_BINARY), SERVE_BINARY
 
 
 class FakeModel:

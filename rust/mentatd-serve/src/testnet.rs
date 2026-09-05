@@ -1,4 +1,4 @@
-//! The router's half of the pretend network in `rust/src/testnet.rs`. Only
+//! The router's half of the pretend network in `mentatd/src/testnet.rs`. Only
 //! `addrs` and `down` are read. The host is swapped and the port kept,
 //! since every daemon in a test binds every address on its own ports.
 //! Unset, addresses are dialed as written.

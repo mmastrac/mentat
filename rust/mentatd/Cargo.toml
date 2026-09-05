@@ -1,0 +1,19 @@
+[package]
+name = "mentatd"
+description = "Minimal Ray replacement for vLLM multi-node serving"
+readme = "../../README.md"
+keywords = ["vllm", "ray", "inference", "cluster", "daemon"]
+categories = ["command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+getifaddrs.workspace = true
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"

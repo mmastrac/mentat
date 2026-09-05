@@ -10,8 +10,7 @@
 #       The host-level daemon container (see mentatd.yaml).
 #
 #   --target serve      ->  mentatd-serve:<ver>
-#       The router (see mentatd-serve.yaml). Its own crate under serve/ --
-#       tokio + hyper stay out of the daemon build on purpose.
+#       The router (see mentatd-serve.yaml).
 #
 #   --target all        ->  mentat:<ver>
 #       Both binaries in one image, so `mentatd serve` resolves.
@@ -29,26 +28,19 @@ ARG RUST_IMAGE=rust:1-alpine
 ARG RUNTIME_IMAGE=alpine:3
 
 FROM ${RUST_IMAGE} AS build
-# musl-dev carries the libc the linker needs. The crate itself is
-# std + serde + clap + hmac, so nothing else is required.
+# musl-dev carries the libc the linker needs.
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY rust/ /src/
 # --locked would need a committed Cargo.lock from the same cargo major; the
 # assertions after the build are what actually gate the output.
-RUN cargo build --release \
-    && ./target/release/mentatd --version \
-    && ! ldd target/release/mentatd 2>/dev/null | grep -q '=>' \
-    && echo "mentatd is static"
-
-FROM ${RUST_IMAGE} AS serve-build
-RUN apk add --no-cache musl-dev
-WORKDIR /src
-COPY serve/ /src/
-RUN cargo build --release \
-    && ./target/release/mentatd-serve --version \
-    && ! ldd target/release/mentatd-serve 2>/dev/null | grep -q '=>' \
-    && echo "mentatd-serve is static"
+RUN cargo build --release --workspace \
+    && for b in mentatd mentatd-serve; do \
+         ./target/release/$b --version || exit 1; \
+         if ldd target/release/$b 2>/dev/null | grep -q '=>'; then \
+           echo "$b is not static" >&2; exit 1; \
+         fi; \
+       done
 
 # Wheel built under 3.12 to match the serving images' interpreter; the shim is
 # pure python (py3-none-any), so this stage only pins the packaging toolchain.
@@ -60,7 +52,7 @@ RUN pip wheel --no-deps -w /dist . \
 
 FROM ${RUNTIME_IMAGE} AS artifacts
 COPY --from=build /src/target/release/mentatd /out/mentatd
-COPY --from=serve-build /src/target/release/mentatd-serve /out/mentatd-serve
+COPY --from=build /src/target/release/mentatd-serve /out/mentatd-serve
 COPY --from=wheel /dist/ /out/
 RUN /out/mentatd --version && /out/mentatd-serve --version \
     && ls /out/mentatd-*-py3-none-any.whl
@@ -85,7 +77,7 @@ LABEL org.opencontainers.image.title="mentatd-serve" \
       org.opencontainers.image.description="OpenAI-compatible router and merged MCP for a mentat cluster" \
       org.opencontainers.image.source="https://github.com/mmastrac/mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
-COPY --from=serve-build /src/target/release/mentatd-serve /usr/local/bin/mentatd-serve
+COPY --from=build /src/target/release/mentatd-serve /usr/local/bin/mentatd-serve
 RUN mentatd-serve --version
 # 6381: OpenAI-compatible /v1 plus the merged /mcp. 6382/udp: the daemons'
 # announcement port it listens on. network_mode: host again, so EXPOSE is
@@ -101,7 +93,7 @@ LABEL org.opencontainers.image.title="mentat" \
       org.opencontainers.image.source="https://github.com/mmastrac/mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=build /src/target/release/mentatd /usr/local/bin/mentatd
-COPY --from=serve-build /src/target/release/mentatd-serve /usr/local/bin/mentatd-serve
+COPY --from=build /src/target/release/mentatd-serve /usr/local/bin/mentatd-serve
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
     && mentatd --version && mentatd serve --version && ray --version
 EXPOSE 6379 6380 6381 6382/udp

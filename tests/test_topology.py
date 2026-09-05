@@ -379,11 +379,6 @@ def t08_dead_agents_and_removed_groups_age_out():
         assert g in hub.status_json()["groups"], g
 
 
-SERVE_BINARY = os.environ.get("MENTAT_SERVE_TEST_BINARY") or os.path.join(
-    tl.ROOT, "serve", "target", "debug", "mentatd-serve"
-)
-
-
 def router_status(port):
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/status.json", timeout=5) as r:
         return json.load(r)
@@ -401,11 +396,10 @@ def watched_nodes(port):
 
 def t09_the_router_watches_each_node_once():
     net, daemons, ports = state["net"], state["daemons"], state["ports"]
-    if not os.path.exists(SERVE_BINARY):
-        subprocess.run(["cargo", "build"], cwd=os.path.join(tl.ROOT, "serve"), check=True)
+    tl.build_serve()
     port = tl.free_port()
     p = subprocess.Popen(
-        [SERVE_BINARY],
+        [tl.SERVE_BINARY],
         env={**os.environ,
              "MENTAT_DAEMONS": f"{BOXES['n70'][0]}:{daemons['n70'].http_port}",
              "SERVE_PORT": str(port),

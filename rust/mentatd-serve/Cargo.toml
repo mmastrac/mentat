@@ -1,27 +1,22 @@
-# mentatd-serve is its own crate on purpose: the daemon crate stays
-# std+serde+clap so it builds on any stable toolchain, and the async stack
-# (tokio + hyper) the router needs for streaming proxying stays here where
-# only this binary pays for it.
+# Its own crate so the daemon stays std + serde + clap and only the router
+# pays for the async stack its streaming proxy needs.
 [package]
 name = "mentatd-serve"
-version = "0.6.0"
-edition = "2021"
 description = "OpenAI-compatible router and merged MCP for a mentat cluster"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/mmastrac/mentat"
-readme = "README.md"
+readme = "../../GUIDE-SERVE.md"
 keywords = ["vllm", "inference", "router", "openai", "mcp"]
 categories = ["command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
-serde_json = "1"
-getifaddrs = "0.6"
-hmac = "0.12"
-sha2 = "0.10"
-
-[profile.release]
-strip = true
+serde_json.workspace = true
+getifaddrs.workspace = true
+hmac.workspace = true
+sha2.workspace = true

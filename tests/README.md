@@ -12,18 +12,19 @@ python3 tests/test_fabric.py      # islands from probes, island-constrained plac
 python3 tests/test_serve.py       # routing, gating, MCP merge, streaming pass-through
 python3 tests/test_topology.py    # two cabled pairs plus a LAN-only box over MENTAT_TEST_NET:
                                   # discovery, cut and repaired cables, renumbering, aging, the router
-cargo test                        # framing, WS handshake, status-line grep contract
+cargo test --workspace            # from rust/: framing, WS handshake, status-line grep contract
 ```
 
 Run from the repo root, one suite at a time: they pick free ports and
-collide when run together. Each suite builds the binary unless
-`MENTAT_TEST_BINARY` or `MENTAT_SERVE_TEST_BINARY` points at one.
+collide when run together. Each suite builds what it needs from the
+`rust/` workspace unless `MENTAT_TEST_BINARY` or `MENTAT_SERVE_TEST_BINARY`
+points at a binary.
 
 `test_topology.py` runs on a pretend network. `MENTAT_TEST_NET` names a
 JSON file mapping pretend addresses onto real loopback ports and listing
 which pairs have a cable, which addresses are down, and what each node
 announces. Both binaries read it when set and dial as written otherwise.
-`rust/src/testnet.rs` documents the file.
+`rust/mentatd/src/testnet.rs` documents the file.
 
 `test_vllm_shape.py` replays `RayExecutorV2` call for call, so a drifted shim
 fails there instead of in a model container.

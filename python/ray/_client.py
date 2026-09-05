@@ -1,6 +1,6 @@
 """mentat client plumbing: frame codec and per-thread daemon connections.
 
-The wire format matches rust/src/proto.rs: u32le header_len | u32le
+The wire format matches rust/mentatd/src/proto.rs: u32le header_len | u32le
 payload_len | JSON header | payload. Payloads are pickle bytes and pass
 through the daemon opaquely.
 

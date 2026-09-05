@@ -17,6 +17,9 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 RUST = os.path.join(ROOT, "rust")
+SERVE_BINARY = os.environ.get("MENTAT_SERVE_TEST_BINARY") or os.path.join(
+    RUST, "target", "debug", "mentatd-serve"
+)
 PYTHON_PKG = os.path.join(ROOT, "python")
 # MENTAT_TEST_BINARY runs the suites against a prebuilt binary (e.g. the one
 # out of mentat-artifacts, on a box without cargo).
@@ -29,9 +32,16 @@ _children = []
 
 def build_binary():
     if not os.environ.get("MENTAT_TEST_BINARY"):
-        subprocess.run(["cargo", "build"], cwd=RUST, check=True)
+        subprocess.run(["cargo", "build", "-p", "mentatd"], cwd=RUST, check=True)
     assert os.path.exists(BINARY), BINARY
     return BINARY
+
+
+def build_serve():
+    if not os.environ.get("MENTAT_SERVE_TEST_BINARY"):
+        subprocess.run(["cargo", "build", "-p", "mentatd-serve"], cwd=RUST, check=True)
+    assert os.path.exists(SERVE_BINARY), SERVE_BINARY
+    return SERVE_BINARY
 
 
 def free_port():
