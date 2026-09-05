@@ -12,10 +12,10 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use serde_json::{json, Value};
 
-use crate::logfmt::log;
 use crate::{
     full_body, group_table, http_post_json, json_response, status_view, BoxedBody, Shared,
 };
+use mentat_common::logfmt::log;
 
 /// Joins group and tool in merged names. Group names are compose service
 /// names, which contain no `__`, so the first split is unambiguous.

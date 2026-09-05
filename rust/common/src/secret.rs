@@ -8,14 +8,6 @@
 //! whitespace. Both sides must serialize identically or every signature
 //! fails, which is why the canonical form is one function rather than a
 //! convention.
-//!
-//! `secret.rs` is duplicated in the mentatd-serve crate, like `logfmt.rs`.
-//! The two binaries ship separately and share no library.
-
-// The daemon signs and the router verifies, so each uses half of this file.
-// Keeping the two copies identical matters more than trimming the unused
-// half: a difference in canonical() would break every signature.
-#![allow(dead_code)]
 
 use hmac::{Hmac, Mac};
 use serde_json::Value;

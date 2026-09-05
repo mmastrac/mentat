@@ -15,10 +15,8 @@ mod daemon;
 mod gpu;
 mod http;
 mod island;
-mod logfmt;
 mod mesh;
 mod proto;
-mod secret;
 mod state;
 mod status;
 mod testnet;
@@ -215,7 +213,7 @@ fn main() {
             ..
         }) => {
             if object_store_memory.is_some() {
-                logfmt::log(
+                mentat_common::logfmt::log(
                     "object_store_flag_ignored",
                     &[(
                         "why",
@@ -244,7 +242,10 @@ fn main() {
                              a group and its driver must reach one daemon. Pass \
                              --address={ray}"
                         );
-                        logfmt::log("head_without_address", &[("error", why.clone())]);
+                        mentat_common::logfmt::log(
+                            "head_without_address",
+                            &[("error", why.clone())],
+                        );
                         eprintln!("mentatd: {why}");
                         std::process::exit(1);
                     }

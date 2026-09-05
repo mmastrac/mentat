@@ -10,6 +10,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+mentat-common.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 hmac.workspace = true

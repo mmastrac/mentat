@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::config::cfg;
-use crate::logfmt::log;
 use crate::state::{NodeId, SharedRef};
+use mentat_common::logfmt::log;
 
 /// A set of nodes that are mutually reachable over RDMA-tagged addresses.
 #[derive(Clone, Debug, PartialEq, Eq)]

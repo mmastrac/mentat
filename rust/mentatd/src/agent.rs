@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 use crate::config::cfg;
 use crate::daemon::set_keepalive;
 use crate::gpu::detect_gpus;
-use crate::logfmt::log;
 use crate::proto::{read_frame, Msg, ResumeActor, ServicePort};
 use crate::state::{is_loopback, local_ip_toward, FrameWriter, UnixFrameWriter};
+use mentat_common::logfmt::log;
 
 pub struct AgentOpts {
     pub daemon_addr: String,

@@ -10,7 +10,7 @@
 
 use std::sync::OnceLock;
 
-use crate::logfmt::log;
+use mentat_common::logfmt::log;
 
 /// The resolved knob values, one field per MENTAT_* variable.
 pub struct Cfg {

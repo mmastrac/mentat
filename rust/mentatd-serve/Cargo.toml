@@ -12,6 +12,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+mentat-common.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync"] }
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }

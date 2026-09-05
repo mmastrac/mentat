@@ -404,7 +404,7 @@ impl State {
             }
         }
         let line = data.to_string();
-        crate::logfmt::log("event", &[("data", line.clone())]);
+        mentat_common::logfmt::log("event", &[("data", line.clone())]);
         self.event_subs.retain(|tx| tx.send(line.clone()).is_ok());
         let origin = self.node_id.clone();
         for peer in self.peers.values() {

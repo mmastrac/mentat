@@ -11,13 +11,13 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::config::cfg;
-use crate::logfmt::log;
 use crate::proto::{read_frame, Frame, Msg};
 use crate::state::{
     local_ip_toward, node_id_for, random_hex_id, write_json_file, ActorInfo, ActorState, AgentInfo,
     BundleAssignment, ClaimInfo, ClientInfo, FrameWriter, PgInfo, PgState, RefInfo, RefState,
     Shared, SharedRef, State,
 };
+use mentat_common::logfmt::log;
 
 pub struct DaemonOpts {
     pub port: u16,

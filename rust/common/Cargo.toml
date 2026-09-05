@@ -1,0 +1,13 @@
+[package]
+name = "mentat-common"
+description = "What mentatd and mentatd-serve share: announcement signing and logging"
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+hmac.workspace = true
+sha2.workspace = true

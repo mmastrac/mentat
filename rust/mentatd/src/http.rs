@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::logfmt::log;
 use crate::state::{ActorState, SharedRef};
+use mentat_common::logfmt::log;
 
 pub fn serve(shared: SharedRef, port: u16) {
     std::thread::spawn(move || {

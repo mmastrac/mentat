@@ -17,10 +17,8 @@
 //! is admitted only while it has a running actor and its announced endpoint
 //! answers a probe.
 
-mod logfmt;
 mod mcp;
 mod proxy;
-mod secret;
 mod testnet;
 mod tokens;
 mod ui;
@@ -41,7 +39,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::{json, Value};
 
-use logfmt::log;
+use mentat_common::logfmt::log;
+use mentat_common::secret;
 
 pub type BoxedBody =
     http_body_util::combinators::BoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
@@ -1838,6 +1837,7 @@ async fn handle(
 
 #[tokio::main]
 async fn main() {
+    mentat_common::logfmt::set_program("mentatd-serve");
     // Just enough CLI for the Docker build's smoke test. Everything real is
     // configured by environment, like the daemon's compose file.
     if std::env::args().nth(1).as_deref() == Some("--version") {

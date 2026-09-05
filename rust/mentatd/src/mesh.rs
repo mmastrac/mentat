@@ -16,9 +16,9 @@ use serde_json::json;
 
 use crate::config::cfg;
 use crate::daemon::set_keepalive;
-use crate::logfmt::log;
 use crate::proto::{read_frame, Frame, Msg};
 use crate::state::{is_loopback, now_ms_u64, FrameWriter, PairProbe, PeerInfo, SharedRef};
+use mentat_common::logfmt::log;
 
 pub fn start(shared: SharedRef, seeds: Vec<String>, control_port: u16, http_port: u16) {
     for seed in seeds {

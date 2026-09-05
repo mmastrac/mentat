@@ -340,6 +340,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "mentat-common"
+version = "0.6.0"
+dependencies = [
+ "hmac",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "mentatd"
 version = "0.6.0"
 dependencies = [
@@ -347,6 +356,7 @@ dependencies = [
  "getifaddrs",
  "hmac",
  "libc",
+ "mentat-common",
  "serde",
  "serde_json",
  "sha2",
@@ -361,6 +371,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "mentat-common",
  "serde_json",
  "sha2",
  "tokio",

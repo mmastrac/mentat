@@ -19,9 +19,9 @@ use getifaddrs::InterfaceFlags;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::logfmt::log;
-use crate::secret;
 use crate::state::SharedRef;
+use mentat_common::logfmt::log;
+use mentat_common::secret;
 
 pub const DEFAULT_PORT: u16 = 6382;
 

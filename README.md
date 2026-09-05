@@ -21,6 +21,7 @@ the box it connected from. Both binaries are static executables.
 | --- | --- | --- | --- |
 | `mentatd` | [rust/mentatd/](rust/mentatd/), [crates.io](https://crates.io/crates/mentatd) | Daemon, agent and CLI in one binary | 1.7 MiB on disk, ~2.5 MiB RSS |
 | `mentatd-serve` | [rust/mentatd-serve/](rust/mentatd-serve/), [crates.io](https://crates.io/crates/mentatd-serve) | Router, its own crate and container | 1.7 MiB on disk, ~3.2 MiB RSS |
+| `mentat-common` | [rust/common/](rust/common/) | Announcement signing and logging, shared by both binaries | |
 | `ray` shim | [python/](python/) | Pure-Python package claiming the `ray` import name | ~2 MiB in a running interpreter |
 
 ## Ports
