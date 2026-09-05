@@ -4,12 +4,17 @@
 //! token is preserved across the hop.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::Incoming;
+use hyper::body::{Body, Bytes, Frame, Incoming};
 use hyper::header::{ACCEPT, CONTENT_TYPE};
 use hyper::{Method, Request, Response, StatusCode};
+use mentat_common::logfmt::log;
 use serde_json::{json, Value};
 
 use crate::ui::{Tracked, TrackedBody};
@@ -154,118 +159,329 @@ pub async fn forward(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<B
         Ok(r) => r,
         Err(e) => return json_response(StatusCode::BAD_REQUEST, &json!({"error": e})),
     };
-    let model = routed.model.as_str();
-
-    let models = model_table(shared);
-    let Some((group, base)) = models.get(model) else {
-        let pending = not_ready(shared);
-        // A request naming a known-but-unready group (the group name doubles
-        // as the served name on every current deployment) is a 503 with the
-        // reason. A name nothing claims is a 404.
-        if let Some(why) = pending.get(model) {
-            return json_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &json!({"error": format!("{model} is not ready: {why}")}),
-            );
-        }
-        return json_response(
-            StatusCode::NOT_FOUND,
-            &json!({
-                "error": format!("no group serves model {model:?}"),
-                "available": models.keys().collect::<Vec<_>>(),
-                "not_ready": pending,
-            }),
-        );
-    };
-
     let tail = parts
         .uri
         .path_and_query()
         .map(|pq| pq.as_str())
-        .unwrap_or_else(|| parts.uri.path());
-    let url = upstream_url(base, tail);
-
-    // Rebuilt per attempt rather than cloned, since the retry needs its own.
-    let build_up = || {
-        let mut up = Request::builder().method(Method::POST).uri(&url).header(
-            CONTENT_TYPE,
-            parts
-                .headers
-                .get(CONTENT_TYPE)
-                .cloned()
-                .unwrap_or_else(|| hyper::header::HeaderValue::from_static("application/json")),
-        );
-        if let Some(a) = parts.headers.get(ACCEPT) {
-            up = up.header(ACCEPT, a.clone());
-        }
-        up.body(Full::new(bytes.clone())).map_err(|e| e.to_string())
+        .unwrap_or_else(|| parts.uri.path())
+        .to_string();
+    let call = Call {
+        shared: shared.clone(),
+        model: routed.model.clone(),
+        tail,
+        content_type: parts.headers.get(CONTENT_TYPE).cloned(),
+        accept: parts.headers.get(ACCEPT).cloned(),
+        bytes,
+        deadline: Instant::now() + shared.cfg.model_wait,
     };
 
-    // The timeout bounds time to response headers. For a stream that is
-    // roughly time-to-first-token (vLLM sends headers as the stream opens),
-    // and for a non-streaming call it is the whole generation, which is why
-    // the default is generation-sized. The streamed body itself is unbounded.
-    // A client hangup closes the upstream connection too.
-    let up = match build_up() {
-        Ok(r) => r,
-        Err(e) => {
-            return json_response(
-                StatusCode::BAD_GATEWAY,
-                &json!({"error": format!("cannot build the upstream request: {e}")}),
-            )
-        }
-    };
-    // Sent once. A retry would re-send work the upstream may already be
-    // doing, and would double the wait on an engine that accepts a
-    // connection and then never answers, which is a real failure here. A
-    // client that fails fast can decide for itself. One inside a doubled
-    // timeout can do nothing until it expires.
-    let resp = match shared
-        .client
-        .send_once(up, shared.cfg.serving_timeout)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) if e.starts_with("timeout after") => {
-            return json_response(
-                StatusCode::GATEWAY_TIMEOUT,
-                &json!({"error": format!(
-                    "{group} gave no response within {:.0}s",
-                    shared.cfg.serving_timeout.as_secs_f64()
-                )}),
-            )
-        }
-        Err(e) => {
-            return json_response(
-                StatusCode::BAD_GATEWAY,
-                &json!({"error": format!("{group} did not answer: {e}")}),
-            )
-        }
-    };
+    let keepalive = shared.cfg.sse_keepalive;
+    let prompt_bytes = call.bytes.len();
+    if !routed.stream || keepalive.is_zero() {
+        return match call.dispatch().await {
+            Ok((group, resp)) => relay(shared, &routed, &group, prompt_bytes, resp),
+            Err(r) => r.into_response(),
+        };
+    }
 
+    // Headers and a comment line every `keepalive` while the upstream is
+    // still prefilling, since client timeouts and proxies close an idle
+    // connection. The status is 200 from the first comment, so a later
+    // upstream failure arrives as an error event.
+    let model = routed.model.clone();
+    let mut dispatch = Box::pin(call.dispatch());
+    tokio::select! {
+        r = &mut dispatch => match r {
+            Ok((group, resp)) => relay(shared, &routed, &group, prompt_bytes, resp),
+            Err(r) => r.into_response(),
+        },
+        _ = tokio::time::sleep(keepalive) => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let shared2 = shared.clone();
+            tokio::spawn(async move {
+                let r = dispatch.await.map(|(group, resp)| {
+                    let tracked = Tracked::new(&shared2, &model, &group, prompt_bytes, true);
+                    (group, resp, tracked)
+                });
+                let _ = tx.send(r);
+            });
+            let body = KeepaliveBody {
+                state: Keep::Waiting(rx, tokio::time::interval(keepalive)),
+            };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(body.boxed())
+                .unwrap_or_else(|e| {
+                    json_response(
+                        StatusCode::BAD_GATEWAY,
+                        &json!({"error": format!("cannot relay the upstream response: {e}")}),
+                    )
+                })
+        }
+    }
+}
+
+/// The upstream's response, status and content type kept, body streamed.
+fn relay(
+    shared: &Arc<Shared>,
+    routed: &Routed,
+    group: &str,
+    prompt_bytes: usize,
+    resp: hyper::Response<Incoming>,
+) -> Response<BoxedBody> {
     // Registered once the upstream has accepted the request, and dropped
-    // with the body below, so a client hangup takes its row with it.
-    let tracked = Tracked::new(shared, model, group, bytes.len(), routed.stream);
-
+    // with the body, so a client hangup takes its row with it.
+    let tracked = Tracked::new(shared, &routed.model, group, prompt_bytes, routed.stream);
     let mut builder = Response::builder().status(resp.status());
     if let Some(ct) = resp.headers().get(CONTENT_TYPE) {
         builder = builder.header(CONTENT_TYPE, ct.clone());
     }
-    match builder.body(
-        TrackedBody::wrap(
-            resp.into_body()
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-                .boxed(),
-            tracked,
-        )
-        .boxed(),
-    ) {
+    match builder.body(TrackedBody::wrap(boxed(resp.into_body()), tracked).boxed()) {
         Ok(r) => r,
         Err(e) => json_response(
             StatusCode::BAD_GATEWAY,
             &json!({"error": format!("cannot relay the upstream response: {e}")}),
         ),
     }
+}
+
+fn boxed(body: Incoming) -> BoxedBody {
+    body.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        .boxed()
+}
+
+/// One request to forward, with everything a retry needs to rebuild it.
+struct Call {
+    shared: Arc<Shared>,
+    model: String,
+    tail: String,
+    content_type: Option<hyper::header::HeaderValue>,
+    accept: Option<hyper::header::HeaderValue>,
+    bytes: Bytes,
+    /// After this the request is refused rather than held.
+    deadline: Instant,
+}
+
+impl Call {
+    /// Send the request to whichever group serves the model. Until the
+    /// deadline, a model that is not routable and a refused connection are
+    /// waited out, since a restarting model is missing for a while. Once the
+    /// upstream has taken the request it is never sent again, since the
+    /// work may already be under way.
+    async fn dispatch(self) -> Result<(String, hyper::Response<Incoming>), Refusal> {
+        let mut waited = false;
+        loop {
+            let Some((group, base)) = model_table(&self.shared).get(&self.model).cloned() else {
+                if Instant::now() < self.deadline {
+                    waited = true;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+                return Err(self.refusal());
+            };
+            let url = upstream_url(&base, &self.tail);
+            let mut up = Request::builder().method(Method::POST).uri(&url).header(
+                CONTENT_TYPE,
+                self.content_type
+                    .clone()
+                    .unwrap_or_else(|| hyper::header::HeaderValue::from_static("application/json")),
+            );
+            if let Some(a) = &self.accept {
+                up = up.header(ACCEPT, a.clone());
+            }
+            let up = match up.body(Full::new(self.bytes.clone())) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(Refusal::new(
+                        StatusCode::BAD_GATEWAY,
+                        format!("cannot build the upstream request: {e}"),
+                    ))
+                }
+            };
+            // The timeout bounds time to response headers: roughly time to
+            // first token for a stream, the whole generation otherwise.
+            match self
+                .shared
+                .client
+                .send_once_checked(up, self.shared.cfg.serving_timeout)
+                .await
+            {
+                Ok(resp) => {
+                    if waited {
+                        log(
+                            "request_waited",
+                            &[("model", self.model.clone()), ("group", group.clone())],
+                        );
+                    }
+                    return Ok((group, resp));
+                }
+                Err(e) if e.connect && Instant::now() < self.deadline => {
+                    waited = true;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) if e.timeout => {
+                    return Err(Refusal::new(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        format!(
+                            "{group} gave no response within {:.0}s",
+                            self.shared.cfg.serving_timeout.as_secs_f64()
+                        ),
+                    ))
+                }
+                Err(e) => {
+                    return Err(Refusal::new(
+                        StatusCode::BAD_GATEWAY,
+                        format!("{group} did not answer: {}", e.msg),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// 503 for a known group that cannot serve, 404 for a name nothing
+    /// claims.
+    fn refusal(&self) -> Refusal {
+        let pending = not_ready(&self.shared);
+        let waited = self.shared.cfg.model_wait.as_secs();
+        if let Some(why) = pending.get(&self.model) {
+            return Refusal::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("{} is not ready after {waited}s: {why}", self.model),
+            );
+        }
+        Refusal {
+            status: StatusCode::NOT_FOUND,
+            body: json!({
+                "error": format!("no group serves model {:?} after {waited}s", self.model),
+                "available": model_table(&self.shared).keys().collect::<Vec<_>>(),
+                "not_ready": pending,
+            }),
+        }
+    }
+}
+
+/// A request the router answers itself.
+struct Refusal {
+    status: StatusCode,
+    body: Value,
+}
+
+impl Refusal {
+    fn new(status: StatusCode, error: String) -> Refusal {
+        Refusal {
+            status,
+            body: json!({"error": error}),
+        }
+    }
+
+    fn into_response(self) -> Response<BoxedBody> {
+        json_response(self.status, &self.body)
+    }
+
+    fn message(&self) -> String {
+        match self.body["error"].as_str() {
+            Some(e) => e.to_string(),
+            None => format!("HTTP {}", self.status),
+        }
+    }
+}
+
+type Dispatched = Result<(String, hyper::Response<Incoming>, Tracked), Refusal>;
+
+enum Keep {
+    /// Comment lines every tick until the upstream answers.
+    Waiting(
+        tokio::sync::oneshot::Receiver<Dispatched>,
+        tokio::time::Interval,
+    ),
+    Relaying(TrackedBody),
+    /// The upstream failed after the headers went out. One error event
+    /// and the terminator, then the end.
+    Failing(std::collections::VecDeque<Bytes>),
+    Done,
+}
+
+/// A stream body that starts before the upstream has answered.
+struct KeepaliveBody {
+    state: Keep,
+}
+
+impl Body for KeepaliveBody {
+    type Data = Bytes;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        loop {
+            match &mut this.state {
+                Keep::Waiting(rx, ticker) => {
+                    match Pin::new(&mut *rx).poll(cx) {
+                        Poll::Ready(Ok(Ok((_, resp, tracked)))) => {
+                            if resp.status().is_success() {
+                                this.state = Keep::Relaying(TrackedBody::wrap(
+                                    boxed(resp.into_body()),
+                                    tracked,
+                                ));
+                            } else {
+                                log(
+                                    "stream_failed_after_headers",
+                                    &[("status", resp.status().to_string())],
+                                );
+                                this.state = Keep::Failing(error_events(&format!(
+                                    "upstream answered HTTP {}",
+                                    resp.status()
+                                )));
+                            }
+                            continue;
+                        }
+                        Poll::Ready(Ok(Err(refusal))) => {
+                            this.state = Keep::Failing(error_events(&refusal.message()));
+                            continue;
+                        }
+                        Poll::Ready(Err(_)) => {
+                            this.state =
+                                Keep::Failing(error_events("the router dropped the request"));
+                            continue;
+                        }
+                        Poll::Pending => {}
+                    }
+                    return match ticker.poll_tick(cx) {
+                        Poll::Ready(_) => Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(
+                            b": keepalive\n\n",
+                        ))))),
+                        Poll::Pending => Poll::Pending,
+                    };
+                }
+                Keep::Relaying(body) => return Pin::new(body).poll_frame(cx),
+                Keep::Failing(q) => {
+                    return match q.pop_front() {
+                        Some(b) => Poll::Ready(Some(Ok(Frame::data(b)))),
+                        None => {
+                            this.state = Keep::Done;
+                            Poll::Ready(None)
+                        }
+                    }
+                }
+                Keep::Done => return Poll::Ready(None),
+            }
+        }
+    }
+}
+
+/// An OpenAI-shaped error event and the terminator, for a stream whose
+/// headers already said 200.
+fn error_events(msg: &str) -> std::collections::VecDeque<Bytes> {
+    let event = json!({"error": {"message": msg, "type": "upstream_error"}});
+    [
+        Bytes::from(format!("data: {event}\n\n")),
+        Bytes::from_static(b"data: [DONE]\n\n"),
+    ]
+    .into_iter()
+    .collect()
 }
 
 #[cfg(test)]

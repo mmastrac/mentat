@@ -59,6 +59,14 @@ pub type HttpClient = Client<HttpConnector, Full<Bytes>>;
 ///
 /// `fresh` exists to answer that. One retry over a new connection separates
 /// a stale socket from an endpoint that is actually gone.
+/// Why a request did not get a response.
+pub struct SendError {
+    pub msg: String,
+    /// The connection was refused or unreachable. Nothing was sent.
+    pub connect: bool,
+    pub timeout: bool,
+}
+
 #[derive(Clone)]
 pub struct HttpClients {
     pooled: HttpClient,
@@ -86,10 +94,30 @@ impl HttpClients {
         req: Request<Full<Bytes>>,
         t: Duration,
     ) -> Result<hyper::Response<hyper::body::Incoming>, String> {
-        tokio::time::timeout(t, self.pooled.request(req))
-            .await
-            .map_err(|_| format!("timeout after {:.1}s", t.as_secs_f64()))?
-            .map_err(|e| e.to_string())
+        self.send_once_checked(req, t).await.map_err(|e| e.msg)
+    }
+
+    /// `send_once`, keeping whether the failure was a refused connection.
+    /// A refused connection never reached the upstream, so it is the one
+    /// failure a POST can be retried after.
+    pub async fn send_once_checked(
+        &self,
+        req: Request<Full<Bytes>>,
+        t: Duration,
+    ) -> Result<hyper::Response<hyper::body::Incoming>, SendError> {
+        match tokio::time::timeout(t, self.pooled.request(req)).await {
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(e)) => Err(SendError {
+                msg: e.to_string(),
+                connect: e.is_connect(),
+                timeout: false,
+            }),
+            Err(_) => Err(SendError {
+                msg: format!("timeout after {:.1}s", t.as_secs_f64()),
+                connect: false,
+                timeout: true,
+            }),
+        }
     }
 
     /// Send `req`, retrying once on a fresh connection if the first attempt
@@ -141,6 +169,12 @@ pub struct Config {
     pub probe_fresh: Duration,
     pub probe_promote: Duration,
     pub serving_timeout: Duration,
+    /// How long a request waits for its model to become routable, and
+    /// retries a refused upstream connection, before it is refused.
+    pub model_wait: Duration,
+    /// Interval between SSE comment lines sent to a streaming client while
+    /// the upstream has not yet answered. Zero turns them off.
+    pub sse_keepalive: Duration,
     pub mcp_timeout: Duration,
     pub tools_ttl: Duration,
     /// How long a group stays listed while nothing it announces can serve.
@@ -155,6 +189,16 @@ fn env_str(name: &str, default: &str) -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| default.to_string())
+}
+
+/// `env_secs` that also accepts `0`, for a knob that can be switched off.
+fn env_secs_or_zero(name: &str, default: f64) -> Duration {
+    let v = std::env::var(name)
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| *v >= 0.0)
+        .unwrap_or(default);
+    Duration::from_secs_f64(v)
 }
 
 fn env_secs(name: &str, default: f64) -> Duration {
@@ -203,6 +247,9 @@ impl Config {
             // A non-streaming answer arrives only when generation ends, so
             // this is sized for generation rather than for a hung request.
             serving_timeout: env_secs("SERVING_TIMEOUT_S", 1800.0),
+            // A model with cached weights restarts in well under a minute.
+            model_wait: env_secs("MODEL_WAIT_S", 60.0),
+            sse_keepalive: env_secs_or_zero("SSE_KEEPALIVE_S", 10.0),
             // latency_percentiles legitimately blocks for its whole window
             // (up to 120s), so the MCP forward allows more than that.
             mcp_timeout: env_secs("MCP_TIMEOUT_S", 180.0),

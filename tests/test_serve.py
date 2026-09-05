@@ -41,6 +41,10 @@ class FakeModel:
         self.model, self.tool = model, tool
         self.port = free_port()
         self.requests = []
+        # Seconds to hold a stream before its headers, standing in for a
+        # slow prefill, and whether to fail it after that.
+        self.stream_delay = 0.0
+        self.stream_fails = False
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -96,6 +100,11 @@ class FakeModel:
                     self._json(404, {"error": "not found"})
 
             def _stream(self):
+                if outer.stream_delay:
+                    time.sleep(outer.stream_delay)
+                if outer.stream_fails:
+                    self._json(500, {"error": "engine fell over"})
+                    return
                 # Frame, deliberate gap, terminator: the gap lets the test
                 # tell pass-through streaming from a buffered response.
                 self.send_response(200)
@@ -204,11 +213,33 @@ serve_proc = subprocess.Popen(
          "SERVE_PORT": str(serve_port),
          "POLL_INTERVAL_S": "1",
          "PROBE_INTERVAL_S": "0.5",
+         "MODEL_WAIT_S": "3",
+         "SSE_KEEPALIVE_S": "0.5",
          "ALLOWED_SOURCES": "127."},
 )
 tl._children.append(serve_proc)
 
 state = {}
+
+
+def stream_raw(obj, timeout=30):
+    """(status, wall-clock seconds to headers, [(seconds, line)]) for a
+    streaming request, read line by line as the router sends them."""
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{serve_port}/v1/chat/completions",
+        data=json.dumps(obj).encode(),
+        headers={"Content-Type": "application/json",
+                 "Accept": "text/event-stream"})
+    t0 = time.time()
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        t_headers = time.time() - t0
+        lines = []
+        while True:
+            line = r.readline()
+            if not line:
+                break
+            lines.append((time.time() - t0, line))
+    return r.status, t_headers, lines
 
 
 def serve_get(path):
@@ -370,6 +401,45 @@ def t05_streaming_passes_through():
     assert t_done >= 0.7, f"stream finished in {t_done:.2f}s: gap missing"
 
 
+def t05b_a_slow_prefill_gets_keepalives_then_the_stream():
+    """A stream whose upstream takes longer than SSE_KEEPALIVE_S to answer
+    gets its headers and comment lines while it waits, so nothing between
+    the client and the router closes an idle connection."""
+    mA.stream_delay = 1.6
+    try:
+        status, t_headers, lines = stream_raw(
+            {"model": "model-a", "stream": True, "messages": []})
+    finally:
+        mA.stream_delay = 0.0
+    assert status == 200
+    assert t_headers < 1.0, f"headers took {t_headers:.2f}s: no keepalive"
+    comments = [t for t, l in lines if l.startswith(b": keepalive")]
+    assert len(comments) >= 2, lines
+    data = [l for _, l in lines if l.startswith(b"data:")]
+    assert b"hello from model-a" in data[0], lines
+    assert b"[DONE]" in data[-1], lines
+
+
+def t05c_an_upstream_failure_after_keepalives_is_an_error_event():
+    """Once a comment has gone out the status is 200 for good, so a failure
+    arrives inside the stream in the shape an OpenAI client raises on."""
+    mA.stream_delay = 0.8
+    mA.stream_fails = True
+    try:
+        status, _, lines = stream_raw(
+            {"model": "model-a", "stream": True, "messages": []})
+    finally:
+        mA.stream_delay = 0.0
+        mA.stream_fails = False
+    assert status == 200
+    data = [json.loads(l[len(b"data:"):]) for _, l in lines
+            if l.startswith(b"data:") and b"[DONE]" not in l]
+    assert data and "error" in data[0], lines
+    assert "500" in data[0]["error"]["message"], data
+    last = [l for _, l in lines if l.strip()][-1]
+    assert last.startswith(b"data: [DONE]"), lines
+
+
 def t06_mcp_merge_routes_and_strips_prefix():
     r = mcp({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
              "params": {"name": "ga__tool_a", "arguments": {"x": 1}}})
@@ -402,9 +472,36 @@ def t08_dead_endpoint_fails_the_probe():
     mB.stop()
     wait_until(lambda: served_models() == [], 20,
                "model-b still served after its endpoint died")
+    t0 = time.time()
     code, body = serve_post("/v1/chat/completions", {"model": "model-b"})
+    waited = time.time() - t0
     assert code == 404, (code, body)
     assert "probe failed" in body["not_ready"]["gb"], body
+    # The refusal came after MODEL_WAIT_S of waiting for the model to
+    # return, since a restarting model is missing for a while.
+    assert 2.5 < waited < 10, waited
+
+
+def t08a_a_request_during_an_outage_is_held_until_the_model_returns():
+    """A model that restarts is missing for a while, and a request that
+    arrives then is held rather than refused."""
+    result = {}
+
+    def ask():
+        result["r"] = serve_post("/v1/chat/completions",
+                                 {"model": "model-b", "messages": []})
+
+    t = threading.Thread(target=ask)
+    t.start()
+    time.sleep(0.5)
+    mB.start()
+    t.join(timeout=15)
+    assert not t.is_alive(), "the request never returned"
+    code, body = result["r"]
+    assert code == 200, (code, body)
+    assert body["model"] == "model-b", body
+    mB.stop()
+    wait_until(lambda: served_models() == [], 20, "model-b still served")
 
 
 def t08b_port_announcement_resolves_and_falls_through():
@@ -710,9 +807,12 @@ def main():
         t04_routing_by_model_name,
         t04b_root_level_endpoints_route,
         t05_streaming_passes_through,
+        t05b_a_slow_prefill_gets_keepalives_then_the_stream,
+        t05c_an_upstream_failure_after_keepalives_is_an_error_event,
         t06_mcp_merge_routes_and_strips_prefix,
         t07_actor_death_closes_the_gate,
         t08_dead_endpoint_fails_the_probe,
+        t08a_a_request_during_an_outage_is_held_until_the_model_returns,
         t08b_port_announcement_resolves_and_falls_through,
         t09_membership_follows_the_mesh,
         t10_udp_announce_replaces_the_seed_list,

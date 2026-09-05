@@ -136,9 +136,21 @@ The announced base ends in `/v1`. A root-level path such as `/tokenize` is
 resolved against the base with the `/v1` removed.
 
 A known model routes and streams through, frame by frame with backpressure.
-A model whose group exists but is not admitted returns 503 with the reason.
-A name nothing serves returns 404. Bodies over 128 MiB are refused. One
+A model that is not routable when a request arrives holds the request for
+up to `MODEL_WAIT_S`, since a model that restarts is missing for a while,
+and a refused upstream connection is retried inside the same window. After
+it, a model whose group exists but is not admitted returns 503 with the
+reason and a name nothing serves returns 404. Once the upstream has taken
+a request it is never sent again. Bodies over 128 MiB are refused. One
 upstream request may run for `SERVING_TIMEOUT_S`.
+
+A streaming request whose upstream has not answered within
+`SSE_KEEPALIVE_S` gets its headers and an SSE comment line, `: keepalive`,
+every interval until the first token, so a slow prefill does not look like
+an idle connection to the client or anything between. The status is 200
+from the first comment, so an upstream failure after that arrives as an
+error event, `{"error": {...}}`, followed by `[DONE]`. The OpenAI clients
+raise on it.
 
 ## Announcing endpoints
 
@@ -339,6 +351,18 @@ positive number. Anything else takes the default.
 
   How often a group serving from a lower-ranked address re-tries the
   addresses ranked above it.
+
+- `MODEL_WAIT_S` (default 60)
+
+  How long a request for a model that is not routable is held before it is
+  refused, and how long a refused upstream connection is retried. See
+  "Request handling".
+
+- `SSE_KEEPALIVE_S` (default 10)
+
+  Interval between `: keepalive` comment lines on a streaming response
+  while the upstream has not yet answered. `0` turns them off, and the
+  upstream's status then passes through unchanged.
 
 - `SERVING_TIMEOUT_S` (default 1800)
 
