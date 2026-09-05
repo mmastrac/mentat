@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
 """The mesh, the islands and the router over a pretend network.
 
-Five daemons on one box stand in for the cluster this exists for: two
-cabled ConnectX pairs numbered out of one subnet, a LAN every box is on, and
-a fifth box with nothing but the LAN. MENTAT_TEST_NET maps the pretend
-addresses onto real loopback ports and says which pairs have a cable, so
-the daemons run their real probes and dials and a test cuts a cable by
-rewriting a file. Run with:
+Five daemons on one box: two cabled ConnectX pairs numbered out of one
+subnet, a LAN every box is on, and a fifth box with only the LAN.
+MENTAT_TEST_NET maps the pretend addresses onto loopback ports and says
+which pairs have a cable, so a test cuts one by rewriting a file. Run with:
 
     python3 tests/test_topology.py
-
-What is checked: one seed reveals the whole mesh, every daemon derives both
-islands whether or not it sits on one, placement stays inside an island, a
-cut fabric cable drops its island and moves the mesh link onto the LAN, a
-repaired one brings the island back, a renumbered node is followed without a
-restart and leaves no stale probe rows, and dead peers, agents and placement
-groups age out of every table.
 """
 
 import json
@@ -189,8 +180,7 @@ def t01_one_seed_reveals_the_whole_mesh():
             30,
             f"{name} to see every other daemon",
         )
-    # Discovery brought in peers no seed list named, and the result is one
-    # head across the cluster rather than one per seed list.
+    # One head across the cluster, since discovery filled in the mesh.
     heads = {d.status_json()["head_node_id"] for d in daemons.values()}
     wait_for(
         lambda: len({d.status_json()["head_node_id"] for d in daemons.values()}) == 1,
@@ -204,8 +194,7 @@ def t02_every_daemon_derives_both_islands():
     want = both_islands()
     for name, d in daemons.items():
         wait_for(lambda: islands_of(d) == want, 30, f"{name} to derive both islands")
-    # The LAN-only box is on no fabric and still knows the map, from what
-    # its peers publish.
+    # The LAN-only box knows the map from what its peers publish.
     assert islands_of(daemons["n122"]) == want
 
 
@@ -237,8 +226,7 @@ def t03_a_group_lands_inside_one_island():
     daemons = state["daemons"]
     hub = daemons["n70"]
     # One GPU on each box of pair A and one on a box of pair B, all
-    # registered with the hub: a two-bundle group fits pair A and nothing
-    # else.
+    # registered with the hub. A two-bundle group fits pair A alone.
     for name in ("n70", "n77", "n36"):
         hub.start_agent("tp2", gpus=1, container=name,
                         env_extra={"MENTAT_NODE_IP": BOXES[name][0]})
@@ -265,8 +253,7 @@ def t04_a_cut_fabric_cable_moves_the_mesh_link_and_dissolves_the_island():
     net.cable(fabric_addr("n70"), fabric_addr("n77"), up=False)
 
     # The link goes down with the cable and comes back on another address.
-    # The tie-break decides which side dials the replacement. What matters
-    # is that it does not ride the cut cable.
+    # The tie-break decides which side dials the replacement.
     wait_for(
         lambda: not n77.status_json()["peers"][n70_id]["alive"]
         or n77.status_json()["peers"][n70_id]["link_ip"] != fabric_addr("n70"),
@@ -360,9 +347,7 @@ def t07_a_dead_daemon_is_forgotten_and_returns():
     for d in others:
         wait_for(lambda: n122_id not in d.status_json()["peers"], 15,
                  "the dead row to age out")
-    # Back on the same address, the box rejoins through discovery: no seed
-    # named it, its peers only remember it as a control address they were
-    # once told about.
+    # No seed names the box. It rejoins through discovery.
     daemons["n122"] = Daemon(
         BOXES["n122"][0], peers=[f"{BOXES['n70'][0]}:{ports['n70']}"],
         port=ports["n122"], env=env,
@@ -435,8 +420,7 @@ def t09_the_router_watches_each_node_once():
     ids = {node_id(n) for n in daemons}
     wait_for(lambda: set(watched_nodes(port)) == ids, 40,
              "the router to discover every daemon from one seed")
-    # Five daemons, five watches: a box is polled on one address however
-    # many it announces, and the rest are remembered.
+    # A box is polled on one address however many it announces.
     st = router_status(port)
     assert len(st["daemons"]) == len(ids), st["daemons"]
     n36 = st["daemons"][watched_nodes(port)[node_id("n36")]]

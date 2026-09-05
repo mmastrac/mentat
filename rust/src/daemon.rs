@@ -263,27 +263,18 @@ fn sweep_lifecycle(shared: &SharedRef) {
     sweep_history(&mut st);
 }
 
-/// Drop the rows nobody can act on any more, once they have sat for
-/// MENTAT_HISTORY_KEEP_MS.
+/// Drop the rows nobody can act on, once they are MENTAT_HISTORY_KEEP_MS
+/// old: dead actors and removed placement groups whose owner is gone, and
+/// agents past the give-up threshold.
 ///
-/// A dead actor's row outlives the process on purpose: it is what turns a
-/// call on that actor into RayActorError carrying the reason it died, rather
-/// than "no such actor". Only its owner can make that call, so once the
-/// owner is gone the row is history. The same holds for a removed placement
-/// group, whose fail reason is read by its owner's ready ref and by nobody
-/// else. An agent whose link has been down past the give-up threshold has
-/// nothing left to hold: its actors are dead and a container that comes back
-/// registers afresh under the same id. Nothing else prunes any of these, and
-/// a box that has booted a model forty times would otherwise carry forty of
-/// each, plus whatever refs were adopted for owners that never came back.
+/// A dead actor's row is what turns its owner's next call into
+/// RayActorError with the reason, and a removed group's fail reason is read
+/// by its owner's ready ref. Nobody else reads either. The age floor covers
+/// a daemon restart, which rebuilds the tables from the agents before any
+/// driver reconnects.
 ///
-/// A group is whatever agents and actors mention it, so once its last row
-/// goes the group is gone from every snapshot, which is what lets the router
-/// drop a model that was removed from a compose file.
-///
-/// The age floor is what makes the owner check safe across a daemon restart:
-/// the table is rebuilt from the agents before the drivers reconnect, so for
-/// a moment every owner looks gone.
+/// A group is whatever agents and actors mention it, so its last row going
+/// takes it out of every snapshot.
 fn sweep_history(st: &mut State) {
     let (now, keep) = (crate::state::now_ms_u64(), cfg().history_keep_ms);
     let aged = |at: u64| now.saturating_sub(at) > keep;
@@ -305,8 +296,8 @@ fn sweep_history(st: &mut State) {
         .filter(|p| p.removed_ms.is_some_and(aged))
         .map(|p| p.id.clone())
         .collect();
-    // An agent goes only once every actor it hosted has: a dead actor's row
-    // names its agent, and an operator reading one wants to find the other.
+    // An agent goes only after every actor it hosted, since a dead actor's
+    // row names its agent.
     let gone_agents: Vec<String> = st
         .agents
         .values()
@@ -566,9 +557,8 @@ fn client_conn(
     if is_session {
         reap_client(&shared, &client_id);
     } else {
-        // A connection that carried no session was a CLI call, or one of a
-        // driver's worker threads. The driver's row belongs to its session
-        // and leaves with it. A CLI row has nothing to wait for.
+        // A driver's worker threads share its session's row, which leaves
+        // with the session. A CLI connection's row leaves with it.
         let mut st = shared.st.lock().unwrap();
         if st.clients.get(&client_id).is_some_and(|c| !c.has_session) {
             st.clients.remove(&client_id);
@@ -1028,15 +1018,11 @@ fn misfiled(
     ))
 }
 
-/// The node a client connected from, by its source address.
-///
-/// A driver is on this box when it arrived over loopback or over any address
-/// this box owns. Otherwise the address is matched against every box the
-/// mesh knows, by every address each announces: a driver that reaches the
-/// daemon over the fabric arrives from an address the node is not named by,
-/// and filing it under a node of its own would put rank 0 nowhere near the
-/// engine. An agent that registered under that address answers the same
-/// question. An address nobody claims is a node of its own.
+/// The node a client connected from: this box for loopback or any address
+/// it owns, then the mesh peer or registered agent that announces the
+/// address, then a node of the address's own. A driver arriving over the
+/// fabric would otherwise be filed away from its own agents, and rank 0
+/// would land away from the engine.
 fn client_node(st: &State, peer_ip: &str) -> String {
     if crate::state::is_loopback(peer_ip)
         || peer_ip == st.node_ip
@@ -1155,10 +1141,8 @@ fn create_actor(
             .join(","),
     );
     spawn_env.insert("MENTAT_GCS_ADDRESS".into(), st.gcs_address.clone());
-    // The rank's cluster identity, which is its node's, so a container
-    // needs no MENTAT_NODE_IP of its own: what the daemon filed the agent
-    // under is what its peers can dial. A fabric address, when placement
-    // chose one, sits above it in the shim's order.
+    // The node's identity, so the container carries no MENTAT_NODE_IP of
+    // its own. The shim reads MENTAT_FABRIC_IP first.
     if !agent_node_ip.is_empty() {
         spawn_env.insert("MENTAT_NODE_IP".into(), agent_node_ip);
     }
@@ -1849,13 +1833,9 @@ fn agent_conn(
         let st = shared.st.lock().unwrap();
         if node_ip.is_empty() {
             // An agent that claimed nothing is on the box it connected
-            // from. That is this one whenever the connection arrived on an
-            // address this box owns, loopback among them: a container told
-            // to reach its own daemon by the box's LAN address is still on
-            // this box. Otherwise it is whichever box in the mesh owns the
-            // source address, under that box's own name, so a container on
-            // a peer box needs no MENTAT_NODE_IP whatever link it came in
-            // on. An address no box claims names a node of its own.
+            // from: this one for loopback or any address this box owns,
+            // else the mesh peer that announces the source address, else a
+            // node named by the address itself.
             let mine = crate::announce::all_local_addrs();
             if crate::state::is_loopback(&peer_ip) || mine.contains(&peer_ip) {
                 (st.node_ip.clone(), st.node_id.clone())

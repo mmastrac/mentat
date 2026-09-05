@@ -56,14 +56,9 @@ fn dial(shared: &SharedRef, target: String, control_port: u16, http_port: u16, d
     std::thread::spawn(move || connector(shared, target, control_port, http_port, discovered));
 }
 
-/// Dial the peers this daemon was never told about.
-///
-/// Every peer publishes its own peer table in its status pushes, control
-/// addresses included, so one seed reveals the rest of the mesh. Without
-/// this the mesh is only as connected as the seed lists, and a hub that
-/// goes down leaves the nodes that listed only it unable to see each
-/// other: each elects itself head, and each derives islands from half the
-/// probes.
+/// Dial every control address the live peers publish in their status
+/// pushes. One reachable seed then joins the whole mesh. Nodes that could
+/// see only a hub would otherwise each elect themselves head when it went.
 fn discoverer(shared: SharedRef, control_port: u16, http_port: u16) {
     loop {
         std::thread::sleep(Duration::from_secs(5));
@@ -91,19 +86,12 @@ fn discoverer(shared: SharedRef, control_port: u16, http_port: u16) {
     }
 }
 
-/// Keep one link to a peer alive. A peer may be dialed by a different address
-/// than it announces (the pair talks over the QSFP subnet, n3 over the
-/// LAN), so "already covered" is judged by the node id learned on first
-/// contact, never by comparing address strings.
-///
-/// The seed is dialed first and every other address the peer was last seen
-/// with after it, on the seed's port. A peer seeded by its fabric address
-/// is otherwise lost to the mesh for as long as that cable is out, with the
-/// LAN between the two boxes carrying nothing.
-///
-/// A discovered target, one no seed list named, stops being dialed once its
-/// node has been forgotten and no live peer publishes it any more. A seed
-/// is dialed for the life of the process.
+/// Keep one link to a peer alive, dialing the seed first and then every
+/// other address the peer last announced, on the seed's port. Coverage is
+/// judged by the node id learned on first contact, since a peer may be
+/// dialed by an address it does not announce. A seed is dialed for the life
+/// of the process, and a discovered target until its node is forgotten and
+/// no live peer publishes it.
 fn connector(shared: SharedRef, seed: String, control_port: u16, http_port: u16, discovered: bool) {
     let mut attempt: u64 = 0;
     let mut known_id: Option<String> = None;
@@ -168,9 +156,8 @@ fn connector(shared: SharedRef, seed: String, control_port: u16, http_port: u16,
     }
 }
 
-/// The addresses to try for one seed, the seed first. The rest are every
-/// address the peer node last announced, on the seed's port, whether the
-/// node is known by id or only by having been dialed at this seed before.
+/// The seed, then every address its node last announced on the seed's
+/// port. The node is found by id, or by the seed among its addresses.
 fn dial_targets(shared: &SharedRef, seed: &str, known_id: Option<&str>) -> Vec<String> {
     let mut out = vec![seed.to_string()];
     let (host, port) = match seed.rsplit_once(':') {
@@ -203,9 +190,8 @@ fn try_connect(
     control_port: u16,
     http_port: u16,
 ) -> std::io::Result<Option<String>> {
-    // A dropped SYN would otherwise hold this connector for the kernel's
-    // retry schedule, minutes during which the peer's other addresses go
-    // untried.
+    // A dropped SYN would hold this connector for the kernel's retry
+    // schedule, minutes during which the peer's other addresses go untried.
     let dial = match crate::testnet::load() {
         Some(net) => {
             let host = seed.rsplit_once(':').map(|(h, _)| h).unwrap_or(seed);
@@ -432,13 +418,10 @@ fn same_box(arriving: &[String], existing: &[String]) -> bool {
 /// Record a link to a peer, or refuse it. Returns whether the caller now
 /// owns the link.
 ///
-/// Two daemons that dial each other at once produce two links, and each
-/// side must keep the same one or the other is closed under its owner and
-/// the mesh churns a node_leave at every boot. The rule is that the link
-/// dialed by the lower node id wins, which both sides can evaluate from
-/// what they know: who dialed, and both ids. An arriving link that loses is
-/// refused. One that wins replaces the old link and closes it, quietly,
-/// since the node itself never went anywhere.
+/// When two links to one node exist, the one dialed by the lower node id
+/// wins, which both ends decide alike from who dialed and both ids. A
+/// losing arrival is refused and a winning one replaces the old link
+/// without a node_leave, since the node is still there.
 fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool {
     let PeerIdent {
         node_id,
@@ -547,10 +530,8 @@ fn peer_loop(
             Msg::PeerStatus { data } => {
                 let mut st = shared.st.lock().unwrap();
                 if let Some(p) = st.peers.get_mut(&peer_id) {
-                    // The hello said what the peer answered on when the
-                    // link came up. The push says what it answers on now,
-                    // and a renumbered or newly cabled address reaches the
-                    // prober and the islands only through this.
+                    // The push carries the peer's current addresses. The
+                    // hello carried the ones it had when the link came up.
                     let addrs = str_list(&data["addrs"]);
                     if !addrs.is_empty() && addrs != p.addrs {
                         log(
@@ -642,8 +623,8 @@ fn staleness_sweeper(shared: SharedRef) {
     loop {
         std::thread::sleep(Duration::from_millis(200));
         let now = now_ms_u64();
-        // The pretend network's cables: a link riding a cut one is closed
-        // here, since nothing else on one box would close it.
+        // A link over a cable the pretend network cut is closed here,
+        // since nothing else on one box closes it.
         let cut_links: Vec<String> = match crate::testnet::load() {
             Some(net) => {
                 let locals = crate::announce::local_addrs();
@@ -696,9 +677,8 @@ fn staleness_sweeper(shared: SharedRef) {
             );
             st.emit("node_leave", json!({ "peer": peer, "reason": "stale" }));
         }
-        // A dead row is history after MENTAT_HISTORY_KEEP_MS. The connector
-        // for its seed keeps dialing regardless, so a box that comes back
-        // later joins as it did the first time.
+        // A dead row goes after MENTAT_HISTORY_KEEP_MS. Its seed connector
+        // keeps dialing, so the box rejoins when it returns.
         let forget: Vec<String> = st
             .peers
             .values()
@@ -799,15 +779,12 @@ fn status_pusher(shared: SharedRef) {
 /// pin its source address would report the routing table's preference and
 /// call it topology.
 ///
-/// Peers are probed concurrently, one thread each, and a peer's pairs one
-/// after another. A pair with no route between a fabric address and a LAN
-/// address fails only at the timeout, and a five-node cluster has enough of
-/// those that probing them in one line would take longer than the interval.
+/// Peers are probed concurrently, one thread each. A fabric-to-LAN pair
+/// fails only at the timeout, and five nodes have enough of those to
+/// outrun the interval in one line.
 ///
-/// After a round, rows for addresses out of play are dropped: a local
-/// address this box has lost, or a remote one missing from the peer's
-/// current list. A row that is never re-probed keeps whatever it last said,
-/// and a stale `ok` would put a cable on the map that was unplugged.
+/// Rows for a lost local address or an unannounced remote one are dropped
+/// after the round. A row that is never re-probed keeps its last `ok`.
 fn prober(shared: SharedRef) {
     let interval = Duration::from_millis(cfg().probe_interval_ms.max(200));
     let timeout = Duration::from_millis(cfg().probe_timeout_ms.max(50));

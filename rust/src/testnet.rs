@@ -1,10 +1,5 @@
-//! A network that exists only in a file, for the tests.
-//!
-//! One box has one loopback address and no cables, and the questions this
-//! daemon answers are about cables: which of a node's addresses reaches
-//! which of another's, and what happens to the mesh, the islands and
-//! placement when one stops. MENTAT_TEST_NET names a JSON file describing
-//! a network to pretend:
+//! A pretend network for the tests, since one box has one loopback address
+//! and no cables. MENTAT_TEST_NET names a JSON file describing it:
 //!
 //! ```json
 //! {"addrs": {"10.100.0.1": "127.0.0.1:41001", "192.168.1.70": "127.0.0.1:41001"},
@@ -13,19 +8,14 @@
 //!  "announce": {"192.168.1.70": "192.168.1.70=lan,10.100.0.1=connectx+rdma"}}
 //! ```
 //!
-//! `addrs` maps every address in the pretend network to the real control
-//! address of the daemon that owns it. A dial or probe to a pretend address
-//! goes to the real one, without binding a source. `cut` lists address pairs
-//! with no cable between them, in either order. `down` lists addresses that
-//! answer nobody. `announce` maps a node ip to what that daemon announces
-//! in place of MENTAT_ANNOUNCE_ADDRS, so a test can renumber a running
-//! daemon.
+//! `addrs` maps each pretend address to the real control address of the
+//! daemon that owns it, and a dial or probe goes there with no source bound.
+//! `cut` lists pairs with no cable between them, in either order. `down`
+//! lists addresses that answer nobody. `announce` maps a node ip to what
+//! that daemon announces in place of MENTAT_ANNOUNCE_ADDRS.
 //!
-//! The file is re-read at every use, so a test edits it and the daemons
-//! follow: a cut cable fails its probes on the next round and drops the
-//! mesh link riding it, and a repaired one comes back the same way.
-//!
-//! Unset, none of this exists and every hook is a no-op.
+//! The file is re-read at every use, so the daemons follow each edit.
+//! Unset, every hook is a no-op.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -46,7 +36,7 @@ pub struct TestNet {
     announce: BTreeMap<String, String>,
 }
 
-/// The pretend network, or None outside the tests.
+/// The pretend network, or None when MENTAT_TEST_NET is unset.
 pub fn load() -> Option<TestNet> {
     let path = std::env::var("MENTAT_TEST_NET").ok()?;
     if path.trim().is_empty() {
@@ -92,8 +82,7 @@ fn parse(v: &Value) -> TestNet {
 }
 
 impl TestNet {
-    /// The real address behind a pretend one, or None for an address the
-    /// file does not know, which is dialed as written.
+    /// The real address behind a pretend one. None means dial as written.
     pub fn real(&self, host: &str) -> Option<String> {
         self.addrs.get(host).cloned()
     }
@@ -107,8 +96,8 @@ impl TestNet {
     }
 
     /// The local address a kernel would put a link to `remote` on: the one
-    /// sharing its /24, else the first. A mesh link is never source-bound,
-    /// so this stands in for the routing table.
+    /// sharing its /24, else the first. This stands in for the routing
+    /// table, since a mesh link binds no source.
     pub fn link_local<'a>(&self, locals: &'a [String], remote: &str) -> Option<&'a String> {
         let net = |a: &str| a.rsplit_once('.').map(|(n, _)| n.to_string());
         locals

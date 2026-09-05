@@ -1,18 +1,12 @@
-//! The router's half of the pretend network the daemon tests run on.
-//!
-//! MENTAT_TEST_NET names the same file the daemons read (see
-//! `rust/src/testnet.rs`). The router only needs its `addrs` map: a daemon
-//! address in the mesh is a pretend one, and the real daemon listens on a
-//! loopback port. The host is swapped and the port kept, since every
-//! daemon in a test binds every address on its own ports.
-//!
+//! The router's half of the pretend network in `rust/src/testnet.rs`. Only
+//! `addrs` and `down` are read. The host is swapped and the port kept,
+//! since every daemon in a test binds every address on its own ports.
 //! Unset, addresses are dialed as written.
 
 use std::collections::BTreeMap;
 
 /// `host:port` with the host swapped for its real one, when the file maps
-/// it. A host the file lists as `down` is sent to a port nothing listens
-/// on, so the dial is refused the way a dead box refuses it.
+/// it. A `down` host is sent to a port nothing listens on.
 pub fn mapped(addr: &str) -> String {
     let Some((map, down)) = load() else {
         return addr.to_string();

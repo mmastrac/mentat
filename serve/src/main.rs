@@ -245,14 +245,10 @@ impl DaemonView {
     }
 }
 
-/// One node's watch: the address being polled and the others it is known
-/// by, which the watcher falls through to when the polled one stops
-/// answering.
-///
-/// A node has as many addresses as links, and each source of discovery
-/// hands over whichever it saw. Watching every one of them polls a daemon
-/// once per link and lists it that many times, so a node is watched on one
-/// address and remembers the rest.
+/// One node's watch: the address being polled, and the others the watch
+/// falls through to when it stops answering. Every discovery source hands
+/// over whichever address it saw, and watching each would poll a daemon
+/// once per link.
 pub struct NodeWatch {
     pub addr: String,
     pub alternates: BTreeSet<String>,
@@ -285,8 +281,7 @@ pub struct Shared {
     /// separates the two, and it does so for logs already written: a line
     /// stamped before now minus uptime came from an earlier process.
     pub started: Instant,
-    /// Announcements must be signed. Published in `/status.json` for the
-    /// same reason the daemon publishes `signing`.
+    /// Announcements must be signed. Published in `/status.json`.
     pub verify: std::sync::atomic::AtomicBool,
     pub client: HttpClients,
     /// One entry per daemon HTTP address being watched.
@@ -353,13 +348,10 @@ pub struct GroupEntry {
     /// from the agent whose endpoint won, since it describes the engine
     /// behind that endpoint. Empty when the container did not say.
     pub provider: String,
-    /// Whether the group has actor rows, running or dead. An engine that
-    /// runs inside actors mentat spawned has its ranks' state to answer
-    /// for it: an endpoint that outlives every rank still answers `/models`
-    /// from a process whose ranks are gone. A group with no rows had
-    /// nothing placed, whether it registered with GPUs a ray driver never
-    /// used or with none through `python -m ray.register`, so the probe is
-    /// the whole test.
+    /// Whether the group has actor rows, running or dead. An endpoint that
+    /// outlives every rank still answers `/models`, and only rank state
+    /// catches it. A group with no rows had nothing placed, so the probe
+    /// is its whole test.
     pub placed: bool,
 }
 
@@ -705,10 +697,8 @@ pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<Value>, String> 
             ep.announced
         ));
     }
-    // Only where actors are how the engine runs. An endpoint that outlives
-    // every rank still answers /models from a process whose ranks are gone,
-    // and this catches it. A group that never had actors has no rank state
-    // to consult.
+    // An endpoint that outlives every rank still answers /models. A group
+    // that never had actors has no rank state to consult.
     if e.placed && e.running == 0 {
         return Err("no running actors".into());
     }
@@ -909,23 +899,19 @@ pub fn ensure_watched(shared: &Arc<Shared>, addr: String, others: Vec<String>) {
 }
 
 /// Hold one daemon fresh: poll /status, and keep a /events WebSocket open so
-/// any cluster event (an actor dying, an agent registering) triggers an
-/// immediate re-read instead of waiting out the poll interval.
+/// a cluster event re-reads at once.
 ///
-/// The first answer names the node. If another watch already owns that
-/// node and is fresh, this one hands its address over as an alternate and
-/// stops: one node, one poll. When the polled address stops answering, the
-/// alternates are tried and the watch moves to whichever answers, which is
-/// how a router follows a node whose fabric link dropped onto its LAN
-/// address. An address no seed named, that has answered nothing for
-/// `model_ttl` and that no live daemon lists as a peer, is forgotten.
+/// The first answer names the node. If a fresh watch already owns it, this
+/// address becomes that watch's alternate and this task ends. When the
+/// polled address stops answering the watch moves to an alternate that
+/// does, and an unseeded address that answers nothing for `model_ttl` while
+/// no live daemon lists it is forgotten.
 async fn watch_daemon(shared: Arc<Shared>, mut addr: String, others: Vec<String>) {
     let seed = shared.cfg.daemons.contains(&addr);
     let mut node: Option<String> = None;
     let mut failing_since: Option<Instant> = None;
-    // Addresses to try before the node has answered on any. A discovered
-    // peer arrives with several, and the best-ranked one may be on a link
-    // this box cannot use.
+    // Addresses to try before the node has answered on any, since the
+    // best-ranked one may be on a link this box cannot use.
     let mut untried: std::collections::VecDeque<String> =
         others.into_iter().filter(|o| *o != addr).collect();
     shared
@@ -1079,9 +1065,8 @@ fn claim_node(shared: &Shared, id: &str, addr: &str) -> bool {
                 w.alternates.insert(addr.to_string());
                 false
             } else {
-                // The holder has gone quiet and this address answers, so
-                // this watch takes over and the old address joins the
-                // alternates.
+                // The holder is stale and this address answers, so this
+                // watch takes over.
                 let old = std::mem::replace(&mut w.addr, addr.to_string());
                 w.alternates.remove(addr);
                 w.alternates.insert(old.clone());
@@ -1135,9 +1120,8 @@ fn drop_watch(shared: &Shared, addr: &str) {
     shared.watched.lock().unwrap().remove(addr);
 }
 
-/// Whether any fresh daemon view still lists this node, or this address,
-/// as a live peer. A daemon its peers can see is unreachable from here
-/// rather than gone, and is kept.
+/// Whether any fresh daemon view lists this node, or this address, as a
+/// live peer. Such a daemon is unreachable from here rather than gone.
 fn published_alive(shared: &Shared, node: Option<&str>, addr: &str) -> bool {
     let stale = shared.cfg.poll_interval * 3;
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
@@ -1473,9 +1457,8 @@ fn peer_addresses(p: &Value, subnets: &[(u32, u32)]) -> (Option<String>, Vec<Str
         push(a.as_str());
     }
     push(p["node_ip"].as_str());
-    // Loopback is the source of a link from a daemon on this box, and
-    // names the reporting box rather than the peer. It goes last: the
-    // right answer only when router, reporter and peer share one box.
+    // Loopback names the reporting box rather than the peer, and is right
+    // only when router, reporter and peer share one box. It goes last.
     let lo = |c: &String| c.starts_with("127.") || c == "::1";
     cands.sort_by_key(lo);
     let best = cands
@@ -1548,9 +1531,8 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) -> Option<String> {
             node_id
         }
         Err(e) => {
-            // Only a watched address keeps a row. An alternate that was
-            // tried and failed is not being watched, and a row for it
-            // would list a daemon nobody polls.
+            // Only a watched address keeps a row. A failed alternate would
+            // otherwise list a daemon nobody polls.
             if let Some(v) = shared.daemons.lock().unwrap().get_mut(addr) {
                 v.error = Some(e);
             }
@@ -1899,9 +1881,8 @@ async fn main() {
         tokio::spawn(async move { udp_listener(shared).await });
     }
 
-    // The router is the front door, so its accept queue must not be the
-    // shallowest in the path. vLLM listens with 2048. The kernel clamps
-    // this to somaxconn.
+    // vLLM listens with 2048, and a shallower queue here refuses first
+    // under load. The kernel clamps this to somaxconn.
     let listener = (|| -> std::io::Result<tokio::net::TcpListener> {
         let sock = tokio::net::TcpSocket::new_v4()?;
         sock.set_reuseaddr(true)?;
