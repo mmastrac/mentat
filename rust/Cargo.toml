@@ -3,13 +3,13 @@ members = ["common", "mentatd", "mentatd-serve"]
 resolver = "2"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mmastrac/mentat"
 
 [workspace.dependencies]
-mentat-common = { path = "common", version = "0.7.0" }
+mentat-common = { path = "common", version = "0.8.0" }
 serde_json = "1"
 hmac = "0.12"
 sha2 = "0.10"
