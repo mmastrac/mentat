@@ -78,19 +78,23 @@ def t01_workers_first_then_head():
     )
 
 
-def t02_lowest_id_takes_over():
+def t02_a_later_lower_id_adopts_the_settled_head():
+    """A settled head stays head while it is alive, whatever id joins
+    later. Every group lives on the head, so a head change moves every
+    group, and a node joining must not cause one."""
     d1 = Daemon("127.0.0.1", peers=[state["d2"].address, state["d3"].address],
                 port=state["p1"], env=MESH_ENV).wait_up()
     state["d1"] = d1
     d1_id = d1.status_json()["node_id"]
     state["d1_id"] = d1_id
+    d2_id = state["d2"].status_json()["node_id"]
     wait_for(
         lambda: all(
-            d.status_json()["head_node_id"] == d1_id
+            d.status_json()["head_node_id"] == d2_id
             for d in (d1, state["d2"], state["d3"])
         ),
         25,
-        "all three daemons to agree d1 is head",
+        "all three daemons to agree d2 is still head",
     )
     # Merged view: every daemon sees two live peers.
     for d in (d1, state["d2"], state["d3"]):
@@ -130,15 +134,19 @@ def t02b_probes_cover_each_address_pair():
     assert tags[BOGUS] == ["connectx", "rdma"], tags
 
 
-def t03_group_serves_on_non_head_daemon():
-    d2 = state["d2"]
-    d2.start_agent("m", gpus=2, container="cm")
+def t03_a_group_registered_anywhere_lands_on_the_head():
+    """The agent and the driver both talk to d1, which is not the head.
+    d1 relays both to d2, so the group is whole on the head and d1 holds
+    nothing."""
+    d1, d2 = state["d1"], state["d2"]
+    d1.start_agent("m", gpus=2, container="cm")
     wait_for(
         lambda: d2.status_json("m")["groups"].get("m", {}).get("gpus_total", 0) == 2,
         15,
-        "agent registration on d2",
+        "the agent registered through d1 to appear on the head d2",
     )
-    ray = fresh_shim(d2.address, "m")
+    assert "m" not in d1.status_json()["groups"], d1.status_json()["groups"]
+    ray = fresh_shim(d1.address, "m")
     from ray.util.placement_group import placement_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
     from fake_worker import FakeWorker
@@ -169,9 +177,9 @@ def t03_group_serves_on_non_head_daemon():
 
 
 def t04_events_stream_carries_head_change():
-    # Subscribe to d3's /events, kill d1, and expect node_leave + head_change
-    # to arrive on a DIFFERENT daemon's stream (replication), while the group
-    # on d2 keeps serving.
+    # Subscribe to d3's /events, kill the head d2, and expect node_leave +
+    # head_change to arrive on a DIFFERENT daemon's stream (replication).
+    # The group moves to the new head, d1, through d1's own relay.
     d3 = state["d3"]
     s = socket.create_connection(("127.0.0.1", d3.http_port), timeout=5)
     s.sendall(
@@ -212,7 +220,7 @@ def t04_events_stream_carries_head_change():
     opcode, payload = read_frame(5)
     assert json.loads(payload)["type"] == "snapshot"
 
-    state["d1"].kill()
+    state["d2"].kill()
 
     deadline = time.time() + 30
     seen = set()
@@ -229,34 +237,41 @@ def t04_events_stream_carries_head_change():
     assert {"node_leave", "head_change"} <= seen, seen
     s.close()
 
-    d2_id = state["d2"].status_json()["node_id"]
+    d1_id = state["d1_id"]
     wait_for(
-        lambda: state["d2"].status_json()["head_node_id"] == d2_id,
+        lambda: state["d1"].status_json()["head_node_id"] == d1_id
+        and state["d3"].status_json()["head_node_id"] == d1_id,
         15,
-        "d2 to take over as head",
+        "d1 to take over as head",
     )
 
 
 def t05_group_survived_head_change():
+    """The head died with the group on it. The agent re-registers through
+    d1, now the head, carrying its live actors, and the driver re-hellos.
+    Assert it the way vLLM's monitor does: the run-style refs stay pending
+    (a dead worker would appear in `done` within one poll). No method calls
+    here -- actors are serial, exactly like real Ray, so anything issued
+    after block_forever/run() would queue forever by design."""
     ray = state["ray"]
-    # The serving group on d2 must be completely undisturbed by d1's death.
-    # Assert it the way vLLM's monitor does: the run-style refs stay pending
-    # (a dead worker would appear in `done` within one poll). No method calls
-    # here -- actors are serial, exactly like real Ray, so anything issued
-    # after block_forever/run() would queue forever by design.
+    d1 = state["d1"]
+    wait_for(
+        lambda: [a["state"] for a in
+                 d1.status_json("m")["groups"].get("m", {}).get("actors", [])]
+        .count("running") == 2,
+        20,
+        "both actors to be adopted by the new head",
+    )
     for _ in range(3):
         done, _ = ray.wait(state["run_refs"], num_returns=1, timeout=1)
         assert not done, "no worker may die from a head change"
-    snap = state["d2"].status_json("m")
-    actor_states = [a["state"] for a in snap["groups"]["m"]["actors"]]
-    assert actor_states.count("running") == 2, actor_states
 
 
 def t06_peer_staleness_and_recovery():
     # A wedged (SIGSTOPped) daemon stops pushing status without an EOF. The
     # staleness sweeper must declare it gone after MENTAT_PEER_DEAD_AFTER_MS,
     # the serving group must not care, and a SIGCONT must let the mesh heal.
-    d2, d3 = state["d2"], state["d3"]
+    d2, d3 = state["d1"], state["d3"]
     d3_id = d3.status_json()["node_id"]
 
     os.kill(d3.proc.pid, signal.SIGSTOP)
@@ -264,7 +279,7 @@ def t06_peer_staleness_and_recovery():
         wait_for(
             lambda: not d2.status_json()["peers"][d3_id]["alive"],
             15,
-            "d2 to declare the wedged d3 dead",
+            "d1 to declare the wedged d3 dead",
         )
         # A wedged peer daemon leaves the group on d2 alone.
         ray = state["ray"]
@@ -284,9 +299,9 @@ def t06_peer_staleness_and_recovery():
 def main():
     tests = [
         t01_workers_first_then_head,
-        t02_lowest_id_takes_over,
+        t02_a_later_lower_id_adopts_the_settled_head,
         t02b_probes_cover_each_address_pair,
-        t03_group_serves_on_non_head_daemon,
+        t03_a_group_registered_anywhere_lands_on_the_head,
         t04_events_stream_carries_head_change,
         t05_group_survived_head_change,
         t06_peer_staleness_and_recovery,

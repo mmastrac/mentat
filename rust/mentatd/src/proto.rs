@@ -35,6 +35,10 @@ pub enum Msg {
         /// True for the one connection whose EOF means "this driver is gone".
         session: bool,
         kind: String, // "driver" | "cli"
+        /// The box the client is on, filled in by the daemon that relayed
+        /// the connection to the head. Empty from the client itself.
+        #[serde(default)]
+        node_ip: String,
     },
     Nodes,
     ClusterResources,

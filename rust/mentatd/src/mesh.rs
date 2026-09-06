@@ -1,12 +1,10 @@
 //! The daemon mesh: persistent links between mentatd instances, head
 //! election, snapshot exchange, and event replication.
 //!
-//! Deliberately NOT a consensus protocol: state is soft, every daemon serves
-//! its own clients/agents autonomously, and the mesh adds three things --
-//! a merged cluster view from any daemon, a replicated /events stream, and a
-//! deterministic head designation (lowest node id, with hold-down) published
-//! as head_change events. Rendezvous authority still follows RAY_ADDRESS;
-//! moving it onto the elected head is a later phase, on purpose.
+//! There is no consensus protocol. State is soft and is rebuilt from the
+//! agents and drivers themselves, so the mesh only has to give every daemon
+//! the same answer to one question: which daemon is the head. Every group
+//! lives there, relayed by the daemon a container reached.
 
 use std::io::BufReader;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -698,9 +696,11 @@ fn staleness_sweeper(shared: SharedRef) {
     }
 }
 
-/// Deterministic head: lowest node id among self + live peers, committed only
-/// after MENTAT_ELECTION_HOLD_DOWN_MS of stability so a flapping link cannot
-/// thrash the designation.
+/// Head election, committed after MENTAT_ELECTION_HOLD_DOWN_MS of
+/// stability. A settled head stays head while it is alive, since a change
+/// moves every group. A daemon with no head takes the one its live peers
+/// publish, else the lowest live id, and two settled heads that meet
+/// resolve to the lower.
 fn elector(shared: SharedRef) {
     let hold_down = Duration::from_millis(cfg().election_hold_down_ms);
     // Tick at ~1/5th of the hold-down so short test values still commit in a
@@ -710,14 +710,7 @@ fn elector(shared: SharedRef) {
     loop {
         std::thread::sleep(tick);
         let mut st = shared.st.lock().unwrap();
-        let mut ids: Vec<&str> = st
-            .peers
-            .values()
-            .filter(|p| p.alive)
-            .map(|p| p.node_id.as_str())
-            .collect();
-        ids.push(st.node_id.as_str());
-        let candidate = ids.iter().min().unwrap().to_string();
+        let candidate = head_candidate(&st);
         if candidate == st.head_node_id {
             candidate_since = None;
             continue;
@@ -737,9 +730,38 @@ fn elector(shared: SharedRef) {
                 "head_change",
                 json!({ "head": candidate, "previous": old, "generation": generation }),
             );
+            crate::daemon::head_moved(&mut st, &old);
             candidate_since = None;
+            shared.cv.notify_all();
         }
     }
+}
+
+/// The head this daemon should follow, by the rule on `elector`.
+fn head_candidate(st: &crate::state::State) -> String {
+    let alive = |id: &str| id == st.node_id || st.peers.get(id).is_some_and(|p| p.alive);
+    let mut claimed: Vec<String> = st
+        .peers
+        .values()
+        .filter(|p| p.alive)
+        .filter_map(|p| p.last_status["head_node_id"].as_str())
+        .filter(|h| !h.is_empty() && alive(h))
+        .map(str::to_string)
+        .collect();
+    if !st.head_node_id.is_empty() && alive(&st.head_node_id) {
+        claimed.push(st.head_node_id.clone());
+    }
+    if let Some(h) = claimed.into_iter().min() {
+        return h;
+    }
+    let mut ids: Vec<&str> = st
+        .peers
+        .values()
+        .filter(|p| p.alive)
+        .map(|p| p.node_id.as_str())
+        .collect();
+    ids.push(st.node_id.as_str());
+    ids.into_iter().min().unwrap_or_default().to_string()
 }
 
 /// Push our snapshot to every live peer every MENTAT_PEER_STATUS_INTERVAL_MS

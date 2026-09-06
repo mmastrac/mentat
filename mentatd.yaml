@@ -17,7 +17,8 @@
 # VLLM_HOST_IP. See GUIDE.md "Fabrics".
 #
 # Model containers register with this daemon on 127.0.0.1:6379 and retry, so
-# a container that starts first waits for it.
+# a container that starts first waits for it. The daemon relays them to the
+# head, so a container never needs another daemon's address.
 services:
   mentatd:
     image: ${IMAGE:-mentatd:0.7.0}

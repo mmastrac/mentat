@@ -227,6 +227,8 @@ pub struct Counters {
     pub calls_total: u64,
     pub clients_total: u64,
     pub agents_registered: u64,
+    /// Connections piped to the head.
+    pub relayed: u64,
 }
 
 /// One probed (local address -> peer address) pair.
@@ -309,8 +311,9 @@ pub struct State {
     /// without the constraint, so a deployment that has not opted in keeps
     /// placing exactly as it did before islands existed.
     pub fabrics: crate::island::Fabrics,
-    /// The elected head (lowest node_id among self + live peers, after
-    /// hold-down). Starts as self.
+    /// The elected head, empty until the first election settles. Every
+    /// agent and driver connection is relayed to it, so it holds every
+    /// group. mesh::elector has the rule.
     pub head_node_id: NodeId,
     pub head_generation: u64,
     pub agents: HashMap<AgentId, AgentInfo>,
@@ -318,6 +321,8 @@ pub struct State {
     pub pgs: HashMap<PgId, PgInfo>,
     pub refs: HashMap<RefId, RefInfo>,
     pub clients: HashMap<ClientId, ClientInfo>,
+    /// Every open client socket, so a head change can close them all.
+    pub client_links: Vec<(ClientId, FrameWriter)>,
     /// Named placements, by name. Only the head fills this in.
     pub claims: std::collections::BTreeMap<String, ClaimInfo>,
     pub claim_generation: u64,
@@ -347,7 +352,7 @@ impl State {
     pub fn new(node_ip: String, hostname: String, gcs_address: String) -> Self {
         let node_id = node_id_for(&node_ip);
         State {
-            head_node_id: node_id.clone(),
+            head_node_id: String::new(),
             head_generation: 0,
             fabrics: crate::island::Fabrics::default(),
             peers: HashMap::new(),
@@ -363,6 +368,7 @@ impl State {
             pgs: HashMap::new(),
             refs: HashMap::new(),
             clients: HashMap::new(),
+            client_links: Vec::new(),
             claims: std::collections::BTreeMap::new(),
             claim_generation: 0,
             misfiled_warned: std::collections::BTreeSet::new(),

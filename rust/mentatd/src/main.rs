@@ -381,6 +381,7 @@ fn cli_request(addr: &str, msg: Msg) -> std::io::Result<(Msg, Vec<u8>)> {
                 group: group_from_env(),
                 session: false,
                 kind: "cli".to_string(),
+                node_ip: String::new(),
             },
         },
         &[],

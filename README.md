@@ -77,14 +77,13 @@ RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip install --no-deps /tmp/mentatd-0.7.0-py3-none-any.whl
 ```
 
-In the entrypoint, export the daemon address and the group before
-`ray start`:
+In the entrypoint, export the group before `ray start`. The daemon on the
+box relays to the head, so no address is needed:
 
 ```bash
 export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
-export RAY_ADDRESS=10.0.0.1:6379
 export MENTAT_GROUP=mymodel
-ray start --address=$RAY_ADDRESS
+ray start
 vllm serve ... --distributed-executor-backend ray -tp 2
 ```
 

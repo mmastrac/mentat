@@ -3,8 +3,8 @@
 //! is its own head; the mesh/election layer slots in above these handlers.
 
 use std::collections::BTreeMap;
-use std::io::BufReader;
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufReader, Write};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -411,14 +411,45 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
         _ => return,
     };
     match first.0.msg {
-        Msg::Hello { .. } => client_conn(shared, reader, writer, peer_ip, first.0),
-        Msg::AgentRegister { .. } => agent_conn(shared, reader, writer, peer_ip, first),
+        Msg::Hello { .. } | Msg::AgentRegister { .. } => match head_for(&shared) {
+            Head::Here => match first.0.msg {
+                Msg::Hello { .. } => client_conn(shared, reader, writer, peer_ip, first.0),
+                _ => agent_conn(shared, reader, writer, peer_ip, first),
+            },
+            Head::At(addr) => {
+                // A client that claimed no box is on this one. The relay's
+                // source address may be one this box does not announce, so
+                // the head is told outright.
+                let mut first = first;
+                let mine = crate::announce::all_local_addrs();
+                let local = crate::state::is_loopback(&peer_ip) || mine.contains(&peer_ip);
+                if local {
+                    let my_ip = shared.st.lock().unwrap().node_ip.clone();
+                    match &mut first.0.msg {
+                        Msg::Hello { node_ip, .. } if node_ip.is_empty() => *node_ip = my_ip,
+                        Msg::AgentRegister { node_ip, .. } if node_ip.is_empty() => {
+                            *node_ip = my_ip
+                        }
+                        _ => {}
+                    }
+                }
+                relay(&shared, reader, addr, first)
+            }
+            Head::None => {
+                let _ = writer.send(
+                    Msg::Err {
+                        error: "no head elected yet, retry".to_string(),
+                    },
+                    first.0.req,
+                    &[],
+                );
+            }
+        },
         Msg::PeerHello { .. } => crate::mesh::accept_peer(shared, reader, writer, peer_ip, first),
-        // A reachability probe. It gets its own connection because the
-        // question is about the socket rather than the mesh: answering says
-        // this address pair carries traffic, and the node id in the answer
-        // says the address belongs to the node the prober meant. Nothing is
-        // recorded here -- the prober owns the result.
+        // A probe gets its own connection, since the question is whether
+        // this address pair carries traffic. The node id in the answer says
+        // the address belongs to the node the prober meant. The prober owns
+        // the result.
         Msg::Probe { .. } => {
             let my_id = shared.st.lock().unwrap().node_id.clone();
             let _ = writer.send(Msg::ProbeOk { node_id: my_id }, first.0.req, &[]);
@@ -433,6 +464,144 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
                 first.0.req,
                 &[],
             );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The head, and the relay to it
+// ---------------------------------------------------------------------------
+
+enum Head {
+    Here,
+    /// Addresses to try, best first.
+    At(Vec<String>),
+    None,
+}
+
+/// Where a registration or driver session belongs. Every group lives on
+/// the head, so a container points at the daemon on its own box and still
+/// lands with every other rank. A connection that arrives before the first
+/// election waits here.
+fn head_for(shared: &SharedRef) -> Head {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut st = shared.st.lock().unwrap();
+    loop {
+        if !st.head_node_id.is_empty() {
+            if st.head_node_id == st.node_id {
+                return Head::Here;
+            }
+            // The link's own address carried a connection, which the
+            // control address on a multi-homed peer may not have.
+            return match st.peers.get(&st.head_node_id).filter(|p| p.alive) {
+                Some(p) => {
+                    let port = p
+                        .control_addr
+                        .rsplit_once(':')
+                        .map(|(_, port)| port)
+                        .unwrap_or("6379");
+                    let mut at = vec![format!("{}:{port}", p.link_ip), p.control_addr.clone()];
+                    at.extend(p.addrs.iter().map(|a| format!("{a}:{port}")));
+                    at.dedup();
+                    Head::At(at)
+                }
+                None => Head::None,
+            };
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Head::None;
+        }
+        st = shared.cv.wait_timeout(st, left).unwrap().0;
+    }
+}
+
+/// Pipe one connection to the head, first frame included, until either
+/// side closes.
+fn relay(
+    shared: &SharedRef,
+    reader: BufReader<TcpStream>,
+    head: Vec<String>,
+    first: (Frame, Vec<u8>),
+) {
+    let net = crate::testnet::load();
+    let up = head.iter().find_map(|h| {
+        let target = net
+            .as_ref()
+            .and_then(|n| n.real(h.rsplit_once(':').map(|(host, _)| host).unwrap_or(h)))
+            .unwrap_or_else(|| h.clone());
+        target
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut a| a.next())
+            .and_then(|a| TcpStream::connect_timeout(&a, Duration::from_secs(5)).ok())
+    });
+    let Some(mut up) = up else {
+        log("relay_failed", &[("head", head.join(","))]);
+        return;
+    };
+    set_keepalive(&up);
+    if crate::proto::write_frame(&mut up, &first.0, &first.1).is_err()
+        || up.write_all(reader.buffer()).is_err()
+    {
+        return;
+    }
+    shared.st.lock().unwrap().counters.relayed += 1;
+    let down = reader.into_inner();
+    let (Ok(mut down2), Ok(mut up2)) = (down.try_clone(), up.try_clone()) else {
+        return;
+    };
+    let mut down_r = down;
+    let mut up_w = up;
+    let pump = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut down_r, &mut up_w);
+        let _ = up_w.shutdown(std::net::Shutdown::Both);
+    });
+    let _ = std::io::copy(&mut up2, &mut down2);
+    let _ = down2.shutdown(std::net::Shutdown::Both);
+    let _ = pump.join();
+}
+
+/// Called when the head changes. A daemon that has stopped being head
+/// drops every group it held. Its agent links close so the agents re-register
+/// through the relay, and its driver rows go without a reap, since the
+/// actors are alive and the new head adopts them.
+pub fn head_moved(st: &mut State, old: &str) {
+    if st.head_node_id == st.node_id || (st.agents.is_empty() && st.clients.is_empty()) {
+        return;
+    }
+    let reason = format!("group moved to head {}", st.head_node_id);
+    log(
+        "groups_moved",
+        &[
+            ("from", old.to_string()),
+            ("to", st.head_node_id.clone()),
+            ("agents", st.agents.len().to_string()),
+            ("clients", st.clients.len().to_string()),
+        ],
+    );
+    for a in st.agents.values() {
+        a.writer.shutdown();
+    }
+    for (_, w) in st.client_links.drain(..) {
+        w.shutdown();
+    }
+    st.clients.clear();
+    st.claims.clear();
+    st.refs.clear();
+    let now = crate::state::now_ms_u64();
+    for a in st.actors.values_mut() {
+        if !matches!(a.state, ActorState::Dead { .. }) {
+            a.state = ActorState::Dead {
+                reason: reason.clone(),
+                at_ms: now,
+            };
+        }
+    }
+    for pg in st.pgs.values_mut() {
+        if pg.state != PgState::Removed {
+            pg.state = PgState::Removed;
+            pg.removed_ms = Some(now);
         }
     }
 }
@@ -454,6 +623,7 @@ fn client_conn(
             group,
             session,
             kind,
+            node_ip: claimed,
         } = hello.msg
         else {
             unreachable!()
@@ -480,7 +650,14 @@ fn client_conn(
             }
         }
 
-        let node_id = client_node(&st, &peer_ip);
+        let node_id = client_node(
+            &st,
+            if claimed.is_empty() {
+                &peer_ip
+            } else {
+                &claimed
+            },
+        );
 
         let entry = st
             .clients
@@ -506,6 +683,7 @@ fn client_conn(
                 json!({ "group": group, "client_id": client_id, "kind": kind }),
             );
         }
+        st.client_links.push((client_id.clone(), writer.clone()));
         let _ = writer.send(
             Msg::HelloOk {
                 node_id,
@@ -554,13 +732,25 @@ fn client_conn(
             ("session", is_session.to_string()),
         ],
     );
-    if is_session {
+    let moved = {
+        let mut st = shared.st.lock().unwrap();
+        st.client_links
+            .retain(|(_, w)| !FrameWriter::same_socket(w, &writer));
+        // A session closing on a daemon that is not the head was cut by a
+        // head change. Its actors are alive and belong to the new head.
+        st.head_node_id != st.node_id
+    };
+    if is_session && !moved {
         reap_client(&shared, &client_id);
     } else {
         // A driver's worker threads share its session's row, which leaves
         // with the session. A CLI connection's row leaves with it.
         let mut st = shared.st.lock().unwrap();
-        if st.clients.get(&client_id).is_some_and(|c| !c.has_session) {
+        if st
+            .clients
+            .get(&client_id)
+            .is_some_and(|c| !c.has_session || moved)
+        {
             st.clients.remove(&client_id);
         }
     }

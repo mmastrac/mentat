@@ -222,6 +222,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
             "calls_total": st.counters.calls_total,
             "clients_total": st.counters.clients_total,
             "agents_registered": st.counters.agents_registered,
+            "relayed": st.counters.relayed,
         },
     })
 }

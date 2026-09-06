@@ -96,6 +96,15 @@ The first frame identifies the link type:
 
 Anything else is answered with `err` and closed.
 
+A daemon that is not the head relays a `hello` or `agent_register`
+connection to the head: it opens a connection to the head, sends the first
+frame, and pipes bytes both ways until either side closes. A frame that
+claims no node gets the relaying daemon's `node_ip` first, so the head
+files the client under the box it is on. `hello` carries `node_ip` for
+this, empty from the client. Before the first election settles the
+connection waits, and after thirty seconds without a head it is answered
+with `err`.
+
 ## Client messages
 
 Request and response, all `req`-correlated. `err` may replace any response.
@@ -191,7 +200,11 @@ at its seed address is dialed at each address it last announced, on the
 seed's port. `addrs`, `addr_tags` and `addr_ifaces` are taken from the hello
 and refreshed from every status push.
 
-The head is the lowest node id currently visible, after a hold-down.
+A settled head stays head while it is alive. A daemon with no head takes
+the one its live peers publish in `head_node_id`, and with none published
+takes the lowest live node id. Two settled heads that meet resolve to the
+lower. Every change waits the hold-down, and a daemon that stops being head
+closes its agent and driver links so both re-register with the new one.
 
 ### Probes
 

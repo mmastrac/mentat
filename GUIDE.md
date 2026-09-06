@@ -41,8 +41,11 @@ models on one node never count each other's GPUs. Running the same model
 twice means two groups. A second driver in one group is rejected at
 `ray.init`.
 
-The driver and every agent of a group must reach the same daemon. Rendezvous
-follows `RAY_ADDRESS`. The mesh carries observability and head election.
+Every group lives on the head. A daemon that is not the head relays each
+agent registration and driver session it receives to the head, so a
+container talks to the daemon on its own box and still lands in one place
+with every other rank. `RAY_ADDRESS` can name any daemon, and its default
+of `127.0.0.1:6379` is the right value everywhere.
 
 ### Mesh
 
@@ -92,9 +95,18 @@ of a compose file leaves every snapshot on its own.
 
 ### Head election
 
-The head is the lowest node id visible, after `MENTAT_ELECTION_HOLD_DOWN_MS`
-of stability. Only the head answers a named placement claim. See "Named
-placements".
+A settled head stays head while it is alive. A daemon with no head takes
+the one its live peers publish, and with none published takes the lowest
+live node id. Two settled heads that meet after a partition resolve to the
+lower. Every change waits `MENTAT_ELECTION_HOLD_DOWN_MS` of stability, and
+a connection that arrives before the first election waits for it.
+
+A head change moves every group. The daemon that stops being head closes
+its agent and driver links, the agents re-register through their local
+daemon's relay carrying the actors they run, and the drivers reconnect
+under their client ids. The new head adopts both, so the ranks keep
+running. `groups_moved` is logged where they left and `actor_adopted`
+where they arrived.
 
 ### Daemon address
 
@@ -299,9 +311,8 @@ Export before `ray start`:
 
 ```bash
 export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
-export RAY_ADDRESS=10.0.0.1:6379      # the same daemon for driver and every agent
 export MENTAT_GROUP=mymodel           # one per model deployment
-ray start --address=$RAY_ADDRESS      # detaches; the agent runs beside vllm
+ray start                             # detaches; the agent runs beside vllm
 ray status | grep -oE '[0-9.]+/[0-9.]+ GPU' | cut -d/ -f2 | cut -d. -f1
 vllm serve ... --distributed-executor-backend ray -tp 2
 ```
@@ -619,7 +630,8 @@ process start.
 
 - `RAY_ADDRESS` (default: `/tmp/mentat/head.json`, then `127.0.0.1:6379`)
 
-  Daemon the driver and the CLI connect to. See "Daemon address".
+  Daemon the driver and the CLI connect to. Any daemon relays to the head,
+  so the default is right on every node. See "Daemon address".
 
 - `MENTAT_DAEMON` (default: the `--address` flag, then `127.0.0.1:6379`)
 
@@ -759,8 +771,8 @@ Log lines are `key=value` pairs. Lines to know:
 
 ## Limits
 
-- One daemon owns each group. The driver and every agent must reach the
-  same one.
+- Every group lives on the head, and a head change moves them all. A rank
+  sees that as a short reconnect.
 - Actors are serial. A call after `run()` never completes.
 - The audited surface holds for the vLLM it was audited against. Re-run the
   grep on every base-image change.

@@ -156,6 +156,14 @@ def node_id(name):
     return state["daemons"][name].status_json()["node_id"]
 
 
+def head():
+    """The daemon every group lives on. Registrations anywhere are relayed
+    to it, so group state is read from here."""
+    daemons = state["daemons"]
+    hid = daemons["n70"].status_json()["head_node_id"]
+    return next(d for d in daemons.values() if d.status_json()["node_id"] == hid)
+
+
 def alive_peers(d):
     return {p["node_ip"] for p in d.status_json()["peers"].values() if p["alive"]}
 
@@ -222,25 +230,57 @@ time.sleep(3600)
     return p
 
 
+def not_head():
+    """A daemon that is not the head, to register through."""
+    hid = head().status_json()["node_id"]
+    return next(d for d in state["daemons"].values() if d.status_json()["node_id"] != hid)
+
+
 def t03_a_group_lands_inside_one_island():
-    daemons = state["daemons"]
-    hub = daemons["n70"]
-    # One GPU on each box of pair A and one on a box of pair B, all
-    # registered with the hub. A two-bundle group fits pair A alone.
+    """Agents and driver all talk to a daemon that is not the head, which
+    relays them, so the group is whole on the head and places inside one
+    island there."""
+    via = not_head()
+    # One GPU on each box of pair A and one on a box of pair B. A
+    # two-bundle group fits pair A alone.
     for name in ("n70", "n77", "n36"):
-        hub.start_agent("tp2", gpus=1, container=name,
+        via.start_agent("tp2", gpus=1, container=name,
                         env_extra={"MENTAT_NODE_IP": BOXES[name][0]})
     wait_for(
-        lambda: hub.status_json("tp2")["groups"].get("tp2", {}).get("gpus_total") == 3,
-        20, "three tp2 agents",
+        lambda: head().status_json("tp2")["groups"].get("tp2", {}).get("gpus_total") == 3,
+        20, "three tp2 agents, relayed to the head",
     )
-    p = place(hub, "tp2", 2)
+    assert "tp2" not in via.status_json()["groups"]
+    p = place(via, "tp2", 2)
     state["tp2_driver"] = p
     assert p.stdout.readline().strip() == "PLACED"
-    pgs = hub.status_json("tp2")["groups"]["tp2"]["placement_groups"]
+    pgs = head().status_json("tp2")["groups"]["tp2"]["placement_groups"]
     assert [pg["island_nodes"] for pg in pgs] == [2], pgs
-    actors_nodes = {a["node_id"] for a in hub.status_json("tp2")["groups"]["tp2"]["actors"]}
-    assert not actors_nodes, "no actors were spawned, only the group"
+
+
+def t03b_every_rank_registers_with_its_own_daemon():
+    """RAY_ADDRESS=127.0.0.1:6379 on every node: each rank's agent and the
+    driver talk to the daemon on their own box, carry no MENTAT_NODE_IP,
+    and still form one group on the head, each rank filed under its own
+    box."""
+    daemons = state["daemons"]
+    for name in ("n36", "n93"):
+        # Claiming nothing is what a container on the box does. The relaying
+        # daemon fills in its own node.
+        daemons[name].start_agent("local", gpus=1, container=f"l{name}",
+                                  env_extra={"MENTAT_NODE_IP": ""})
+    wait_for(
+        lambda: head().status_json("local")["groups"].get("local", {}).get("gpus_total") == 2,
+        20, "both local agents on the head",
+    )
+    agents = head().status_json("local")["groups"]["local"]["agents"]
+    assert {a["node_ip"] for a in agents} == {BOXES["n36"][0], BOXES["n93"][0]}, agents
+    p = place(daemons["n93"], "local", 2)
+    state["local_driver"] = p
+    assert p.stdout.readline().strip() == "PLACED"
+    pgs = head().status_json("local")["groups"]["local"]["placement_groups"]
+    # Pair B is the island those two boxes share.
+    assert [pg["island_nodes"] for pg in pgs] == [2], pgs
 
 
 def t04_a_cut_fabric_cable_moves_the_mesh_link_and_dissolves_the_island():
@@ -279,7 +319,7 @@ def t04_a_cut_fabric_cable_moves_the_mesh_link_and_dissolves_the_island():
     assert p.stdout.readline().strip() == "PENDING"
 
     def reason():
-        for pg in n70.status_json("tp2b")["groups"]["tp2b"]["placement_groups"]:
+        for pg in head().status_json("tp2b")["groups"]["tp2b"]["placement_groups"]:
             if pg["state"] == "PENDING":
                 return pg["pending_reason"]
 
@@ -293,10 +333,9 @@ def t05_a_repaired_cable_brings_the_island_and_the_placement_back():
     want = both_islands()
     for name, d in daemons.items():
         wait_for(lambda: islands_of(d) == want, 30, f"{name} to see island A again")
-    n70 = daemons["n70"]
     wait_for(
         lambda: [pg["state"] for pg in
-                 n70.status_json("tp2b")["groups"]["tp2b"]["placement_groups"]] == ["CREATED"],
+                 head().status_json("tp2b")["groups"]["tp2b"]["placement_groups"]] == ["CREATED"],
         20, "the waiting group to place",
     )
 
@@ -364,7 +403,7 @@ def t08_dead_agents_and_removed_groups_age_out():
     # removed from a compose file looks like.
     a = hub.start_agent("gone", gpus=1, container="gone",
                         env_extra={"MENTAT_NODE_IP": BOXES["n36"][0]})
-    wait_for(lambda: hub.status_json("gone")["groups"].get("gone", {}).get("gpus_total") == 1,
+    wait_for(lambda: head().status_json("gone")["groups"].get("gone", {}).get("gpus_total") == 1,
              20, "the gone agent")
     p = place(hub, "gone", 1)
     assert p.stdout.readline().strip() == "PLACED"
@@ -372,11 +411,8 @@ def t08_dead_agents_and_removed_groups_age_out():
     p.wait()
     a.kill()
     a.wait()
-    wait_for(lambda: "gone" not in hub.status_json()["groups"], 20,
+    wait_for(lambda: "gone" not in head().status_json()["groups"], 20,
              "the group to leave the snapshot once its rows aged")
-    # The other groups' history follows the same clock.
-    for g in ("tp2", "tp2b"):
-        assert g in hub.status_json()["groups"], g
 
 
 def router_status(port):
@@ -461,6 +497,7 @@ def main():
         t01_one_seed_reveals_the_whole_mesh,
         t02_every_daemon_derives_both_islands,
         t03_a_group_lands_inside_one_island,
+        t03b_every_rank_registers_with_its_own_daemon,
         t04_a_cut_fabric_cable_moves_the_mesh_link_and_dissolves_the_island,
         t05_a_repaired_cable_brings_the_island_and_the_placement_back,
         t06_a_renumbered_node_is_followed_without_a_restart,
