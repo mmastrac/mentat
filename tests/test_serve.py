@@ -484,7 +484,7 @@ def t06_mcp_merge_routes_by_group_argument():
     text = r["result"]["content"][0]["text"]
     assert not r["result"].get("isError"), r
     assert "model-a ran tool_a" in text and '"x": 1' in text, text
-    # The shared tool goes where __group says, and the container sees the
+    # The shared tool goes where __group points, and the container sees the
     # arguments without it.
     r = mcp({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
              "params": {"name": SHARED_TOOL,
@@ -652,7 +652,7 @@ def t08b_port_announcement_resolves_and_falls_through():
     assert any(t["name"] == "tool_p" for t in r["result"]["tools"]), r
 
     # Kill the only address that replies: no candidate is left, so the group
-    # closes and says which addresses it tried.
+    # closes and reports which addresses it tried.
     mP.stop()
 
     def closed():
@@ -750,7 +750,7 @@ def t10_udp_announce_replaces_the_seed_list():
              "MENTAT_ANNOUNCE_PORT": str(udp_port),
              "SERVE_PORT": str(port4),
              "POLL_INTERVAL_S": "1",
-             # Empty takes the default, `local`, which has to admit an
+             # Empty uses the default, `local`, which has to admit an
              # announcement off the loopback interface.
              "ALLOWED_SOURCES": ""},
     )

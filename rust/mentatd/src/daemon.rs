@@ -31,7 +31,7 @@ pub struct DaemonOpts {
 /// This node's cluster identity.
 ///
 /// A set-but-empty MENTAT_NODE_IP reads as unset. `${MENTAT_NODE_IP:-}` in a
-/// compose file sets the variable to nothing, and taking that literally gave
+/// compose file sets the variable to nothing, and reading that literally gave
 /// every daemon deployed from the shipped file the same identity, since a
 /// node id is the hash of this string and they all hashed "mentat:". Peers
 /// skip a peer bearing their own id, so such a fleet never meshed.
@@ -48,7 +48,7 @@ pub fn default_node_ip() -> String {
 
 pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
     // A daemon with no identity hashes to the same node id as every other
-    // one, and a peer bearing your own id is taken for yourself and skipped.
+    // one, and a peer bearing your own id reads as yourself and skipped.
     if opts.node_ip.trim().is_empty() {
         let why = "node ip is empty: set MENTAT_NODE_IP or --node-ip to the \
                    address this node is known by";
@@ -167,7 +167,7 @@ fn sweep_lifecycle(shared: &SharedRef) {
         })
         .collect();
     for (pg_id, group, age, why) in timed_out {
-        // The last placement attempt recorded what it could not find. Say
+        // The last placement attempt recorded what it could not find. Report
         // that rather than the old blanket guess about GPU counts: at four
         // nodes on two fabrics, "not enough GPUs" is usually wrong and
         // "not enough on one fabric" is usually right.
@@ -285,7 +285,7 @@ fn sweep_lifecycle(shared: &SharedRef) {
 /// driver reconnects.
 ///
 /// A group is whatever agents and actors mention it, so its last row going
-/// takes it out of every snapshot.
+/// removes it from every snapshot.
 fn sweep_history(st: &mut State) {
     let (now, keep) = (crate::state::now_ms_u64(), cfg().history_keep_ms);
     let aged = |at: u64| now.saturating_sub(at) > keep;
@@ -458,7 +458,7 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
         },
         Msg::PeerHello { .. } => crate::mesh::accept_peer(shared, reader, writer, peer_ip, first),
         // A probe gets its own connection, since the question is whether
-        // this address pair holds traffic. The node id in the answer says
+        // this address pair holds traffic. The node id in the reply gives
         // the address belongs to the node the prober meant. The prober owns
         // the result.
         Msg::Probe { .. } => {
@@ -1042,7 +1042,7 @@ fn handle_client_msg(
                             );
                             if send_res.is_err() {
                                 // The link is dying under us. The EOF handler
-                                // and degrade window take it from here.
+                                // and degrade window handle it from here.
                                 log(
                                     "call_held",
                                     &[("ref", ref_id.clone()), ("actor", actor_id.clone())],
@@ -1134,7 +1134,7 @@ fn claimed_nodes(view: &Value) -> Vec<String> {
 /// The name is the reservation. A second holder of one name is not a second
 /// placement, so ranks that claim the same name agree on their nodes without
 /// a coordinator. A holder that requests a different shape under a name
-/// already taken is refused: re-solving would move nodes under whoever
+/// already held is refused: re-solving would move nodes under whoever
 /// claimed first.
 ///
 /// Only the head replies. Two daemons solving the same name against their
@@ -2238,7 +2238,7 @@ fn agent_conn(
                     }
                 }
                 // Not known here. A daemon that restarted has forgotten
-                // every actor, and killing them would take down every model on the
+                // every actor, and killing them would kill every model on the
                 // cluster because its own bookkeeping was lost. The process
                 // is alive on the agent, which is the fact that matters, so
                 // it is adopted from what the agent reports.
@@ -2697,7 +2697,7 @@ mod tests {
         assert_eq!(misfiled("10.100.0.2", "id-10.100.0.2", &boxes()), None);
     }
 
-    /// An address no box in the mesh owns says nothing about identity: it
+    /// An address no box in the mesh owns proves nothing about identity: it
     /// may be a node whose daemon has not been seen yet.
     #[test]
     fn an_unknown_address_is_quiet() {

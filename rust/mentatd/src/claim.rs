@@ -1,10 +1,10 @@
 //! Matching a requested shape against the cluster's probed topology.
 //!
 //! Placement today settles one question: put these bundles inside one fabric
-//! island. It cannot say "a cabled pair here and a cabled pair there, with
+//! island. It cannot express "a cabled pair here and a cabled pair there, with
 //! only IP between them", which is what pipeline parallel over two
-//! tensor-parallel pairs needs. A request here names its sets, says which of them need a fabric,
-//! and says what has to hold between them.
+//! tensor-parallel pairs needs. A request here names its sets, reports which of them need a fabric,
+//! and reports what has to hold between them.
 //!
 //! The answer names nodes and, for every link it relied on, the address to
 //! dial and the interface it sits on. A caller binding NCCL needs both and
@@ -238,7 +238,7 @@ impl Solution {
 ///
 /// An `rdma` set may only sit inside an island, since that is the derived
 /// answer to "these nodes are cabled together and every pair was probed". An
-/// `any` set takes nodes in id order, which is arbitrary but identical on
+/// `any` set uses nodes in id order, which is arbitrary but identical on
 /// every daemon.
 fn candidates(t: &Topology, set: &SetReq, taken: &BTreeSet<NodeId>) -> Vec<Vec<NodeId>> {
     let want = set.bundles.len();
@@ -261,7 +261,7 @@ fn candidates(t: &Topology, set: &SetReq, taken: &BTreeSet<NodeId>) -> Vec<Vec<N
                 // The first `want` that fit, in island order. Trying every
                 // subset would multiply the search for no gain: island
                 // members are interchangeable by construction. A member
-                // whose GPUs are spoken for is stepped over rather than
+                // whose GPUs are already reserved is stepped over rather than
                 // ending the walk.
                 let mut chosen: Vec<NodeId> = Vec::new();
                 for n in &avail {
@@ -325,7 +325,7 @@ fn bind_for(t: &Topology, set: &SetReq, node: &NodeId, peers: &[NodeId]) -> Opti
 /// Match a request against the topology.
 ///
 /// Sets are placed in the order given, with `rdma` sets first: they have the
-/// fewest places to go, and placing a loose set first can take a node the
+/// fewest places to go, and placing a loose set first can claim a node the
 /// constrained one needed. Each set's candidates are tried in turn and the
 /// choice is undone if a later set or a `between` requirement fails.
 pub fn solve(t: &Topology, req: &Request) -> Result<Solution, String> {
@@ -751,7 +751,7 @@ mod tests {
     }
 
     /// A fabric requirement between two sets on separate fabrics cannot be
-    /// met, and saying so beats placing them and hanging in NCCL.
+    /// met, and reporting it beats placing them and hanging in NCCL.
     #[test]
     fn a_fabric_between_separate_fabrics_is_refused() {
         let t = two_pairs();
@@ -770,9 +770,8 @@ mod tests {
         assert!(e.contains("largest island has 2"), "{e}");
     }
 
-    /// A node with its GPUs spoken for cannot take a rank.
-    /// A node with its GPUs spoken for cannot take a rank, so the pair goes
-    /// to the other fabric rather than being placed short.
+    /// A node with its GPUs already reserved cannot host a rank, so the pair
+    /// goes to the other fabric rather than being placed short.
     #[test]
     fn a_full_node_sends_the_set_elsewhere() {
         let mut t = two_pairs();
@@ -782,11 +781,11 @@ mod tests {
         assert_eq!(got, ["nC", "nD"].map(String::from).into());
     }
 
-    /// A loose set placed first can take a node the cabled set needed, so
+    /// A loose set placed first can claim a node the cabled set needed, so
     /// the constrained set goes first whatever order the caller wrote.
     ///
     /// nE is off both fabrics and sorts first, so a loose set placed before
-    /// the cabled one would take nA and break the pair.
+    /// the cabled one would claim nA and break the pair.
     #[test]
     fn a_constrained_set_is_placed_before_a_loose_one() {
         let mut t = two_pairs();

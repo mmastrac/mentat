@@ -162,7 +162,7 @@ fn metrics(shared: &SharedRef) -> String {
             alive.iter().map(|a| a.machine.memory).sum::<u64>()
         ));
         // One series per vendor present. A box may hold two models, and a
-        // total across them would not say what the group can place.
+        // total across them would not show what the group can place.
         let mut vendors: Vec<&str> = alive
             .iter()
             .flat_map(|a| a.machine.gpus.iter().map(|d| d.vendor.as_str()))
@@ -265,7 +265,7 @@ fn metrics(shared: &SharedRef) -> String {
 
 // ---------------------------------------------------------------------------
 // WebSocket: server-side handshake plus outbound text frames. Inbound frames
-// are drained and discarded (a subscriber has nothing to say to us); close is
+// are drained and discarded (a subscriber has nothing to send us); close is
 // detected by EOF on the drain thread or a failed write.
 // ---------------------------------------------------------------------------
 

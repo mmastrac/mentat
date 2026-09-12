@@ -83,7 +83,7 @@ pub fn pg_row(p: &crate::state::PgInfo) -> Value {
         },
         "claim": p.claim,
         // What the last placement attempt could not find. The pending
-        // timeout says the same thing minutes later; this says it while
+        // timeout reports the same thing minutes later. This reports it while
         // there is still time to act.
         "pending_reason": p.pending_reason,
         "island_nodes": p.island.as_ref().map(|i| i.nodes.len()),

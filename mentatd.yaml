@@ -37,7 +37,7 @@ services:
       - MENTAT_NODE_IP=${MENTAT_NODE_IP:-}
       - MENTAT_PEERS=${MENTAT_PEERS:-}
       # Lifecycle tuning, in milliseconds. GUIDE.md "Environment" has the
-      # defaults. Empty takes the default.
+      # defaults. Empty uses the default.
       - MENTAT_PG_PENDING_TIMEOUT_MS=${MENTAT_PG_PENDING_TIMEOUT_MS:-}
       - MENTAT_AGENT_DEGRADED_AFTER_MS=${MENTAT_AGENT_DEGRADED_AFTER_MS:-}
       - MENTAT_AGENT_DEAD_AFTER_MS=${MENTAT_AGENT_DEAD_AFTER_MS:-}

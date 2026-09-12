@@ -163,7 +163,7 @@ fn tokenize_root(base: &str) -> String {
 }
 
 /// The chat messages to price against the engine, and the token cost of the
-/// media taken out of them.
+/// media removed.
 ///
 /// `instructions` becomes a leading system message, which is where the
 /// Responses API puts it, so the template charges for it the same way.

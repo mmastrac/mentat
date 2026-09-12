@@ -159,7 +159,7 @@ time.sleep(3600)
 
     why = wait_for(pending_reason, 20, "the split group to report why it cannot place")
     # The message has to state the constraint. "not enough GPUs" is what this
-    # used to say, and it is wrong here: there are exactly enough.
+    # used to report, and it is wrong here: there are exactly enough.
     assert "one rdma fabric" in why, why
     assert "'split'" in why, why
 

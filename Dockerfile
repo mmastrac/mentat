@@ -66,7 +66,7 @@ LABEL org.opencontainers.image.title="mentatd" \
       org.opencontainers.image.source="https://github.com/mmastrac/mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=build /src/target/release/mentatd /usr/local/bin/mentatd
-# The agent runs this to say what the box is. It sits beside the binary,
+# The agent runs this to report what the box is. It sits beside the binary,
 # which is where the lookup starts, so a site can replace it in place.
 COPY scripts/mentatd-probe-machine /usr/local/bin/mentatd-probe-machine
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \

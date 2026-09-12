@@ -100,7 +100,7 @@ def agent_id(args):
     return f"{args.group}@{args.container}@{args.node_ip}"
 
 
-#: The wire version this shim speaks.
+#: The wire version this shim uses.
 PROTO = "0.99"
 
 
@@ -179,7 +179,7 @@ def connect(args):
         offered = header.get("proto", "")
         if offered.split(".")[0] != PROTO.split(".")[0]:
             raise SystemExit(
-                f"mentatd: daemon speaks proto {offered!r}, this shim {PROTO}"
+                f"mentatd: daemon proto {offered!r}, this shim {PROTO}"
             )
         if header.get("t") != "agent_register_ok":
             raise RuntimeError(f"expected agent_register_ok, got {header.get('t')!r}")

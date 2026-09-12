@@ -72,7 +72,7 @@ through `python -m ray.register`, so the probe is the whole test.
 An engine is admitted as soon as its API replies, which on some models is
 during its self-test.
 
-`/status.json` says why a model is missing. Each group has `healthy` and,
+`/status.json` gives the reason a model is missing. Each group has `healthy` and,
 when false, `why_not` giving the failed gate: `no announced OpenAI
 endpoint`, `no running actors`, `not probed yet`, `endpoint probe failed`,
 or `endpoint probe stale`. A probe failure quotes every candidate address it
@@ -103,7 +103,7 @@ candidate. The router uses it as written and skips the allowlist check.
 The prober walks the list and keeps the first address that replies. Live
 traffic stays on it until it stops replying, then the router falls through
 to the next candidate. Every `PROBE_PROMOTE_S` the router re-tries the
-addresses ranked above the one in use, so a repaired link is taken back
+addresses ranked above the one in use, so a repaired link is restored
 without operator action. `/status.json` shows `openai` (in use) beside
 `openai_candidates` (all of them, best first). A group serving from its
 second candidate is how a dropped link looks from the router.
@@ -139,7 +139,7 @@ A model that is not routable when a request arrives holds the request for up
 to `MODEL_WAIT_S`, since a model that restarts is missing for a while, and a
 refused upstream connection is retried inside the same window. After it, a
 model whose group exists but is not admitted returns 503 with the reason and
-a name nothing serves returns 404. Once the upstream has taken a request it
+a name nothing serves returns 404. Once the upstream has accepted a request it
 is never sent again. Bodies over 128 MiB are refused. One upstream request
 may run for `SERVING_TIMEOUT_S`.
 
@@ -166,15 +166,15 @@ All three are optional. An agent without them registers as before.
 
 `MENTAT_OPENAI_API` belongs on the rank running the API server, since only
 that rank serves inference. Nothing enforces this. The agent announces
-whatever is set, and the router takes the lexically first if several ranks
+whatever is set, and the router uses the lexically first if several ranks
 announce. `MENTAT_MCP_API` belongs on every rank, because every rank runs a
 status server. `MENTAT_MODEL_PROVIDER` specifies the engine behind
 `MENTAT_OPENAI_API` and belongs on the same rank. `/status.json` reports it
-per group, empty when the container did not say. "Counting tokens" needs it.
+per group, empty when the container did not report. "Counting tokens" needs it.
 
 ### Port form and URL form
 
-An endpoint takes one of two forms:
+An endpoint has one of two forms:
 
 | Value | Meaning |
 | --- | --- |
@@ -191,7 +191,7 @@ The port form assumes the API server binds the wildcard address, which
 `--host 0.0.0.0` does and vLLM does by default. The agent watches its own
 `/proc/net/tcp` for the announced port. If the server bound a single
 address, the agent logs `service_bind_narrow` and attaches the finding to
-the announcement, so `/status.json` says `bound to 10.0.0.1 only` beside the
+the announcement, so `/status.json` reports `bound to 10.0.0.1 only` beside the
 failed probe. The finding is advisory. The probe alone admits an endpoint.
 
 The URL form is for a server the port form cannot describe: a different
@@ -238,7 +238,7 @@ flight for that model.
 Clicking a model lists those requests one per row: body size, time waiting
 with no first byte, time to first byte once it arrives, and bytes returned.
 A long wait with no first byte while the engine reports nothing running is
-an engine that took the request and stopped.
+an engine that accepted the request and stopped.
 
 A group that fails its probe keeps its row, dimmed, with the reason in place
 of the numbers.
@@ -289,13 +289,13 @@ The merge skips the admission gate. A status server matters most while its
 engine is loading or wedged, which is when the gate would exclude it.
 
 One native tool, `serve_status`, reports the watched daemons, each group's
-health and endpoints, and the model table. That name is taken: a group tool
+health and endpoints, and the model table. That name is in use: a group tool
 called `serve_status` is dropped from the merge, with a log line.
 
 ## Environment
 
-An unset or empty variable takes its default. A `*_S` value must be a
-positive number. Anything else takes the default.
+An unset or empty variable uses its default. A `*_S` value must be a
+positive number. Anything else uses the default.
 
 - `SERVE_PORT` (default 6381)
 
@@ -399,9 +399,9 @@ or a fabric outage without a model disappearing mid-repair.
 
 - `MENTAT_SECRET` (default: unset)
 
-HMAC key for announcements. Must match the daemons'. A keyed router takes
+HMAC key for announcements. Must match the daemons'. A keyed router needs
 signed announcements only, so a half-applied rollout stops discovery until
-the seed list finds the daemons instead. `verify` in `/status.json` says
+the seed list finds the daemons instead. `verify` in `/status.json` reports
 whether a key is in force.
 
 - `MENTAT_SECRET_FILE` (default: unset)

@@ -23,7 +23,7 @@ toward a `0.99` agent. Any other change is major.
 
 On a major mismatch the accepter returns `err` with its own `proto` and
 closes; the dialer closes on a mismatched reply. A mesh peer of another
-major does not take part in election and is redialed at the normal interval.
+major is left out of election and is redialed at the normal interval.
 An announcement of another major is dropped, logged once per source. An
 unknown message type gets `err` and the link stays open. An unparseable
 frame closes it.
@@ -45,7 +45,7 @@ through untouched. Most are empty. The header is a JSON object:
 
 `t` selects the message. `req` correlates a response with its request;
 unsolicited messages use 0. Request `x` gets `x_ok`, or `ok` when it does
-not have a result, or `err`. A message takes its subject's prefix: `pg_`
+not have a result, or `err`. A message uses its subject's prefix: `pg_`
 placement group, `actor_`, `agent_`, `peer_` mesh peer, `host_` actor host,
 `claim_`, `ref_` object ref. The rest are bare: `hello` opens a link, and
 `nodes`, `resources`, `available` and `status` read cluster state. Memory
@@ -75,7 +75,7 @@ creating.
 
 Group scoping keeps two models on one node from counting each other's GPUs.
 `nodes`, `resources`, `available` and placement report for the sending
-client's group, from its `hello`. `status` and `actor_stop` take a group as
+client's group, from its `hello`. `status` and `actor_stop` accept a group as
 an argument, since an operator reads from outside any one deployment. The
 snapshot files agents, actors and placement groups under `groups`.
 
@@ -85,7 +85,7 @@ that group already has a session.
 ## Ids
 
 The daemon mints an id for every actor and placement group, and a ref for
-every result that is not ready yet. Each takes a one-letter type prefix, so
+every result that is not ready yet. Each has a one-letter type prefix, so
 a holder can tell what it has and the daemon dispatches without guessing.
 
 | Id | Shape | Minted by |
@@ -99,7 +99,7 @@ one at once and the value arrives later, so `ref_get` fetches it and
 `ref_wait` reports which of several are ready. A call ref embeds its actor,
 which is how one actor's death resolves every ref outstanding against it.
 
-`ref_get` and `ref_wait` take a call ref or a placement group id. A
+`ref_get` and `ref_wait` accept a call ref or a placement group id. A
 placement group resolves once it reaches `CREATED`, so a driver waits on the
 id `pg_create` returned and does not need a separate handle. A placement
 group that was removed resolves as `actor_died`, with `pending_reason` as
@@ -300,7 +300,7 @@ dialed at each address it last announced, on the seed's port. `addrs`,
 `addr_tags` and `addr_ifaces` come from the hello and refresh on every
 status push.
 
-A settled head stays head while alive. A daemon with no head takes the one
+A settled head stays head while alive. A daemon with no head uses the one
 its live peers publish in `head_node_id`, or the lowest live node id if none
 is published. Two settled heads that meet resolve to the lower. Every change
 waits `MENTAT_ELECTION_HOLD_DOWN_MS`. A daemon that stops being head closes
@@ -407,11 +407,11 @@ tries the higher-ranked ones.
 
 ## Placement
 
-A placement group reserves whole devices. Memory does not take part in
+A placement group reserves whole devices. Memory plays no part in
 placement in 1.0, and a `uma: true` device is one device like any other. The
 bundles of one placement group go on GPUs of one vendor because no
 collective spans vendors: a claim set's `vendor` pins which, and an
-unclaimed placement group takes the first vendor that fits.
+unclaimed placement group uses the first vendor that fits.
 
 A placement group of more than one bundle goes inside one fabric island: a
 set of nodes that all reach each other over addresses tagged `rdma`, with a
@@ -540,7 +540,7 @@ and delivers a peer's event to its own subscribers without re-forwarding it.
 A replicated event describes the originating node's snapshot, while a
 receiving daemon's snapshot summarises its peers rather than holding their
 rows. A consumer therefore applies only events whose `node` is the daemon it
-is reading, taking every other node from that node's own stream.
+is reading, reading every other node from that node's own stream.
 
 ## HTTP
 

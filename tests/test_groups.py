@@ -25,7 +25,7 @@ for i in range(4):
     cluster.start_agent("tp4", gpus=1, container="tp4c", node_ip=f"127.0.0.{i + 1}")
 cluster.wait_group_gpus("tp4", 4)
 # A group of its own for the claim test: the module holds tp4's driver
-# session, and a group takes only one.
+# session, and a group allows only one.
 for i in range(2):
     cluster.start_agent("claimed", gpus=1, container="cc", node_ip=f"127.0.0.{i + 1}")
 cluster.wait_group_gpus("claimed", 2)

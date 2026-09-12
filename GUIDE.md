@@ -60,7 +60,7 @@ daemons that dial each other at once keep the link the lower node id dialed.
 
 ### Placement
 
-A placement group of N single-GPU bundles takes N single-GPU agents or fewer
+A placement group of N single-GPU bundles needs N single-GPU agents or fewer
 multi-GPU ones. A placement group that cannot be satisfied stays PENDING and
 fails after `MENTAT_PG_PENDING_TIMEOUT_MS`. While it waits, `pending_reason`
 in `/status` specifies the constraint.
@@ -70,7 +70,7 @@ placed inside one fabric island. See "Fabrics".
 
 ### Actors
 
-Each actor runs in its own process group, so a kill takes the whole tree.
+Each actor runs in its own process group, so a kill removes the whole tree.
 Actors are serial, as in Ray. `run()` never returns for a vLLM worker, so a
 call issued after it queues forever. `call_pending_long` in the log means
 one did.
@@ -88,14 +88,14 @@ A dead actor keeps its row in `/status`, which turns a later call on it into
 so once the owner is gone the row is history. History ages out: after
 `MENTAT_HISTORY_KEEP_MS` a dead actor whose owner is gone, a removed
 placement group whose owner is gone, an agent whose link is down and a dead
-mesh peer are all dropped, and `history_swept` and `peer_forgotten` say what
-went. A group is whatever agents and actors mention it, so a model taken out
+mesh peer are all dropped, and `history_swept` and `peer_forgotten` report what
+went. A group is whatever agents and actors mention it, so a model removed
 of a compose file leaves every snapshot on its own.
 
 ### Head election
 
-A settled head stays head while it is alive. A daemon with no head takes the
-one its live peers publish, and with none published takes the lowest live
+A settled head stays head while it is alive. A daemon with no head uses the
+one its live peers publish, and with none published uses the lowest live
 node id. Two settled heads that meet after a partition resolve to the lower.
 Every change waits `MENTAT_ELECTION_HOLD_DOWN_MS` of stability, and a
 connection that arrives before the first election waits for it.
@@ -270,7 +270,7 @@ status` and `mentatd stop`. `ray --version` prints `ray, version 2.57.0
 
 `ray stop` needs `--group NAME` or `--all`. Under Ray the command stops the
 local node's processes; here it reaches every actor the daemon knows, so an
-entrypoint that ran it as cleanup fails until someone says which.
+entrypoint that ran it as cleanup fails until someone reports which.
 
 ## Migrating from Ray
 
@@ -340,7 +340,7 @@ giving an address another node is known by is refused at register.
 | `RAY_memory_monitor_refresh_ms` | There is no memory monitor. Nothing samples node memory or kills workers. |
 | Object store size caps | Same. That memory goes back to weights and KV cache. |
 | Head-first startup ordering | Registration retries forever. `ray start --head` is accepted and ignored. |
-| `ray stop` between runs | Actors get their own process group and a kill takes the whole tree. `ray stop` kills actors and needs a scope, see "The ray symlink". |
+| `ray stop` between runs | Actors get their own process group and a kill removes the whole tree. `ray stop` kills actors and needs a scope, see "The ray symlink". |
 
 ### Verify
 
@@ -366,7 +366,7 @@ no agent talks to it, so nothing on the host needs undoing.
 
 This section applies to a cluster with more than one RDMA fabric, for
 example two cabled pairs. When both fabrics share a subnet, only a probe can
-say which nodes share a cable. A cluster with one fabric can skip it.
+report which nodes share a cable. A cluster with one fabric can skip it.
 
 ### Tagging links
 
@@ -411,7 +411,7 @@ addresses with a successful probe behind every pair. A change in membership
 is committed after `MENTAT_ISLAND_HOLD_DOWN_MS` of stability.
 
 A placement group of more than one bundle is placed inside one island. A
-group that fits no island stays PENDING and says why, in `pending_reason`
+group that fits no island stays PENDING and reports why, in `pending_reason`
 and again at the pending timeout. Each rank of a group placed on an island
 is spawned with `MENTAT_FABRIC_IP` set to its node's address on that island.
 
@@ -434,7 +434,7 @@ the constraint. It is for a cluster whose probes disagree with its cabling.
 
 Islands are derived over node ids, and an agent joins its node by the box it
 is on. A container that reaches its daemon over loopback, or over any
-address of the daemon's own box, claims no identity and takes the daemon's.
+address of the daemon's own box, claims no identity and uses the daemon's.
 A container reaching a daemon on another box is filed under whichever box in
 the mesh owns the address it connected from, so it does not need setting
 either, whatever link it came in on. Only a container on a box no daemon
@@ -461,9 +461,9 @@ the claim. A group requesting more than its claim holds stays PENDING.
 
 ## Environment
 
-An unset or empty variable takes its default. An unparsable `*_MS` value
-logs `bad_env_ms` and takes the default. An unrecognised on/off value logs
-`bad_env_flag` and takes the default. Every `*_MS` variable is read once at
+An unset or empty variable uses its default. An unparsable `*_MS` value
+logs `bad_env_ms` and uses the default. An unrecognised on/off value logs
+`bad_env_flag` and uses the default. Every `*_MS` variable is read once at
 process start.
 
 ### Daemon
@@ -512,7 +512,7 @@ with no wildcard is an exact name, so `en` does not match `eno1`. The first
 entry a name matches decides its rank and tags. Interfaces matching one
 entry rank together at that entry's position, in kernel order. List order is
 preference order: list the fast link first and a consumer that can reach
-both takes it. There is no negation.
+both uses it. There is no negation.
 
 Tags travel with the address. `rdma` is the one tag the daemon acts on.
 Every other tag is stored for consumers to read.
@@ -741,12 +741,12 @@ was placed on a fabric island and specifies this rank's address on it.
 
 - `/tmp/mentat/head.json`
 
-Written by the daemon after it binds. Carries the control address the client
+Written by the daemon after it binds. Holds the control address the client
 falls back to.
 
 - `/tmp/mentat/agent.json`
 
-Written by `mentatd start`. Carries the detached agent's pid and group.
+Written by `mentatd start`. Holds the detached agent's pid and group.
 
 - `/tmp/mentat/`
 

@@ -312,7 +312,7 @@ def t04_a_cut_fabric_cable_moves_the_mesh_link_and_dissolves_the_island():
             lambda: islands_of(d) == [sorted([fabric_addr("n36"), fabric_addr("n93")])],
             30, f"{name} to drop island A",
         )
-    # A new group for that pair has nowhere to go and says so.
+    # A new group for that pair has nowhere to go and reports it.
     p = place(n70, "tp2b", 2, timeout=5)
     state["tp2b_driver"] = p
     for name in ("n70", "n77"):

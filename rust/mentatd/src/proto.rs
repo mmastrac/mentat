@@ -35,7 +35,7 @@ pub struct Frame {
     pub msg: Msg,
 }
 
-/// The wire version this build speaks, `major.minor`.
+/// The wire version this build uses, `major.minor`.
 ///
 /// 0.99 is the 1.0 candidate: the shapes are 1.0's and the number moves when
 /// the spec is accepted. rust/mentatd-serve, python/ray/_client.py, _host.py
@@ -74,7 +74,7 @@ pub fn proto() -> String {
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Msg {
     // ---- client -> daemon ----
-    /// Opens a client link. Answered with `hello_ok`.
+    /// Opens a client link. Returns `hello_ok`.
     Hello {
         proto: String,
         client_id: String,
@@ -90,11 +90,11 @@ pub enum Msg {
         #[serde(default)]
         node_ip: String,
     },
-    /// The group's nodes, shaped as `ray.nodes()`. Answered with `nodes_ok`.
+    /// The group's nodes, shaped as `ray.nodes()`. Returns `nodes_ok`.
     Nodes,
-    /// The group's total GPU, CPU and memory. Answered with `resources_ok`.
+    /// The group's total GPU, CPU and memory. Returns `resources_ok`.
     Resources,
-    /// Free GPUs per node, with each node's cpu and memory. Answered with
+    /// Free GPUs per node, with each node's cpu and memory. Returns
     /// `available_ok`.
     Available,
     /// Claim a named placement. Every holder of one name gets the view the
@@ -110,7 +110,7 @@ pub enum Msg {
         /// shape is refused.
         shape: serde_json::Value,
     },
-    /// Create a placement group. Answered with `pg_create_ok`.
+    /// Create a placement group. Returns `pg_create_ok`.
     PgCreate {
         /// Whole GPUs per bundle.
         bundles: Vec<u32>,
@@ -123,12 +123,12 @@ pub enum Msg {
         #[serde(default)]
         claim: String,
     },
-    /// Ask for one group's table. Answered with `pg_table_ok`.
+    /// Read one group's table. Returns `pg_table_ok`.
     PgTable { pg_id: String },
-    /// Release a placement group and its GPUs. Answered with `ok`.
+    /// Release a placement group and its GPUs. Returns `ok`.
     PgRemove { pg_id: String },
     /// Create one actor. The payload is a pickled (class, args, kwargs).
-    /// Answered with `actor_create_ok`.
+    /// Returns `actor_create_ok`.
     ActorCreate {
         name: String,
         num_gpus: u32,
@@ -139,19 +139,19 @@ pub enum Msg {
     /// Call one method. The payload is pickled (args, kwargs), and
     /// `actor_call_ok` returns a ref before the call runs.
     ActorCall { actor_id: String, method: String },
-    /// Resolve one ref. Answered with `ref_get_ok`.
+    /// Resolve one ref. Returns `ref_get_ok`.
     RefGet {
         ref_id: String,
         /// None blocks until the ref resolves. 0 polls once.
         timeout_ms: Option<u64>,
     },
-    /// Wait for `num_returns` of `ref_ids`. Answered with `ref_wait_ok`.
+    /// Wait for `num_returns` of `ref_ids`. Returns `ref_wait_ok`.
     RefWait {
         ref_ids: Vec<String>,
         num_returns: usize,
         timeout_ms: Option<u64>,
     },
-    /// Ask for the cluster snapshot. `group` None covers every group.
+    /// Read the cluster snapshot. `group` None covers every group.
     Status { group: Option<String> },
     /// Kill a group's actors, or every group's with `all`. Neither or both is
     /// refused: the binary is also installed as `ray`, where an inherited `ray
@@ -164,13 +164,13 @@ pub enum Msg {
     },
 
     // ---- daemon -> client responses ----
-    /// A request that returns nothing. The Python shim takes it in place of
+    /// A request that returns nothing. The Python shim uses it in place of
     /// any expected response type.
     Ok,
     /// The request failed, or a handshake was refused. `error` reaches the
     /// caller as the message of its exception.
     Err { error: String },
-    /// Answers `hello`. `control_addr` is where this daemon takes control
+    /// The reply to `hello`. `control_addr` is where this daemon accepts control
     /// connections, and the shim passes it to actors as MENTAT_GCS_ADDRESS.
     HelloOk {
         proto: String,
@@ -188,7 +188,7 @@ pub enum Msg {
     AvailableOk {
         nodes: BTreeMap<String, BTreeMap<String, f64>>,
     },
-    /// Answers `claim`. `generation` rises with each new solve, so a rank can
+    /// The reply to `claim`. `generation` rises with each new solve, so a rank can
     /// tell one solve from another, and `view` is the solved topology.
     ClaimOk {
         name: String,
@@ -201,7 +201,7 @@ pub enum Msg {
     },
     /// Ray's `placement_group_table()` dict.
     PgTableOk { table: Value },
-    /// Answers `actor_create` once the spawn reaches the agent. The actor's
+    /// The reply to `actor_create`, sent once the spawn reaches the agent. The actor's
     /// constructor is still running.
     ActorCreateOk {
         actor_id: String,
@@ -211,7 +211,7 @@ pub enum Msg {
     },
     /// The ref that resolves when the call finishes.
     ActorCallOk { ref_id: String },
-    /// Answers `ref_get`. The payload is the pickled value for "ok" and the
+    /// The reply to `ref_get`. The payload is the pickled value for "ok" and the
     /// pickled exception for "error", and is empty otherwise.
     RefGetOk {
         /// "ok", "error", "actor_died" or "timeout".
@@ -223,7 +223,7 @@ pub enum Msg {
     /// The refs that resolved, in the order given and capped at
     /// `num_returns`. A ref that failed counts as resolved.
     RefWaitOk { ready: Vec<String> },
-    /// Answers `status` with the snapshot `/status` also serves.
+    /// The reply to `status`, with the snapshot `/status` also serves.
     StatusOk { snapshot: Value },
 
     // ---- agent <-> daemon ----
@@ -255,7 +255,7 @@ pub enum Msg {
         #[serde(default)]
         unacked_refs: Vec<String>,
     },
-    /// Answers `agent_register`.
+    /// The reply to `agent_register`.
     AgentRegisterOk { proto: String, node_id: String },
     /// Start one actor process. The payload is a pickled (class, args,
     /// kwargs).
@@ -315,11 +315,11 @@ pub enum Msg {
     ServiceNote { service: String, note: String },
     /// Liveness check. The answer echoes `req`.
     Ping,
-    /// Answers `ping`.
+    /// The reply to `ping`.
     Pong,
 
     // ---- daemon <-> daemon (mesh) ----
-    /// Opens a mesh link. Answered with `peer_hello_ok`, which holds the
+    /// Opens a mesh link. Returns `peer_hello_ok`, which holds the
     /// same fields for the other side.
     PeerHello {
         proto: String,
@@ -339,7 +339,7 @@ pub enum Msg {
         /// one has an entry, so MENTAT_ANNOUNCE_ADDRS leaves it out.
         addr_ifaces: BTreeMap<String, String>,
     },
-    /// Answers `peer_hello` with the responder's side of the same fields.
+    /// The reply to `peer_hello`, with the responder's side of the same fields.
     PeerHelloOk {
         proto: String,
         node_id: String,
@@ -353,7 +353,7 @@ pub enum Msg {
     /// Reachability probe, sent as the first frame of its own short-lived
     /// connection rather than over the mesh link. The prober binds one of its
     /// own addresses before connecting, so an answer proves that one address
-    /// pair holds traffic. The mesh link says nothing about any other pair.
+    /// pair holds traffic. The mesh link proves nothing about any other pair.
     Probe {
         proto: String,
         /// The prober's node id, so a mistargeted probe is visible.
@@ -361,7 +361,7 @@ pub enum Msg {
         /// The address the prober bound locally.
         local_addr: String,
     },
-    /// Answers `probe`. The prober checks `node_id`, since both fabrics are
+    /// The reply to `probe`. The prober checks `node_id`, since both fabrics are
     /// numbered out of one subnet and an address that replies is no evidence
     /// of which node replied.
     ProbeOk { proto: String, node_id: String },

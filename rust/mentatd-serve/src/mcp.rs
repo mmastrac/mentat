@@ -20,7 +20,7 @@ use crate::{
 };
 use mentat_common::logfmt::log;
 
-/// The argument added to every merged tool to say which group runs it. The
+/// The argument added to every merged tool to report which group runs it. The
 /// leading underscores keep it clear of the tools' own parameter names.
 const GROUP_ARG: &str = "__group";
 
@@ -212,7 +212,7 @@ fn with_group_arg(m: &Merged) -> Value {
     schema
 }
 
-/// One group's tool list, cached briefly. Asked rather than assumed -- the
+/// One group's tool list, cached briefly. Read rather than assumed -- the
 /// containers already differ in what they expose (the Ray tool is
 /// conditional). An empty answer is not cached, so a container that was
 /// still booting is retried on the next list instead of a minute later.
@@ -285,7 +285,7 @@ async fn call(shared: &Arc<Shared>, rid: Value, params: Value) -> Value {
     };
 
     // The group's own tool has no `__group` in its schema, so the argument
-    // is taken out of what is forwarded.
+    // is stripped from what is forwarded.
     let mut args: Map<String, Value> = params["arguments"].as_object().cloned().unwrap_or_default();
     let asked = args.remove(GROUP_ARG);
     let group = match asked.as_ref().and_then(Value::as_str) {

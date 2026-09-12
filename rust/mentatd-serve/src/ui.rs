@@ -52,7 +52,7 @@ pub struct Inflight {
 /// the way out, however that happens.
 ///
 /// The drop is what makes the table honest. A client that hangs up mid-stream
-/// takes the response body with it, so this runs then too, and a cancelled
+/// removes the response body, so this runs then too, and a cancelled
 /// request is dropped with it.
 pub struct Tracked {
     shared: Arc<Shared>,

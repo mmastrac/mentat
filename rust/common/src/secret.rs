@@ -36,7 +36,7 @@ pub const CLOCK_SKEW_S: f64 = 30.0;
 /// The file wins over the environment, so a secret need not appear where
 /// `docker inspect` and `/proc/<pid>/environ` expose it. An empty
 /// MENTAT_SECRET stays absent rather than fatal, since a compose file
-/// setting a variable to nothing is how deployments say "unset".
+/// setting a variable to nothing is how deployments write "unset".
 pub fn load() -> Result<Option<Vec<u8>>, String> {
     if let Ok(path) = std::env::var("MENTAT_SECRET_FILE") {
         let path = path.trim();
@@ -256,10 +256,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Asking for no key at all still runs unsigned, which is a choice a
-    /// deployment is allowed to make.
+    /// No key configured is None rather than an error. Only a named file
+    /// that cannot be read is fatal, and what None means is the caller's:
+    /// the daemon stops announcing, the router exits.
     #[test]
-    fn an_unasked_key_is_absent_rather_than_fatal() {
+    fn an_unset_key_is_absent_rather_than_fatal() {
         assert_eq!(from_env(None), Ok(None), "unset");
         assert_eq!(from_env(Some("")), Ok(None), "compose sets it to nothing");
         assert_eq!(from_env(Some("  ")), Ok(None), "whitespace only");
@@ -293,7 +294,7 @@ mod tests {
     }
 
     /// The announcement as announce.rs builds it, through the path a
-    /// listener actually takes: parse the envelope, re-serialize the payload,
+    /// listener actually runs: parse the envelope, re-serialize the payload,
     /// check the signature. A float field would fail this.
     #[test]
     fn announcement_survives_the_listener_path() {

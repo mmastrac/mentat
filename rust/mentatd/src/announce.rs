@@ -65,8 +65,8 @@ pub fn start(shared: SharedRef) {
         Ok(Some(k)) => k,
         Ok(None) => {
             // Every announcement is signed, so a daemon with no key has
-            // nothing to send. Saying so at boot beats a router that
-            // watches an empty cluster and never says why.
+            // nothing to send. Reporting it at boot beats a router that
+            // watches an empty cluster and never reports why.
             log(
                 "announce_off",
                 &[("why", "no MENTAT_SECRET or MENTAT_SECRET_FILE".to_string())],
@@ -111,7 +111,7 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
             // `t` and `seq` bound replay: the first against the listener's
             // clock, the second against the last it accepted from this boot.
             // Integer seconds, since an f64 does not survive the JSON round
-            // trip a verifier takes. See secret::canonical.
+            // trip a verifier does. See secret::canonical.
             let v = serde_json::json!({
                 "proto": crate::proto::PROTO,
                 "node_id": st.node_id,
@@ -187,7 +187,7 @@ fn parse_spec(s: &str) -> Vec<Spec> {
 /// before patterns existed relies on.
 ///
 /// Deliberately not NCCL's implicit prefix match, where `en` would also
-/// select `enp1s0f0np0` and `eno1`. A prefix here must say so: `en*`.
+/// select `enp1s0f0np0` and `eno1`. A prefix here must report it: `en*`.
 fn glob_match(pat: &str, name: &str) -> bool {
     let (p, n): (Vec<char>, Vec<char>) = (pat.chars().collect(), name.chars().collect());
     let (mut pi, mut ni) = (0usize, 0usize);
@@ -227,7 +227,7 @@ fn match_spec(spec: &[Spec], name: &str) -> Option<(usize, Vec<String>)> {
 ///
 /// MENTAT_ANNOUNCE_IFACES names them explicitly and its order is the
 /// preference order: put the fast link first and consumers that can reach
-/// both will take it. Only this node can rank its own links -- a consumer
+/// both will use it. Only this node can rank its own links -- a consumer
 /// sees two addresses that both work and cannot tell which is the fast path.
 ///
 /// An entry names an interface, or a `*`/`?` pattern over interface names,
@@ -282,7 +282,7 @@ fn selected_ifaces() -> Vec<Iface> {
 /// Addresses this node advertises, when the operator names them outright
 /// instead of naming interfaces.
 ///
-/// MENTAT_ANNOUNCE_ADDRS takes the same `value=tag+tag` syntax and the same
+/// MENTAT_ANNOUNCE_ADDRS uses the same `value=tag+tag` syntax and the same
 /// order-is-preference rule as MENTAT_ANNOUNCE_IFACES, with addresses in
 /// place of interface names:
 ///
@@ -290,7 +290,7 @@ fn selected_ifaces() -> Vec<Iface> {
 ///
 /// It exists for the node whose advertisable address is not on any of its
 /// own interfaces -- and for the tests, which build topologies a single box
-/// is not cabled for. It replaces what this node says it listens on, and
+/// is not cabled for. It replaces what this node reports it listens on, and
 /// nothing else: broadcast still goes out on the selected interfaces, so a
 /// node using this and no MENTAT_ANNOUNCE_ADDR still announces where it
 /// always did.

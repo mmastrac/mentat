@@ -3,7 +3,7 @@ use std::process::Command;
 use crate::proto::Machine;
 use mentat_common::logfmt::log;
 
-// The probe script holds the vendor detection. A part it does not know takes
+// The probe script holds the vendor detection. A part it does not know needs
 // an edit there, and mentatd stays unchanged.
 const PROBE: &str = "mentatd-probe-machine";
 

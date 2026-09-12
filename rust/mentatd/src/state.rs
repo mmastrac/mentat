@@ -286,7 +286,7 @@ pub struct PeerInfo {
     /// calls itself, which on a multi-homed box is a subnet a third party
     /// may not route to. This one held a working connection.
     pub link_ip: String,
-    /// Every address the peer says it listens on, for a consumer that can
+    /// Every address the peer reports it listens on, for a consumer that can
     /// reach none of node_ip or link_ip.
     pub addrs: Vec<String>,
     /// Operator tags per address. Read here for one purpose: an `rdma` tag

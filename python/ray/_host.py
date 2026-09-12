@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 
-#: The wire version this host speaks. The agent's `ctor` holds it too.
+#: The wire version this host uses. The agent's `ctor` holds it too.
 PROTO = "0.99"
 
 

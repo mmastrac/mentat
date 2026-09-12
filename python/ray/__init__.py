@@ -2,8 +2,8 @@
 
 This package occupies the `ray` import name inside the Spark serving images.
 It implements exactly the surface vLLM's RayExecutorV2 path exercises
-(audited against vLLM 0.1.dev20051+g487ecf187 / ray 2.57.0) and speaks a
-small framed protocol to the mentat daemon. Everything else fails loudly via
+(audited against vLLM 0.1.dev20051+g487ecf187 / ray 2.57.0) and uses a
+small framed protocol to reach the mentat daemon. Everything else fails loudly via
 __getattr__ rather than silently misbehaving.
 
 Cluster brains (placement, liveness, reaping) live in the Rust daemon; this
@@ -25,7 +25,7 @@ from ray.exceptions import (
 from ray.runtime_context import get_runtime_context  # noqa: F401
 
 # vLLM version-checks ray; the wire-compatible lie is deliberate and the
-# init banner in _client.py says who we really are.
+# init banner in _client.py reports what this is.
 __version__ = "2.57.0"
 
 __commit__ = "mentatd"

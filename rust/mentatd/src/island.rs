@@ -209,7 +209,7 @@ fn gather(shared: &SharedRef) -> FabricView {
 }
 
 /// Record a node's RDMA-tagged addresses. An untagged node is left out: the
-/// tag is what says a link is meant to hold NCCL.
+/// tag marks a link as meant to hold NCCL.
 fn note(v: &mut FabricView, node: &str, addrs: Vec<String>, tags: BTreeMap<String, Vec<String>>) {
     let tagged: Vec<String> = addrs
         .into_iter()
@@ -282,7 +282,7 @@ fn run(shared: SharedRef) {
     let tick = Duration::from_millis((cfg().island_hold_down_ms / 5).clamp(100, 1000));
     let mut candidate: Option<(Fabrics, Instant)> = None;
     // Tagged addresses no probe has ever confirmed. Named once each: the
-    // tag says the operator meant to cable this, so silence about it is
+    // tag records that the operator meant to cable this, so silence about it is
     // how a wrong tag survives a deployment.
     let mut unverified: HashSet<String> = HashSet::new();
     loop {

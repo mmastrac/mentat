@@ -51,7 +51,7 @@ struct Routed {
     stream: bool,
 }
 
-/// Read those two out of a body, whatever form it takes.
+/// Read those two out of a body, whatever form it has.
 ///
 /// JSON holds both as top-level fields. The audio endpoints are
 /// multipart/form-data instead, and spell the model as a text field beside
@@ -123,7 +123,7 @@ fn form_fields(body: &[u8], boundary: &str) -> BTreeMap<String, String> {
 /// whose headers do not parse.
 ///
 /// The part's value ends with the CRLF that belongs to the delimiter line
-/// after it, so one is taken off.
+/// after it, so one is removed.
 fn text_part(part: &[u8]) -> Option<(String, String)> {
     let i = find(part, b"\r\n\r\n")?;
     let head = String::from_utf8_lossy(&part[..i]).to_ascii_lowercase();
@@ -231,7 +231,7 @@ fn relay(
     resp: hyper::Response<Incoming>,
 ) -> Response<BoxedBody> {
     // Registered once the upstream has accepted the request, and dropped
-    // with the body, so a client hangup takes its row with it.
+    // with the body, so a client hangup removes its row.
     let tracked = Tracked::new(shared, &routed.model, group, prompt_bytes, routed.stream);
     let mut builder = Response::builder().status(resp.status());
     if let Some(ct) = resp.headers().get(CONTENT_TYPE) {
@@ -267,7 +267,7 @@ impl Call {
     /// Send the request to whichever group serves the model. Until the
     /// deadline, a model that is not routable and a refused connection are
     /// waited out, since a restarting model is missing for a while. Once the
-    /// upstream has taken the request it is never sent again, since the
+    /// upstream has accepted the request it is never sent again, since the
     /// work may already be under way.
     async fn dispatch(self) -> Result<(String, hyper::Response<Incoming>), Refusal> {
         let mut waited = false;
@@ -473,7 +473,7 @@ impl Body for KeepaliveBody {
 }
 
 /// An OpenAI-shaped error event and the terminator, for a stream whose
-/// headers already said 200.
+/// headers already sent 200.
 fn error_events(msg: &str) -> std::collections::VecDeque<Bytes> {
     let event = json!({"error": {"message": msg, "type": "upstream_error"}});
     [
@@ -541,7 +541,7 @@ mod tests {
         assert!(r.stream);
     }
 
-    /// A form with no model is the same refusal as JSON with none, and says
+    /// A form with no model is the same refusal as JSON with none, and reports
     /// which form it read.
     #[test]
     fn a_form_without_a_model_is_named_as_a_form() {

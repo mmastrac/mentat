@@ -273,7 +273,7 @@ fn try_connect(
             if !crate::proto::major_matches(&proto) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("peer speaks proto {proto}, this daemon {}", crate::proto::PROTO),
+                    format!("peer proto {proto}, this daemon {}", crate::proto::PROTO),
                 ));
             }
             (
@@ -356,7 +356,7 @@ pub fn accept_peer(
         )
     };
     if !crate::proto::major_matches(&proto) {
-        // A peer of another major does not take part in election, so the link is
+        // A peer of another major is left out of election, so the link is
         // refused rather than kept as a half-understood member.
         let _ = writer.send(
             Msg::Err {
@@ -408,7 +408,7 @@ pub fn accept_peer(
     peer_loop(&shared, reader, writer, node_id);
 }
 
-/// What a peer says about itself in its hello, plus what the link observed.
+/// What a peer reports about itself in its hello, plus what the link observed.
 struct PeerIdent {
     node_id: String,
     /// This daemon dialed the link. The other side accepted it.
@@ -493,7 +493,7 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
     }
 
     // A relink keeps the probed pairs and the last snapshot. The pairs
-    // describe cabling, which a dropped control link says nothing about,
+    // describe cabling, which a dropped control link proves nothing about,
     // and discarding them would leave placement blind until the next probe
     // round.
     let (probe_pairs, last_status, was_alive) = st
@@ -730,7 +730,7 @@ fn staleness_sweeper(shared: SharedRef) {
 
 /// Head election, committed after MENTAT_ELECTION_HOLD_DOWN_MS of
 /// stability. A settled head stays head while it is alive, since a change
-/// moves every group. A daemon with no head takes the one its live peers
+/// moves every group. A daemon with no head uses the one its live peers
 /// publish, else the lowest live id, and two settled heads that meet
 /// resolve to the lower.
 fn elector(shared: SharedRef) {
@@ -833,7 +833,7 @@ fn status_pusher(shared: SharedRef) {
 /// from opening the connection.
 ///
 /// The local bind is the whole point. Reaching a peer address over the LAN
-/// says nothing about reaching it over the fabric, so a probe that did not
+/// proves nothing about reaching it over the fabric, so a probe that did not
 /// pin its source address would report the routing table's preference and
 /// call it topology.
 ///
@@ -1091,7 +1091,7 @@ fn connect_from(
                     _ => break,
                 }
             }
-            // POLLOUT says the connect finished. SO_ERROR says whether it
+            // POLLOUT means the connect finished. SO_ERROR gives whether it
             // succeeded.
             let mut err: libc::c_int = 0;
             let mut elen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
@@ -1125,7 +1125,7 @@ mod tests {
     /// The reported tombstone: one box registered as 192.168.1.93, came back
     /// identifying as 10.103.0.93, and the first entry stayed dead in every
     /// peer's table for as long as the process lived. Both entries hold the
-    /// same address list, which is what says they are one box.
+    /// same address list, which is what makes them one box.
     #[test]
     fn a_renumbered_node_matches_its_own_old_entry() {
         let arriving = v(&["192.168.1.93", "10.103.0.93"]);

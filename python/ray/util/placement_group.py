@@ -60,7 +60,7 @@ def _claim(gpu_bundles):
 
 
 def placement_group(bundles, strategy="PACK", name="", lifetime=None):
-    # Whole GPUs per bundle: the wire takes integers, and a fractional
+    # Whole GPUs per bundle: the wire uses integers, and a fractional
     # GPU was always rounded up to one on the daemon side.
     gpu_bundles = [max(1, int(-(-float(b.get("GPU", 0)) // 1))) for b in bundles]
     req = {"t": "pg_create", "bundles": gpu_bundles, "strategy": strategy}

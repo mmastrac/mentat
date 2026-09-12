@@ -35,7 +35,7 @@ MEM=$(system_memory)
 CPUS=$(cpu_count)
 
 # Placeholder devices for a box with no GPU. A node whose agent registers
-# none cannot take a bundle rank.
+# none cannot host a bundle rank.
 fake_gpus() {
     awk -v n="$1" 'BEGIN {
         sep = ""

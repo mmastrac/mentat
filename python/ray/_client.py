@@ -20,7 +20,7 @@ class MentatError(RuntimeError):
     pass
 
 
-#: The wire version this shim speaks. The daemon refuses a link whose major
+#: The wire version this shim uses. The daemon refuses a link whose major
 #: differs, and this side checks the reply for the same reason.
 PROTO = "0.99"
 
@@ -136,7 +136,7 @@ class Connection:
         offered = self.hello.get("proto", "")
         if offered.split(".")[0] != PROTO.split(".")[0]:
             raise MentatError(
-                f"mentat: daemon speaks proto {offered!r}, this shim {PROTO}"
+                f"mentat: daemon proto {offered!r}, this shim {PROTO}"
             )
 
     def _drop(self):

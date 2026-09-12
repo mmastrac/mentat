@@ -302,7 +302,7 @@ pub struct NodeWatch {
 
 pub struct ProbeResult {
     pub ok: bool,
-    /// The endpoint's own `/models` entries, verbatim. Carrying whole objects
+    /// The endpoint's own `/models` entries, verbatim. Holding whole objects
     /// keeps `max_model_len` and the rest correct as vLLM adds fields.
     pub models: Vec<Value>,
     pub seen: Instant,
@@ -360,7 +360,7 @@ pub struct Shared {
 pub struct Endpoint {
     /// Base URLs to try, best first. A verbatim announcement has exactly
     /// one and it is never re-derived -- naming a host is the operator
-    /// saying which address to use. A port announcement has one per address
+    /// choosing which address to use. A port announcement has one per address
     /// of the announcing node that this router is allowed to reach.
     ///
     /// Empty means the announcement resolved to nothing, which is a
@@ -390,9 +390,9 @@ pub struct GroupEntry {
     pub running: usize,
     pub openai: Option<Endpoint>,
     pub mcp: Option<Endpoint>,
-    /// What serves `openai`, as the announcing agent said it (`vllm`). Taken
+    /// What serves `openai`, as the announcing agent reported it (`vllm`). Read
     /// from the agent whose endpoint won, since it describes the engine
-    /// behind that endpoint. Empty when the container did not say.
+    /// behind that endpoint. Empty when the container did not report.
     pub provider: String,
     /// Whether the group has actor rows, running or dead. An endpoint that
     /// outlives every rank still serves `/models`, and only rank state
@@ -493,7 +493,7 @@ fn endpoint_of(
     let port = entry["port"].as_u64()?;
     let path = entry["path"].as_str().unwrap_or_default();
     // A host the operator named is used as written and passes no check:
-    // naming one is the operator saying which address to use.
+    // naming one is the operator choosing which address to use.
     if let Some(host) = entry["host"].as_str().filter(|h| !h.is_empty()) {
         let url = format!("http://{host}:{port}{path}");
         return Some(Endpoint {
@@ -681,7 +681,7 @@ impl Liveness {
 /// The groups a caller may see: announced, minus the ones retired for being
 /// unable to serve for `model_ttl`.
 ///
-/// A daemon never says a group is over. It keeps the agent and actor rows of
+/// A daemon never declares a group over. It keeps the agent and actor rows of
 /// a container that is long gone, so a model dropped from an operator's
 /// compose file would otherwise sit in `/v1/models` until that daemon
 /// restarted, advertised and unroutable. The clock is the router's own and
@@ -726,7 +726,7 @@ fn age_groups(shared: &Shared, announced: &BTreeMap<String, GroupEntry>) {
             }
         }
     }
-    // Once per retirement. A group that comes back and goes again says so
+    // Once per retirement. A group that comes back and goes again reports it
     // again, because the clock reset when it came back.
     for (group, why) in retired {
         log(
@@ -740,7 +740,7 @@ fn age_groups(shared: &Shared, announced: &BTreeMap<String, GroupEntry>) {
     }
 }
 
-/// Ok(model names) when the group may take traffic; Err(why) otherwise.
+/// Ok(model names) when the group may serve traffic; Err(why) otherwise.
 pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<Value>, String> {
     let Some(ep) = e.openai.as_ref() else {
         return Err("no announced OpenAI endpoint".into());
@@ -996,7 +996,7 @@ async fn watch_daemon(shared: Arc<Shared>, mut addr: String, others: Vec<String>
                     Ok(mut es) => {
                         // The stream's own `seq`, so a gap is visible. A
                         // missed event leaves a view that is wrong, and
-                        // nothing later says so.
+                        // nothing later reports it.
                         let mut last_seq: Option<u64> = None;
                         let mut last_full = Instant::now();
                         loop {
@@ -1111,7 +1111,7 @@ async fn watch_daemon(shared: Arc<Shared>, mut addr: String, others: Vec<String>
     }
 }
 
-/// Take a node for this watch. False when another fresh watch holds it, in
+/// Claim a node for this watch. False when another fresh watch holds it, in
 /// which case this address becomes one of its alternates.
 fn claim_node(shared: &Shared, id: &str, addr: &str) -> bool {
     let mut nodes = shared.nodes.lock().unwrap();
@@ -1141,7 +1141,7 @@ fn claim_node(shared: &Shared, id: &str, addr: &str) -> bool {
                 false
             } else {
                 // The holder is stale and this address replies, so this
-                // watch takes over.
+                // watch replaces it.
                 let old = std::mem::replace(&mut w.addr, addr.to_string());
                 w.alternates.remove(addr);
                 w.alternates.insert(old.clone());
@@ -1252,12 +1252,12 @@ async fn udp_listener(shared: Arc<Shared>) {
     };
     // Same stop as the daemon's: a router that cannot read the key it was
     // given verifies nothing and drops every signed announcement, so it
-    // watches an empty cluster and says only that each datagram failed.
+    // watches an empty cluster and reports only that each datagram failed.
     let key = match secret::load() {
         Ok(Some(k)) => k,
         Ok(None) => {
             // Every announcement is signed, so a listener with no key can
-            // verify nothing and would watch an empty cluster while saying
+            // verify nothing and would watch an empty cluster while reporting
             // only that each datagram failed.
             log(
                 "announce_listen_off",
@@ -1365,7 +1365,7 @@ async fn udp_listener(shared: Arc<Shared>) {
         // further down. The advertised address itself is not, because nothing acts
         // on it any more -- gating a field the router only reads would fail
         // discovery closed over a subnet the operator never thinks about, and
-        // say nothing about why.
+        // report nothing about why.
         let src_ip = src.ip().to_string();
         let local = local_nets();
         if !shared.cfg.allowed_sources.permits(&src_ip, &local) {
@@ -1384,7 +1384,7 @@ async fn udp_listener(shared: Arc<Shared>) {
         }
         let node = v["node_id"].as_str().unwrap_or_default().to_string();
         // The node ranks its own addresses, most preferred first, because
-        // only it knows which link is the fast one. Take the best it offers
+        // only it knows which link is the fast one. Use the best it offers
         // that lands on a subnet we are attached to. Failing that, the
         // source address, which at least held this packet here.
         let ranked: Vec<String> = v["addrs"]
@@ -1466,7 +1466,7 @@ fn announce_address(ranked: &[String], src_ip: &str, allowed: &Allow, local: &[N
 /// The addresses a daemon reports for a peer, best first, and the best one.
 ///
 /// Candidates run in order of evidence: link_ip held the mesh link, addrs
-/// is what the peer says it listens on, node_ip is only the name it calls
+/// is what the peer reports it listens on, node_ip is only the name it calls
 /// itself. An address on one of our own subnets beats that order outright,
 /// since the pair's cluster identity is a subnet a LAN-only box cannot route
 /// to.
@@ -1609,7 +1609,7 @@ fn apply_patch(snapshot: &mut Value, event: &Value) -> bool {
         return false;
     };
     // Every entry lands, or none does. A half-applied event leaves a view
-    // that is wrong with nothing to say so.
+    // that is wrong with nothing to report it.
     let mut staged = snapshot.clone();
     for entry in patch {
         let Some(at) = entry["at"].as_array() else {
@@ -1818,7 +1818,7 @@ async fn prober(shared: Arc<Shared>) {
 /// that address first and only walks the list when it fails, so a working
 /// route is never abandoned for a re-decision. Every `PROBE_PROMOTE_S` the
 /// order is inverted for one round: candidates ranked above the sticky one
-/// go first, and a success there takes the route back to the node's
+/// go first, and a success there restores the route to the node's
 /// preferred link.
 ///
 /// Returns whether the top-ranked candidate was tried this round (which is
@@ -1875,7 +1875,7 @@ async fn probe_candidates(
 // HTTP plumbing shared by the modules
 // ---------------------------------------------------------------------------
 
-/// The wire version this router speaks. A daemon of another major is
+/// The wire version this router uses. A daemon of another major is
 /// dropped: its snapshot would be read with the wrong shapes.
 pub const PROTO: &str = "0.99";
 
@@ -2412,7 +2412,7 @@ mod tests {
         assert!(!l.round(Instant::now(), true, ttl));
         assert!(!l.retired(ttl), "back the round it answers");
 
-        // And going down again is a new outage, so it says so again.
+        // And going down again is a new outage, so it reports it again.
         l.ok_at = Instant::now() - Duration::from_secs(3601);
         assert!(l.round(Instant::now(), false, ttl));
     }
@@ -2451,7 +2451,7 @@ mod tests {
             ep.candidates,
             vec![
                 // Local subnet first: this router shares the LAN wire and
-                // not the fabric, whatever the node's own ranking says.
+                // not the fabric, whatever the node's own ranking prefers.
                 "http://192.168.1.11:8000/v1",
                 "http://10.100.0.1:8000/v1",
             ]
@@ -2609,7 +2609,7 @@ mod tests {
         assert_eq!(r.unwrap().0, c[0], "the preferred address answers again");
     }
 
-    /// Every candidate down must fail, and say which ones. A fall-through
+    /// Every candidate down must fail, and report which ones. A fall-through
     /// list that swallowed the reasons would report one dead address as the
     /// whole story.
     #[tokio::test]
@@ -2705,7 +2705,7 @@ mod tests {
     }
 
     /// Every entry lands or none does. A half-applied event leaves a view
-    /// that is wrong with nothing to say so.
+    /// that is wrong with nothing to report it.
     #[test]
     fn a_patch_that_cannot_finish_changes_nothing() {
         let mut v = snap();

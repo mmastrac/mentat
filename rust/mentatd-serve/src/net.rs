@@ -171,7 +171,7 @@ impl Allow {
 }
 
 /// How the entries parsed, for the log lines that name them. A typo lands
-/// in `prefix:`, where it matches nothing and says so.
+/// in `prefix:`, where it matches nothing and reports it.
 impl std::fmt::Display for Allow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut parts: Vec<String> = Vec::new();
@@ -225,7 +225,7 @@ mod tests {
     }
 
     /// The log line an operator reads back. A typo parses as a prefix,
-    /// which matches nothing, and reading `prefix:lcoal` says why.
+    /// which matches nothing, and reading `prefix:lcoal` reports why.
     #[test]
     fn the_parse_reads_back() {
         assert_eq!(

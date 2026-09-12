@@ -27,7 +27,7 @@ pub struct AgentOpts {
 
 struct HostActor {
     name: String,
-    /// The client the daemon said owns this actor, reported back on resume
+    /// The client the daemon recorded as this actor's owner, reported back on resume
     /// so a daemon that lost its state can rebuild that link.
     owner: String,
     /// 0 until the process is actually forked. Never pass 0 to kill(2): with
@@ -135,7 +135,7 @@ pub fn run(opts: AgentOpts) -> ! {
     }
 }
 
-/// One MENTAT_*_API value, in either of the two forms it may take.
+/// One MENTAT_*_API value, in either of the two forms it may have.
 #[derive(Debug, Clone, PartialEq)]
 enum Announcement {
     /// A whole URL, used exactly as written. The operator named a host, so
@@ -150,10 +150,10 @@ enum Announcement {
 ///
 ///     http://10.0.0.1:8000/v1   one address, verbatim
 ///     http://0.0.0.0:8000/v1    every address this node listens on
-///     8000/v1                   the same, said shorter
+///     8000/v1                   the same, the same, shorter
 ///
 /// The wildcard host is what the API server was told to bind, so writing it
-/// here says the same thing to the router that `--host 0.0.0.0` says to
+/// here means the same to the router as `--host 0.0.0.0` means to
 /// uvicorn. Anything that parses as neither is passed through verbatim: a
 /// value this function does not understand is still the operator's, and
 /// refusing it would drop an endpoint that used to announce.
@@ -226,7 +226,7 @@ fn claimed_node_ip(daemon_addr: &str) -> String {
 
 /// Whether a daemon address is this box.
 ///
-/// A host with no port is taken whole, since an address is what it is with
+/// A host with no port is used whole, since an address is what it is with
 /// or without one. A name that is not an address returns false: it may
 /// resolve here, and resolving it to find out would make a claim depend on
 /// DNS.
@@ -238,8 +238,8 @@ fn on_this_box(daemon_addr: &str, mine: &[String]) -> bool {
 /// The host half of an address that may or may not hold a port.
 ///
 /// A bare IPv6 address is all colons, so splitting on the last one would
-/// take `::1` for a host of `:` on port 1. Anything that parses whole is
-/// therefore taken whole, and a bracketed host is read out of its brackets.
+/// read `::1` as a host of `:` on port 1. Anything that parses whole is
+/// therefore used whole, and a bracketed host is read out of its brackets.
 fn host_of(addr: &str) -> &str {
     let a = addr.trim();
     if a.parse::<std::net::IpAddr>().is_ok() {
@@ -256,7 +256,7 @@ fn host_of(addr: &str) -> &str {
 
 /// What serves this container's `openai` endpoint, read once at agent start.
 /// Lowercased free-form text, `vllm` on every current image. Empty when the
-/// container did not say.
+/// container did not report.
 fn announced_provider() -> String {
     std::env::var("MENTAT_MODEL_PROVIDER")
         .unwrap_or_default()
@@ -336,7 +336,7 @@ fn split_url(u: &str) -> Option<Service> {
     })
 }
 
-/// Watch each port-announced service until its server binds, then say so
+/// Watch each port-announced service until its server binds, then report it
 /// once if it bound narrowly.
 ///
 /// The port-only form promises the router that every one of this node's
@@ -348,7 +348,7 @@ fn split_url(u: &str) -> Option<Service> {
 ///
 /// It only warns. The router's probe stays the only thing that admits an
 /// endpoint, so a finding here can explain a failure but never cause one.
-/// Verbatim URLs are skipped: naming a host is the operator saying which
+/// Verbatim URLs are skipped: naming a host is the operator choosing which
 /// address to use.
 fn watch_service_binds(shared: &Arc<AgentShared>, services: &Services) {
     for (name, svc) in services.iter().filter(|(_, s)| s.host.is_empty()) {
@@ -372,7 +372,7 @@ fn watch_service_binds(shared: &Arc<AgentShared>, services: &Services) {
                         );
                         return;
                     }
-                    // A server that stopped listening says nothing about how
+                    // A server that stopped listening proves nothing about how
                     // it will bind when it comes back, so the last finding
                     // stands until a new bind contradicts it.
                     continue;
@@ -573,7 +573,7 @@ fn serve_once(
             if !crate::proto::major_matches(&proto) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("daemon speaks proto {proto}, this agent {}", crate::proto::PROTO),
+                    format!("daemon proto {proto}, this agent {}", crate::proto::PROTO),
                 ));
             }
             log(
@@ -760,7 +760,7 @@ fn spawn_actor(
     }
     cmd.env("MENTAT_AGENT_PID", std::process::id().to_string());
     // Own process group: vLLM workers fork compile helpers, and a kill must
-    // take the whole tree -- orphaned workers pinning ~90 GB of unified
+    // remove the whole tree -- orphaned workers pinning ~90 GB of unified
     // memory is the failure this line exists to prevent.
     cmd.process_group(0);
     let mut child = match cmd.spawn() {

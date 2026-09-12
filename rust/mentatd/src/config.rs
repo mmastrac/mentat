@@ -4,7 +4,7 @@
 //! An unset or empty variable means the default, and an unparsable value logs
 //! `bad_env_ms` and falls back to the default rather than refusing to start.
 //!
-//! The defaults are sized for the serving pair: model boot legitimately takes
+//! The defaults are sized for the serving pair: model boot legitimately runs
 //! minutes (weights, container pulls), while an agent link blip should heal in
 //! seconds. GUIDE.md holds the same table for operators.
 
@@ -64,7 +64,7 @@ pub struct Cfg {
     /// MENTAT_ISLAND_PLACEMENT, default on. Set to `off` or `0` to place
     /// multi-bundle groups without the one-fabric constraint. The escape
     /// hatch for a cluster whose probes disagree with its cabling under
-    /// pressure: it takes one variable and a daemon restart, where the
+    /// pressure: it costs one variable and a daemon restart, where the
     /// alternative is untagging every node.
     pub island_placement: bool,
     /// MENTAT_ISLAND_HOLD_DOWN_MS, default 5_000. How long the fabric island
