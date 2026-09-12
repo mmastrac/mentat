@@ -370,6 +370,15 @@ pub enum Msg {
         ok: bool,
         // payload: pickle result or pickled exception
     },
+
+    /// A `t` this build does not know.
+    ///
+    /// A minor bump may add a message type, so a frame naming one has to be
+    /// answered with `err` and the link kept. Without this the frame fails
+    /// to parse and the link closes, which turns a version skew into a
+    /// reconnect loop.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What a box is: total memory, cpus, and every GPU an agent may bind.
@@ -573,21 +582,33 @@ mod tests {
         assert!(!g.uma);
     }
 
-    /// An unknown `t` is a parse failure today, which closes the link. The
-    /// spec answers `err` and keeps it open, so the caller needs to tell
-    /// this case from a malformed frame.
+    /// A `t` from a later minor parses, so the receiver can answer `err`
+    /// and keep the link. `req` survives, which is what makes the answer
+    /// land on the right request.
     #[test]
-    fn an_unknown_message_type_is_reported_as_unknown() {
+    fn an_unknown_message_type_parses_as_unknown() {
         let mut buf: Vec<u8> = Vec::new();
-        let header = br#"{"req":3,"t":"no_such_message"}"#;
+        let header = br#"{"req":3,"t":"no_such_message","extra":1}"#;
         buf.extend_from_slice(&(header.len() as u32).to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.extend_from_slice(header);
         let mut cur = std::io::Cursor::new(buf);
-        match read_frame(&mut cur) {
-            Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
-            other => panic!("expected InvalidData, got {other:?}"),
-        }
+        let (frame, _) = read_frame(&mut cur).unwrap().unwrap();
+        assert_eq!(frame.req, 3);
+        assert!(matches!(frame.msg, Msg::Unknown), "{:?}", frame.msg);
+    }
+
+    /// A frame that is not JSON still closes the link: nothing can be
+    /// answered when the correlation id itself is unreadable.
+    #[test]
+    fn a_malformed_header_is_still_an_error() {
+        let mut buf: Vec<u8> = Vec::new();
+        let header = b"{not json";
+        buf.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(header);
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(read_frame(&mut cur).is_err());
     }
 
     #[test]

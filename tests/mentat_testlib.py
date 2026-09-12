@@ -18,6 +18,15 @@ import urllib.request
 #: daemon and the router have to agree on one.
 TEST_SECRET = "test-secret"
 
+#: The machine probe as it sits in the tree. An installed mentat finds it
+#: beside the binary; a test runs out of cargo's target dir, which has no
+#: such sibling.
+MACHINE_PROBE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "scripts",
+    "mentatd-probe-machine",
+)
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -138,6 +147,7 @@ class Cluster:
             "MENTAT_DAEMON": daemon_addr or self.address,
             "MENTAT_GROUP": group,
             "MENTAT_GPUS": str(gpus),
+            "MENTAT_MACHINE_PROBE": MACHINE_PROBE,
             "MENTAT_SECRET": TEST_SECRET,
             "MENTAT_NODE_IP": node_ip,
             "CONTAINER_NAME": container,
@@ -259,6 +269,7 @@ class Daemon:
             "MENTAT_DAEMON": self.address,
             "MENTAT_GROUP": group,
             "MENTAT_GPUS": str(gpus),
+            "MENTAT_MACHINE_PROBE": MACHINE_PROBE,
             "MENTAT_SECRET": TEST_SECRET,
             "MENTAT_NODE_IP": self.node_ip,
             "CONTAINER_NAME": container,

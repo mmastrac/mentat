@@ -680,9 +680,28 @@ placements".
 The shape to claim, as JSON. Invalid JSON raises at
 `ray.util.placement_group`.
 
-- `MENTAT_GPUS` (default: the count from `nvidia-smi`)
+- `MENTAT_GPUS` (default: what `nvidia-smi` reports)
 
-GPU count override, for tests on nodes without GPUs.
+Yields this many placeholder devices instead of asking the hardware, for
+tests on nodes without GPUs. Read by `mentatd-probe-machine`.
+
+- `MENTAT_MACHINE` (default: unset)
+
+The whole inventory as JSON, which skips the probe:
+`{"memory": <bytes>, "cpus": <n>, "gpus": [{"index": 0, "vendor": "nvidia",
+"name": "RTX 6000", "memory": <bytes>, "uma": false}]}`. For a box the probe
+cannot describe, and for tests of a machine they are not running on.
+Unparseable JSON stops the agent at start.
+
+- `MENTAT_MACHINE_PROBE` (default: `mentatd-probe-machine` beside the binary,
+  then on `PATH`)
+
+The program that reports what the box is. It prints the object above on
+stdout and exits 0. Every vendor detail lives there rather than in the
+binary, so a part the probe does not know is fixed by editing a file. A
+probe that is missing, fails, or prints something else stops the agent at
+start, since an agent that registers no devices reads as a scheduling bug
+minutes later in another process.
 
 - `MENTAT_HOST_CONNECT_TIMEOUT_MS` (default 60000)
 

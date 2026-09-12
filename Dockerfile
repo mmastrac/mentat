@@ -3,6 +3,7 @@
 #   --target artifacts  ->  mentat-artifacts:<ver>
 #       /out/mentatd                        the static daemon/CLI binary
 #       /out/mentatd-serve                  the static router binary
+#       /out/mentatd-probe-machine          the GPU/memory inventory probe
 #       /out/mentatd-*.whl                  the pure-Python `ray` shim
 #       Consumed by the model images via COPY --from. Never runs.
 #
@@ -53,8 +54,10 @@ RUN pip wheel --no-deps -w /dist . \
 FROM ${RUNTIME_IMAGE} AS artifacts
 COPY --from=build /src/target/release/mentatd /out/mentatd
 COPY --from=build /src/target/release/mentatd-serve /out/mentatd-serve
+COPY scripts/mentatd-probe-machine /out/mentatd-probe-machine
 COPY --from=wheel /dist/ /out/
 RUN /out/mentatd --version && /out/mentatd-serve --version \
+    && MENTAT_GPUS=1 /out/mentatd-probe-machine \
     && ls /out/mentatd-*-py3-none-any.whl
 
 FROM ${RUNTIME_IMAGE} AS runtime
@@ -63,8 +66,12 @@ LABEL org.opencontainers.image.title="mentatd" \
       org.opencontainers.image.source="https://github.com/mmastrac/mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=build /src/target/release/mentatd /usr/local/bin/mentatd
+# The agent runs this to say what the box is. It sits beside the binary,
+# which is where the lookup starts, so a site can replace it in place.
+COPY scripts/mentatd-probe-machine /usr/local/bin/mentatd-probe-machine
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
-    && mentatd --version && ray --version
+    && mentatd --version && ray --version \
+    && MENTAT_GPUS=1 mentatd-probe-machine
 # 6379 control (ray-compatible RAY_ADDRESS port), 6380 http (/metrics /status
 # /events), 6382/udp announcements out. Runs under network_mode: host so
 # EXPOSE is documentation.
@@ -94,8 +101,10 @@ LABEL org.opencontainers.image.title="mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=build /src/target/release/mentatd /usr/local/bin/mentatd
 COPY --from=build /src/target/release/mentatd-serve /usr/local/bin/mentatd-serve
+COPY scripts/mentatd-probe-machine /usr/local/bin/mentatd-probe-machine
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
-    && mentatd --version && mentatd serve --version && ray --version
+    && mentatd --version && mentatd serve --version && ray --version \
+    && MENTAT_GPUS=1 mentatd-probe-machine
 EXPOSE 6379 6380 6381 6382/udp
 ENTRYPOINT ["mentatd"]
 CMD ["daemon"]

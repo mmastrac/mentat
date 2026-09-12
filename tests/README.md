@@ -1,7 +1,8 @@
 # Tests
 
 Every suite runs without a GPU. The daemon and agents run as subprocesses
-with `MENTAT_GPUS` supplying fake GPUs.
+with `MENTAT_GPUS` supplying fake GPUs through
+`scripts/mentatd-probe-machine`.
 
 ```
 python3 tests/test_e2e_local.py   # kill -9 liveness, pg timeout, degrade window, give-up
@@ -9,6 +10,7 @@ python3 tests/test_groups.py      # TP=4, parallel groups, same model twice
 python3 tests/test_vllm_shape.py  # call-for-call replay of RayExecutorV2
 python3 tests/test_multinode.py   # 3-daemon mesh: election, head death, probe matrix, peer staleness
 python3 tests/test_fabric.py      # islands from probes, island-constrained placement, MENTAT_FABRIC_IP
+python3 tests/test_probe.py       # the machine probe against a stub nvidia-smi
 python3 tests/test_serve.py       # routing, gating, MCP merge, streaming pass-through
 python3 tests/test_topology.py    # two cabled pairs plus a LAN-only box over MENTAT_TEST_NET:
                                   # discovery, cut and repaired cables, renumbering, aging, the router

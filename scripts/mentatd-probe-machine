@@ -1,0 +1,91 @@
+#!/bin/sh
+# What this box is, as the `machine` object an agent registers with:
+#
+#   {"memory": <bytes>, "cpus": <n>,
+#    "gpus": [{"index": 0, "vendor": "nvidia", "name": "RTX 6000",
+#              "memory": <bytes>, "uma": false}]}
+#
+# Printed on stdout, one line, integers only. A float does not survive the
+# JSON round trip a signature verifier takes.
+#
+# The daemon runs this instead of asking nvidia-smi itself, so a box with a
+# part this script does not know can be fixed by editing a file rather than
+# by building a binary. Exit non-zero with a reason on stderr and the agent
+# refuses to start, which is louder than registering a box with no devices.
+#
+# MENTAT_GPUS=<n> yields n placeholder devices, for the GPU-free CI and
+# macOS runs. It is the only override here: MENTAT_MACHINE bypasses this
+# script entirely and is read by the daemon.
+set -eu
+
+# Product names whose device addresses the system pool rather than board
+# memory of its own. On those `memory.total` is the pool or unavailable, and
+# a consumer adding it to the machine total would count it twice.
+UMA_NAMES="GB10"
+
+system_memory() {
+    if [ -r /proc/meminfo ]; then
+        awk '/^MemTotal:/ { print $2 * 1024; found = 1 }
+             END { if (!found) print 0 }' /proc/meminfo
+        return
+    fi
+    # macOS, where a dev box runs the tests with no /proc.
+    if sysctl -n hw.memsize 2>/dev/null; then
+        return
+    fi
+    echo 0
+}
+
+cpu_count() {
+    n=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+    [ "$n" -gt 0 ] 2>/dev/null || n=1
+    echo "$n"
+}
+
+MEM=$(system_memory)
+CPUS=$(cpu_count)
+
+fake_gpus() {
+    awk -v n="$1" 'BEGIN {
+        sep = ""
+        for (i = 0; i < n; i++) {
+            printf "%s{\"index\":%d,\"vendor\":\"nvidia\",\"name\":\"fake\",", sep, i
+            printf "\"memory\":0,\"uma\":false}"
+            sep = ","
+        }
+    }'
+}
+
+# index, name, memory.total in MiB, or `[N/A]` on a part with no board
+# memory. --nounits keeps the unit off the figure so awk gets a number.
+nvidia_gpus() {
+    nvidia-smi --query-gpu=index,name,memory.total \
+               --format=csv,noheader,nounits 2>/dev/null |
+    awk -F', *' -v pool="$MEM" -v uma_names="$UMA_NAMES" '
+        function json_escape(s) {
+            gsub(/\\/, "\\\\", s)
+            gsub(/"/, "\\\"", s)
+            return s
+        }
+        NF >= 3 && $1 ~ /^[0-9]+$/ {
+            name = $2
+            total = $3
+            uma = 0
+            split(uma_names, u, " ")
+            for (i in u) if (index(name, u[i]) > 0) uma = 1
+            if (total !~ /^[0-9]+$/) uma = 1
+            mem = uma ? pool : total * 1024 * 1024
+            printf "%s{\"index\":%d,\"vendor\":\"nvidia\",\"name\":\"%s\",", sep, $1, json_escape(name)
+            printf "\"memory\":%d,\"uma\":%s}", mem, uma ? "true" : "false"
+            sep = ","
+        }
+    '
+}
+
+if [ -n "${MENTAT_GPUS:-}" ]; then
+    GPUS=$(fake_gpus "$MENTAT_GPUS")
+else
+    GPUS=$(nvidia_gpus)
+fi
+
+printf '{"memory":%s,"cpus":%s,"gpus":[%s]}\n' "$MEM" "$CPUS" "$GPUS"
