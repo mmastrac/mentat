@@ -11,6 +11,8 @@ python3 tests/test_vllm_shape.py  # call-for-call replay of RayExecutorV2
 python3 tests/test_multinode.py   # 3-daemon mesh: election, head death, probe matrix, peer staleness
 python3 tests/test_fabric.py      # islands from probes, island-constrained placement, MENTAT_FABRIC_IP
 python3 tests/test_probe.py       # the machine probe against a stub nvidia-smi
+python3 tests/test_autoconfig.py  # assembly with no address anywhere in the config;
+                                  # binds the real default ports and skips if held
 python3 tests/test_serve.py       # routing, gating, MCP merge, streaming pass-through
 python3 tests/test_topology.py    # two cabled pairs plus a LAN-only box over MENTAT_TEST_NET:
                                   # discovery, cut and repaired cables, renumbering, aging, the router
