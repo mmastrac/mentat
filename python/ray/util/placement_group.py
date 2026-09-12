@@ -9,13 +9,14 @@ from ray._refs import ObjectRef
 
 
 class PlacementGroup:
-    def __init__(self, pg_id, bundle_specs, ready_ref):
+    def __init__(self, pg_id, bundle_specs):
         self.id = pg_id
         self.bundle_specs = list(bundle_specs)
-        self._ready_ref = ready_ref
 
     def ready(self):
-        return ObjectRef(self._ready_ref)
+        # The id is the handle: a placement group resolves once it is
+        # CREATED, so there is no separate ready ref.
+        return ObjectRef(self.id)
 
     def wait(self, timeout_seconds=None):
         import ray
@@ -52,22 +53,28 @@ def _claim(gpu_bundles):
             raise _client.MentatError(f"mentat: MENTAT_CLAIM_SHAPE is not JSON: {e}") from None
     else:
         shape = {"sets": [{"name": "all", "bundles": gpu_bundles, "link": "rdma"}]}
-    _client.get_conn().request({"t": "claim", "name": name, "shape": shape})
+    _client.get_conn().request(
+        {"t": "claim", "name": name, "shape": shape}, expect="claim_ok"
+    )
     return name
 
 
 def placement_group(bundles, strategy="PACK", name="", lifetime=None):
-    gpu_bundles = [float(b.get("GPU", 0)) for b in bundles]
-    req = {"t": "create_pg", "bundles": gpu_bundles, "strategy": strategy}
+    # Whole GPUs per bundle: the wire takes integers, and a fractional
+    # GPU was always rounded up to one on the daemon side.
+    gpu_bundles = [max(1, int(-(-float(b.get("GPU", 0)) // 1))) for b in bundles]
+    req = {"t": "pg_create", "bundles": gpu_bundles, "strategy": strategy}
     claimed = _claim(gpu_bundles)
     if claimed:
         req["claim"] = claimed
-    resp, _ = _client.get_conn().request(req)
-    return PlacementGroup(resp["pg_id"], bundles, resp["ready_ref"])
+    resp, _ = _client.get_conn().request(req, expect="pg_create_ok")
+    return PlacementGroup(resp["pg_id"], bundles)
 
 
 def placement_group_table(pg):
-    resp, _ = _client.get_conn().request({"t": "pg_table", "pg_id": pg.id}, retry=True)
+    resp, _ = _client.get_conn().request(
+        {"t": "pg_table", "pg_id": pg.id}, retry=True, expect="pg_table_ok"
+    )
     table = resp["table"]
     # JSON forces string keys; ray's table uses ints and vLLM indexes with
     # ints, so convert here.
@@ -79,7 +86,7 @@ def placement_group_table(pg):
 
 
 def remove_placement_group(pg):
-    _client.get_conn().request({"t": "remove_pg", "pg_id": pg.id})
+    _client.get_conn().request({"t": "pg_remove", "pg_id": pg.id})
 
 
 def get_current_placement_group():

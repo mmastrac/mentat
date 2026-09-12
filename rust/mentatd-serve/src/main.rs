@@ -1135,7 +1135,7 @@ fn claim_node(shared: &Shared, id: &str, addr: &str) -> bool {
 /// Poll each alternate of a node once. The first that answers as that node
 /// is the new address.
 async fn try_alternates(shared: &Arc<Shared>, id: &str, current: &str) -> Option<String> {
-    let alts: Vec<String> = shared
+    let mut alts: Vec<String> = shared
         .nodes
         .lock()
         .unwrap()
@@ -1148,6 +1148,11 @@ async fn try_alternates(shared: &Arc<Shared>, id: &str, current: &str) -> Option
                 .collect()
         })
         .unwrap_or_default();
+    // Loopback names the box the router runs on rather than the peer, and
+    // is right only where router and daemon share one. The set is ordered
+    // lexicographically, which puts `127.` ahead of a real address, so the
+    // preference `peer_addresses` established is restored here.
+    alts.sort_by_key(|a| a.starts_with("127.") || a.starts_with("::1"));
     for alt in alts {
         if poll_status(shared, &alt).await.as_deref() == Some(id) {
             return Some(alt);
@@ -1205,11 +1210,10 @@ fn published_alive(shared: &Shared, node: Option<&str>, addr: &str) -> bool {
 
 /// Listen for the daemons' UDP announcements. An announcement is a hint: it
 /// only adds a watch candidate, and everything the daemon claims is then
-/// read over TCP and probed like any other -- which is why the datagrams
-/// carry no signature today. Both the datagram source and the claimed
-/// address must pass the same prefix list as the HTTP side. A future
-/// MENTAT_SECRET signs the datagrams under a bumped mentat_announce
-/// version, and the check slots in beside the prefix gate below.
+/// read over TCP and probed like any other. Every datagram is signed, so a
+/// listener with no key exits at boot rather than watching an empty
+/// cluster. Both the datagram source and the claimed address must pass
+/// ALLOWED_SOURCES, as the HTTP side does.
 async fn udp_listener(shared: Arc<Shared>) {
     let port = shared.cfg.announce_port;
     if port == 0 {

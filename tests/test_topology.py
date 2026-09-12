@@ -23,6 +23,8 @@ import mentat_testlib as tl  # noqa: E402
 from mentat_testlib import Daemon, run_ok  # noqa: E402
 
 FAST = {
+    # Announcements are signed, so every process here shares one key.
+    "MENTAT_SECRET": tl.TEST_SECRET,
     "MENTAT_PEER_STATUS_INTERVAL_MS": "200",
     "MENTAT_PEER_STALE_AFTER_MS": "1000",
     "MENTAT_PEER_DEAD_AFTER_MS": "1500",
@@ -254,7 +256,7 @@ def t03_a_group_lands_inside_one_island():
     p = place(via, "tp2", 2)
     state["tp2_driver"] = p
     assert p.stdout.readline().strip() == "PLACED"
-    pgs = head().status_json("tp2")["groups"]["tp2"]["placement_groups"]
+    pgs = list(head().status_json("tp2")["groups"]["tp2"]["placement_groups"].values())
     assert [pg["island_nodes"] for pg in pgs] == [2], pgs
 
 
@@ -273,12 +275,12 @@ def t03b_every_rank_registers_with_its_own_daemon():
         lambda: head().status_json("local")["groups"].get("local", {}).get("gpus_total") == 2,
         20, "both local agents on the head",
     )
-    agents = head().status_json("local")["groups"]["local"]["agents"]
+    agents = list(head().status_json("local")["groups"]["local"]["agents"].values())
     assert {a["node_ip"] for a in agents} == {BOXES["n36"][0], BOXES["n93"][0]}, agents
     p = place(daemons["n93"], "local", 2)
     state["local_driver"] = p
     assert p.stdout.readline().strip() == "PLACED"
-    pgs = head().status_json("local")["groups"]["local"]["placement_groups"]
+    pgs = list(head().status_json("local")["groups"]["local"]["placement_groups"].values())
     # Pair B is the island those two boxes share.
     assert [pg["island_nodes"] for pg in pgs] == [2], pgs
 
@@ -319,7 +321,7 @@ def t04_a_cut_fabric_cable_moves_the_mesh_link_and_dissolves_the_island():
     assert p.stdout.readline().strip() == "PENDING"
 
     def reason():
-        for pg in head().status_json("tp2b")["groups"]["tp2b"]["placement_groups"]:
+        for pg in head().status_json("tp2b")["groups"]["tp2b"]["placement_groups"].values():
             if pg["state"] == "PENDING":
                 return pg["pending_reason"]
 
@@ -335,7 +337,7 @@ def t05_a_repaired_cable_brings_the_island_and_the_placement_back():
         wait_for(lambda: islands_of(d) == want, 30, f"{name} to see island A again")
     wait_for(
         lambda: [pg["state"] for pg in
-                 head().status_json("tp2b")["groups"]["tp2b"]["placement_groups"]] == ["CREATED"],
+                 head().status_json("tp2b")["groups"]["tp2b"]["placement_groups"].values()] == ["CREATED"],
         20, "the waiting group to place",
     )
 
@@ -443,6 +445,7 @@ def t09_the_router_watches_each_node_once():
              "PROBE_INTERVAL_S": "0.5",
              "MODEL_TTL_S": "4",
              "MENTAT_ANNOUNCE_PORT": "0",
+             "MENTAT_SECRET": tl.TEST_SECRET,
              # The simulated net's addresses are on no interface here, so
              # `local` alone would reject every one. It stays in the list
              # for the loopback this test reads /status.json over.

@@ -471,15 +471,21 @@ mod tests {
             "groups": {
                 "glm53": {
                     "gpus_total": 2.0, "gpus_used": 2.0,
-                    "agents": [
-                        {"id": "glm53@glm53", "node_ip": "10.100.0.2", "container": "glm53",
-                         "gpus": 1, "gpus_free": 0, "gpu_vendor": "nvidia", "alive": true},
-                        {"id": "glm53@glm53w", "node_ip": "10.100.0.1", "container": "glm53",
-                         "gpus": 1, "gpus_free": 0, "gpu_vendor": "nvidia", "alive": true},
-                    ],
-                    "placement_groups": [{"id": "abc", "bundles": 2, "state": "CREATED"}],
-                    "actors": [{"id": "a1", "name": "vllm_Worker_1_TP0", "node_id": "aabbcc",
-                                "pid": 100, "state": "running"}],
+                    "agents": {
+                        "glm53@glm53": {"node_ip": "10.100.0.2", "container": "glm53",
+                            "machine": {"memory": 0, "cpus": 8, "gpus": [
+                                {"index": 0, "vendor": "nvidia", "name": "RTX 6000",
+                                 "memory": 0, "uma": false}]},
+                            "gpus_free": [], "alive": true},
+                        "glm53@glm53w": {"node_ip": "10.100.0.1", "container": "glm53",
+                            "machine": {"memory": 0, "cpus": 8, "gpus": [
+                                {"index": 0, "vendor": "nvidia", "name": "RTX 6000",
+                                 "memory": 0, "uma": false}]},
+                            "gpus_free": [], "alive": true},
+                    },
+                    "placement_groups": {"abc": {"bundles": [1, 1], "state": "CREATED"}},
+                    "actors": {"a1": {"name": "vllm_Worker_1_TP0", "node_id": "aabbcc",
+                                      "pid": 100, "state": "running"}},
                 }
             }
         });

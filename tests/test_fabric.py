@@ -110,7 +110,7 @@ def t02_a_two_bundle_group_lands_inside_the_island():
     for a in actors:
         env = ray.get(a.env_dump.remote())
         assert env.get("MENTAT_FABRIC_IP") == "127.0.0.1", env.get("MENTAT_FABRIC_IP")
-    pgs = d1.status_json("tp2")["groups"]["tp2"]["placement_groups"]
+    pgs = d1.status_json("tp2")["groups"]["tp2"]["placement_groups"].values()
     assert [p["island_nodes"] for p in pgs] == [3], pgs
 
 
@@ -151,7 +151,7 @@ time.sleep(3600)
     assert "PG_REQUESTED" in p.stdout.readline()
 
     def pending_reason():
-        pgs = d1.status_json("split")["groups"]["split"]["placement_groups"]
+        pgs = d1.status_json("split")["groups"]["split"]["placement_groups"].values()
         for pg in pgs:
             if pg["state"] == "PENDING" and pg["pending_reason"]:
                 return pg["pending_reason"]
@@ -206,7 +206,7 @@ time.sleep(3600)
     tl._children.append(p)
     state["untagged_driver"] = p
     assert "PLACED" in p.stdout.readline(), "the untagged group never placed"
-    pgs = d1.status_json("untagged")["groups"]["untagged"]["placement_groups"]
+    pgs = d1.status_json("untagged")["groups"]["untagged"]["placement_groups"].values()
     assert [pg["state"] for pg in pgs] == ["CREATED"], pgs
     # No island was chosen, so no rank is handed a fabric address it has no
     # fabric for.

@@ -71,8 +71,15 @@ fn discoverer(shared: SharedRef, control_port: u16, http_port: u16) {
                     if !q["alive"].as_bool().unwrap_or(false) {
                         continue;
                     }
-                    if let Some(addr) = q["control_addr"].as_str().filter(|a| !a.is_empty()) {
-                        out.push(addr.to_string());
+                    // A peer publishes the port it answers on and the
+                    // addresses it answers at. Its own `node_ip` is the one
+                    // it is filed under, so that is the address to dial.
+                    if let (Some(ip), Some(port)) =
+                        (q["node_ip"].as_str(), q["control_port"].as_u64())
+                    {
+                        if !ip.is_empty() && port != 0 {
+                            out.push(format!("{ip}:{port}"));
+                        }
                     }
                 }
             }
@@ -114,7 +121,12 @@ fn connector(shared: SharedRef, seed: String, control_port: u16, http_port: u16,
                             .as_object()
                             .into_iter()
                             .flatten()
-                            .any(|(_, q)| q["control_addr"].as_str() == Some(seed.as_str()))
+                            .any(|(_, q)| {
+                                match (q["node_ip"].as_str(), q["control_port"].as_u64()) {
+                                    (Some(ip), Some(port)) => format!("{ip}:{port}") == *seed,
+                                    _ => false,
+                                }
+                            })
                     })
                 };
                 if !published {

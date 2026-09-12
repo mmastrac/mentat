@@ -139,9 +139,9 @@ def t03_parallel_groups_share_nodes():
 
 def t04_metrics_per_group():
     m = cluster.metrics()
-    assert 'mentat_gpus_total{group="tp4"} 4' in m, m
-    assert 'mentat_gpus_total{group="qwen-a"} 1' in m, m
-    assert 'mentat_gpus_total{group="qwen-b"} 1' in m, m
+    assert 'mentat_gpus_total{group="tp4",vendor="nvidia"} 4' in m, m
+    assert 'mentat_gpus_total{group="qwen-a",vendor="nvidia"} 1' in m, m
+    assert 'mentat_gpus_total{group="qwen-b",vendor="nvidia"} 1' in m, m
 
 
 def t05_a_claim_fences_placement():

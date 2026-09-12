@@ -21,6 +21,9 @@ import sys
 import threading
 import time
 
+#: The wire version this host speaks. The agent's `ctor` carries it too.
+PROTO = "0.99"
+
 
 def _send(sock, header, payload=b""):
     hb = json.dumps(header).encode("utf-8")
@@ -87,10 +90,10 @@ def main():
     parser.add_argument("--socket", required=True)
     args = parser.parse_args()
 
-    actor_id = os.environ.get("MENTAT_ACTOR_ID", "unknown")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(args.socket)
-    _send(sock, {"t": "host_hello", "req": 0, "actor_id": actor_id})
+    # The socket is per actor, so connecting is the identification.
+    _send(sock, {"t": "host_hello", "req": 0, "proto": PROTO})
 
     agent_pid = int(os.environ.get("MENTAT_AGENT_PID", "0") or "0")
     if agent_pid:

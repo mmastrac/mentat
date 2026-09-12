@@ -14,6 +14,11 @@ import threading
 import time
 import urllib.request
 
+#: One key for every process a test starts. Announcements are signed, so a
+#: daemon and the router have to agree on one.
+TEST_SECRET = "test-secret"
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 RUST = os.path.join(ROOT, "rust")
@@ -104,6 +109,9 @@ class Cluster:
                 # A test daemon must never broadcast loopback addresses onto
                 # a real LAN where a production mentatd-serve is listening.
                 "MENTAT_ANNOUNCE_PORT": "0",
+                # Announcements are signed or absent, so every process in a
+                # test cluster shares one key.
+                "MENTAT_SECRET": TEST_SECRET,
                 **self.daemon_env,
             },
         )
@@ -130,6 +138,7 @@ class Cluster:
             "MENTAT_DAEMON": daemon_addr or self.address,
             "MENTAT_GROUP": group,
             "MENTAT_GPUS": str(gpus),
+            "MENTAT_SECRET": TEST_SECRET,
             "MENTAT_NODE_IP": node_ip,
             "CONTAINER_NAME": container,
             "MENTAT_SOCK_DIR": self.tmp,
@@ -219,6 +228,9 @@ class Daemon:
                 # off a real LAN. Tests that exercise discovery override
                 # this with an explicit unicast MENTAT_ANNOUNCE_ADDR.
                 "MENTAT_ANNOUNCE_PORT": "0",
+                # Announcements are signed or absent, so every process in a
+                # test cluster shares one key.
+                "MENTAT_SECRET": TEST_SECRET,
                 **(env or {}),
             },
         )
@@ -247,6 +259,7 @@ class Daemon:
             "MENTAT_DAEMON": self.address,
             "MENTAT_GROUP": group,
             "MENTAT_GPUS": str(gpus),
+            "MENTAT_SECRET": TEST_SECRET,
             "MENTAT_NODE_IP": self.node_ip,
             "CONTAINER_NAME": container,
             "MENTAT_SOCK_DIR": tmp or self.tmp,

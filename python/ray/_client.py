@@ -20,11 +20,24 @@ class MentatError(RuntimeError):
     pass
 
 
-def _checked(answer):
-    """The daemon's answer, or its error raised."""
+#: The wire version this shim speaks. The daemon refuses a link whose major
+#: differs, and this side checks the reply for the same reason.
+PROTO = "0.99"
+
+
+def _checked(answer, expect=None):
+    """The daemon's answer, or its error raised.
+
+    `expect` is the response type the request is answered with. The names
+    exist, so checking them costs one comparison and turns a mismatched
+    reply into a message rather than a field read as None.
+    """
     resp, _ = answer
-    if resp.get("t") == "err":
+    t = resp.get("t")
+    if t == "err":
         raise MentatError("mentat: " + resp.get("error", "unknown error"))
+    if expect is not None and t not in (expect, "ok"):
+        raise MentatError(f"mentat: expected {expect}, got {t!r}")
     return answer
 
 
@@ -111,13 +124,20 @@ class Connection:
             self._exchange(
                 {
                     "t": "hello",
+                    "proto": PROTO,
                     "client_id": self.client_id,
                     "group": self.group,
                     "session": self.session,
                     "kind": self.kind,
                 }
-            )
+            ),
+            "hello_ok",
         )[0]
+        offered = self.hello.get("proto", "")
+        if offered.split(".")[0] != PROTO.split(".")[0]:
+            raise MentatError(
+                f"mentat: daemon speaks proto {offered!r}, this shim {PROTO}"
+            )
 
     def _drop(self):
         if self.sock is not None:
@@ -138,7 +158,7 @@ class Connection:
             raise _Undelivered(e)
         return read_frame_from(self.sock)
 
-    def request(self, header, payload=b"", retry=False):
+    def request(self, header, payload=b"", retry=False, expect=None):
         """Send one message and return its answer.
 
         `retry` marks a message that asking twice answers the same way. A
@@ -166,7 +186,7 @@ class Connection:
                     raise
                 self._dial()
                 resp, rp = self._exchange(header, payload)
-        return _checked((resp, rp))
+        return _checked((resp, rp), expect)
 
     def close(self):
         self._drop()

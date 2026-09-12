@@ -263,8 +263,11 @@ def t12_cli_status_and_entrypoint_pipeline():
 
 def t13_metrics():
     m = cluster.metrics()
-    assert 'mentat_gpus_total{group="g1"} 2' in m, m
-    assert 'vendor="nvidia"' in m, m
+    # One series per vendor present: a box may hold two GPU models.
+    assert 'mentat_gpus_total{group="g1",vendor="nvidia"} 2' in m, m
+    assert 'mentat_gpu_memory_bytes{group="g1",vendor="nvidia"}' in m, m
+    assert 'mentat_memory_bytes{group="g1"}' in m, m
+    assert "mentat_relayed_total" in m, m
     assert "mentat_actor_exits_total" in m
     sig = [l for l in m.splitlines() if l.startswith('mentat_actor_exits_total{kind="signal"}')]
     assert sig and int(sig[0].split()[-1]) >= 1, sig
@@ -338,7 +341,7 @@ def _wait_agent(c, group, pred, what, timeout=10):
     last = None
     while time.time() < deadline:
         snap = c.status_json(group)
-        agents = snap["groups"].get(group, {}).get("agents", [])
+        agents = list(snap["groups"].get(group, {}).get("agents", {}).values())
         if agents:
             last = agents[0]
             if pred(last):
@@ -484,7 +487,7 @@ def t17_agent_link_giveup():
         except RAE as e:
             assert "agent link lost" in str(e), str(e)
         snap = c.status_json("ggone")
-        states = [a["state"] for a in snap["groups"]["ggone"]["actors"]]
+        states = [a["state"] for a in snap["groups"]["ggone"]["actors"].values()]
         assert all(s.startswith("dead") for s in states), states
     finally:
         r.shutdown()
@@ -549,7 +552,11 @@ for line in sys.stdin:
         def live_actors():
             with _url.urlopen(f"http://127.0.0.1:{c.http_port}/status", timeout=10) as r:
                 g = (_json.load(r).get("groups") or {}).get("grestart") or {}
-            return [a for a in (g.get("actors") or []) if a.get("state") == "running"]
+            return [
+                a
+                for a in (g.get("actors") or {}).values()
+                if a.get("state") == "running"
+            ]
 
         assert len(live_actors()) == 1, live_actors()
 

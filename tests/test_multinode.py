@@ -257,7 +257,7 @@ def t05_group_survived_head_change():
     d1 = state["d1"]
     wait_for(
         lambda: [a["state"] for a in
-                 d1.status_json("m")["groups"].get("m", {}).get("actors", [])]
+                 d1.status_json("m")["groups"].get("m", {}).get("actors", {}).values()]
         .count("running") == 2,
         20,
         "both actors to be adopted by the new head",

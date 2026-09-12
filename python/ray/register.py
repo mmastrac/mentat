@@ -54,37 +54,43 @@ def log(event, **fields):
 
 
 def announced(value):
-    """One MENTAT_*_API value as ("url", str) or ("port", {port, path}).
+    """One MENTAT_*_API value as {host, port, path}.
 
-    Split the way the Rust agent splits it. A whole URL is passed through
-    verbatim: naming a host is the operator saying which address to use. A
-    bare port, or a wildcard host, is the port form, which promises every
-    address of this node reaches the service and leaves the router to pick.
+    Split the way the Rust agent splits it. A named host is the operator
+    saying which address to use. A bare port, or a wildcard host, leaves
+    `host` empty, which asks the router to resolve it against the node's
+    addresses. Returns None for a value neither form can read.
     """
     v = value.strip()
-    rest = v[len("http://"):] if v.startswith("http://") else None
-    if rest is not None:
-        if not rest.startswith("0.0.0.0:"):
-            return "url", v
-        v = rest[len("0.0.0.0:"):]
-    elif "://" in v:
-        return "url", v
-    port, slash, path = v.partition("/")
+    host = ""
+    if v.startswith("http://"):
+        authority, slash, path = v[len("http://"):].partition("/")
+        host, _, port = authority.rpartition(":")
+        if host in ("0.0.0.0", "::"):
+            host = ""
+        path = slash + path
+    else:
+        port, slash, path = v.partition("/")
+        path = slash + path
     try:
-        return "port", {"port": int(port), "path": slash + path}
+        return {"host": host, "port": int(port), "path": path}
     except ValueError:
-        return "url", value
+        return None
 
 
 def services(args):
-    """The registration's `services` and `services_ports` maps."""
-    urls, ports = {}, {}
+    """The registration's `services` map."""
+    out = {}
     for name, value in (("openai", args.openai), ("mcp", args.mcp)):
         if not value:
             continue
-        kind, parsed = announced(value)
-        (urls if kind == "url" else ports)[name] = parsed
-    return urls, ports
+        parsed = announced(value)
+        if parsed is None:
+            raise SystemExit(f"mentatd: {name} endpoint is not an endpoint: {value!r}")
+        if name == "openai":
+            parsed["provider"] = args.provider
+        out[name] = parsed
+    return out
 
 
 def agent_id(args):
@@ -94,12 +100,16 @@ def agent_id(args):
     return f"{args.group}@{args.container}@{args.node_ip}"
 
 
+#: The wire version this shim speaks.
+PROTO = "0.99"
+
+
 def register_frame(args):
     """The `agent_register` header this process opens its connection with."""
-    urls, ports = services(args)
     return {
         "t": "agent_register",
         "req": 1,
+        "proto": PROTO,
         "agent_id": agent_id(args),
         "group": args.group,
         # Empty asks the daemon to decide. It files an agent that claims
@@ -107,16 +117,12 @@ def register_frame(args):
         # and under the address it saw otherwise, which is right in both
         # cases. MENTAT_NODE_IP overrides it, as everywhere else.
         "node_ip": args.node_ip,
-        # No capacity, so no vendor to name.
-        "gpus": [],
-        "gpu_vendor": "",
-        "cpus": os.cpu_count() or 1,
+        # A register-only container hosts no actor, so it offers no device
+        # for one to land on.
+        "machine": {"memory": 0, "cpus": os.cpu_count() or 1, "gpus": []},
         "container": args.container,
         "pid": os.getpid(),
-        "services": urls,
-        "services_ports": ports,
-        "service_notes": {},
-        "provider": args.provider,
+        "services": services(args),
         "resume": [],
         "unacked_refs": [],
     }
@@ -170,6 +176,11 @@ def connect(args):
         header, _ = read_frame_from(sock)
         if header.get("t") == "err":
             raise RuntimeError(header.get("error", "unknown error"))
+        offered = header.get("proto", "")
+        if offered.split(".")[0] != PROTO.split(".")[0]:
+            raise SystemExit(
+                f"mentatd: daemon speaks proto {offered!r}, this shim {PROTO}"
+            )
         if header.get("t") != "agent_register_ok":
             raise RuntimeError(f"expected agent_register_ok, got {header.get('t')!r}")
         log("register_ok", agent=agent_id(args), node_id=header.get("node_id", ""),

@@ -59,7 +59,7 @@ def remote(target=None, **kwargs):
 
 
 def kill(actor, no_restart=True):
-    _client.get_conn().request({"t": "kill_actor", "actor_id": actor._actor_id})
+    _client.get_conn().request({"t": "actor_kill", "actor_id": actor._actor_id})
 
 
 def _load(payload):
@@ -73,7 +73,9 @@ def _get_one(ref, timeout):
         raise TypeError(f"ray.get expects ObjectRef, got {type(ref)}")
     timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
     resp, payload = _client.get_conn().request(
-        {"t": "get", "ref_id": ref._id, "timeout_ms": timeout_ms}, retry=True
+        {"t": "ref_get", "ref_id": ref._id, "timeout_ms": timeout_ms},
+        retry=True,
+        expect="ref_get_ok",
     )
     status = resp["status"]
     if status == "ok":
@@ -104,12 +106,13 @@ def wait(refs, *, num_returns=1, timeout=None, fetch_local=True):
     timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
     resp, _ = _client.get_conn().request(
         {
-            "t": "wait",
+            "t": "ref_wait",
             "ref_ids": [r._id for r in refs],
             "num_returns": num_returns,
             "timeout_ms": timeout_ms,
         },
         retry=True,
+        expect="ref_wait_ok",
     )
     ready_ids = set(resp["ready"])
     # Same objects back, partitioned, input order preserved -- vLLM uses the
@@ -120,12 +123,12 @@ def wait(refs, *, num_returns=1, timeout=None, fetch_local=True):
 
 
 def nodes():
-    resp, _ = _client.get_conn().request({"t": "nodes"}, retry=True)
+    resp, _ = _client.get_conn().request({"t": "nodes"}, retry=True, expect="nodes_ok")
     return resp["nodes"]
 
 
 def cluster_resources():
-    resp, _ = _client.get_conn().request({"t": "cluster_resources"}, retry=True)
+    resp, _ = _client.get_conn().request({"t": "resources"}, retry=True, expect="resources_ok")
     return resp["resources"]
 
 

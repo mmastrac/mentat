@@ -68,14 +68,16 @@ class ActorClass:
         payload = cloudpickle.dumps((self._cls, args, kwargs))
         resp, _ = _client.get_conn().request(
             {
-                "t": "create_actor",
+                "t": "actor_create",
                 "name": name,
-                "num_gpus": float(opts.get("num_gpus", 0) or 0),
+                # Whole devices: a fractional request always reserved one.
+                "num_gpus": max(0, int(-(-float(opts.get("num_gpus", 0) or 0) // 1))),
                 "pg_id": pg_id,
                 "bundle_index": int(bundle_index),
                 "env": env_vars,
             },
             payload,
+            expect="actor_create_ok",
         )
         return ActorHandle(resp["actor_id"], resp["node_id"], resp["gpu_ids"], name)
 
@@ -91,11 +93,12 @@ class ActorMethod:
         payload = cloudpickle.dumps((args, kwargs))
         resp, _ = _client.get_conn().request(
             {
-                "t": "call",
+                "t": "actor_call",
                 "actor_id": self._actor._actor_id,
                 "method": self._method,
             },
             payload,
+            expect="actor_call_ok",
         )
         return ObjectRef(resp["ref_id"])
 

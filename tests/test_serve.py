@@ -223,6 +223,7 @@ serve_port = free_port()
 serve_proc = subprocess.Popen(
     [SERVE_BINARY],
     env={**os.environ,
+         "MENTAT_SECRET": tl.TEST_SECRET,
          "MENTAT_DAEMONS": f"127.0.0.1:{cluster.http_port}",
          "SERVE_PORT": str(serve_port),
          "POLL_INTERVAL_S": "1",
@@ -320,11 +321,19 @@ def start_driver(group, address=None):
 def t01_announcement_reaches_status():
     snap = cluster.status_json()
     for group, m in (("ga", mA), ("gb", mB)):
-        agents = snap["groups"][group]["agents"]
+        agents = list(snap["groups"][group]["agents"].values())
         assert len(agents) == 1, agents
         svc = agents[0]["services"]
-        assert svc["openai"] == f"http://127.0.0.1:{m.port}/v1", svc
-        assert svc["mcp"] == f"http://127.0.0.1:{m.port}/mcp", svc
+        assert (svc["openai"]["host"], svc["openai"]["port"], svc["openai"]["path"]) == (
+            "127.0.0.1",
+            m.port,
+            "/v1",
+        ), svc
+        assert (svc["mcp"]["host"], svc["mcp"]["port"], svc["mcp"]["path"]) == (
+            "127.0.0.1",
+            m.port,
+            "/mcp",
+        ), svc
 
 
 def t02_no_actors_yet_admits_on_the_probe_and_merges_mcp():
@@ -369,7 +378,7 @@ def t03_admit_on_running_actor():
                and served_models() == ["model-a", "model-b"], 20,
                "model-a never admitted on its running actor")
     # The pid piggyback: the daemon's actor table shows the real worker pid.
-    actors = cluster.status_json()["groups"]["ga"]["actors"]
+    actors = list(cluster.status_json()["groups"]["ga"]["actors"].values())
     assert [a["pid"] for a in actors] == [actor_pid], (actors, actor_pid)
 
 
@@ -581,18 +590,21 @@ def t08b_port_announcement_resolves_and_falls_through():
         return bool(g and g.get("gpus_total", 0) >= 1)
 
     wait_until(registered, 15, "agent gp never registered")
-    # The daemon stores the port form and does not resolve it: only the
-    # router knows which of the node's links it shares.
-    agent = d.status_json()["groups"]["gp"]["agents"][0]
-    assert agent["services"] == {}, agent
-    assert agent["services_ports"]["openai"] == {"port": mP.port, "path": "/v1"}, agent
-    assert agent["services_ports"]["mcp"] == {"port": mP.port, "path": "/mcp"}, agent
+    # The daemon stores an empty host and does not resolve it: only the
+    # router knows which of the node's links it shares. A wildcard host
+    # reads the same as a bare port.
+    agent = list(d.status_json()["groups"]["gp"]["agents"].values())[0]
+    openai = agent["services"]["openai"]
+    assert (openai["host"], openai["port"], openai["path"]) == ("", mP.port, "/v1"), agent
+    mcp = agent["services"]["mcp"]
+    assert (mcp["host"], mcp["port"], mcp["path"]) == ("", mP.port, "/mcp"), agent
 
     start_driver("gp", address=d.address)
     port5 = free_port()
     serve5 = subprocess.Popen(
         [SERVE_BINARY],
         env={**os.environ,
+             "MENTAT_SECRET": tl.TEST_SECRET,
              "MENTAT_DAEMONS": f"127.0.0.1:{d.http_port}",
              "SERVE_PORT": str(port5),
              "POLL_INTERVAL_S": "1",
@@ -682,6 +694,7 @@ def t09_membership_follows_the_mesh():
     serve2 = subprocess.Popen(
         [SERVE_BINARY],
         env={**os.environ,
+             "MENTAT_SECRET": tl.TEST_SECRET,
              "MENTAT_DAEMONS": f"127.0.0.1:{d2.http_port}",
              "SERVE_PORT": str(port2),
              "POLL_INTERVAL_S": "1",
@@ -732,6 +745,7 @@ def t10_udp_announce_replaces_the_seed_list():
     serve4 = subprocess.Popen(
         [SERVE_BINARY],
         env={**os.environ,
+             "MENTAT_SECRET": tl.TEST_SECRET,
              "MENTAT_DAEMONS": "",
              "MENTAT_ANNOUNCE_PORT": str(udp_port),
              "SERVE_PORT": str(port4),
@@ -767,6 +781,7 @@ def start_router(daemon_http, **env_extra):
     proc = subprocess.Popen(
         [SERVE_BINARY],
         env={**os.environ,
+             "MENTAT_SECRET": tl.TEST_SECRET,
              "MENTAT_DAEMONS": f"127.0.0.1:{daemon_http}",
              "SERVE_PORT": str(port),
              "POLL_INTERVAL_S": "1",
@@ -823,11 +838,13 @@ def t11_a_registration_with_no_actors_is_served():
 
     wait_until(lambda: models_at(port) == ["model-s"], 25,
                "model-s never served from a registration with no actors")
-    agents = d.status_json()["groups"]["gs"]["agents"]
+    agents = list(d.status_json()["groups"]["gs"]["agents"].values())
     assert len(agents) == 1, agents
-    assert agents[0]["gpus"] == 0, agents
-    assert agents[0]["provider"] == "vllm", agents
-    assert d.status_json()["groups"]["gs"]["actors"] == [], "the stub hosts no actors"
+    assert agents[0]["machine"]["gpus"] == [], agents
+    # `provider` rides on the openai entry now, since it describes what
+    # serves that endpoint.
+    assert agents[0]["services"]["openai"]["provider"] == "vllm", agents
+    assert d.status_json()["groups"]["gs"]["actors"] == {}, "the stub hosts no actors"
 
 
 def t12_an_unservable_group_is_retired_then_comes_back():
