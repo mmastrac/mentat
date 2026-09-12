@@ -51,7 +51,7 @@ struct AgentShared {
     daemon: Mutex<Option<FrameWriter>>,
     actors: Mutex<HashMap<String, HostActor>>,
     sock_dir: String,
-    /// Findings about announced services, carried on every register so a
+    /// Findings about announced services, held on every register so a
     /// reconnect does not lose them.
     service_notes: Mutex<BTreeMap<String, String>>,
     /// Daemon-bound messages (results, exits) that could not be delivered
@@ -149,7 +149,7 @@ enum Announcement {
 /// Read one MENTAT_*_API value.
 ///
 ///     http://10.0.0.1:8000/v1   one address, verbatim
-///     http://0.0.0.0:8000/v1    every address this node answers on
+///     http://0.0.0.0:8000/v1    every address this node listens on
 ///     8000/v1                   the same, said shorter
 ///
 /// The wildcard host is what the API server was told to bind, so writing it
@@ -188,7 +188,7 @@ fn parse_announcement(v: &str) -> Announcement {
 ///
 /// The identity is hashed into a node id, so the agent and the daemon have to
 /// arrive at the same string or the cluster grows a second node where there is
-/// one. Asking the route which address reaches the daemon answers 127.0.0.1
+/// one. Reading the route which address reaches the daemon returns 127.0.0.1
 /// over loopback, which is such a string: a node beside the daemon's own,
 /// holding this agent's GPUs.
 ///
@@ -197,14 +197,14 @@ fn parse_announcement(v: &str) -> Announcement {
 /// MENTAT_NODE_IP only when it is telling the truth about a node the daemon
 /// cannot see for itself.
 ///
-/// The daemon's own address answers whether it is on this box. The route to
+/// The daemon's own address tells whether it is on this box. The route to
 /// it does not. Loopback is the obvious case, and a container told to reach
 /// its own daemon by one of the box's other addresses is the same case: the
-/// route then answers with that address, which need not be the one the
+/// route then replies with that address, which need not be the one the
 /// daemon is known by, and the agent would claim a node beside it.
 ///
 /// MENTAT_NODE_IP is the only variable read. An engine's own address setting
-/// is that engine's business: it names the address the engine binds, which is
+/// is that engine's business: it is the address the engine binds, which is
 /// chosen for its own reasons and is routinely the fabric address while the
 /// daemon is known by another. Reading it made the two disagree and put this
 /// agent's GPUs on a node the cluster does not have.
@@ -224,10 +224,10 @@ fn claimed_node_ip(daemon_addr: &str) -> String {
     }
 }
 
-/// Whether a daemon address names this box.
+/// Whether a daemon address is this box.
 ///
 /// A host with no port is taken whole, since an address is what it is with
-/// or without one. A name that is not an address answers false: it may
+/// or without one. A name that is not an address returns false: it may
 /// resolve here, and resolving it to find out would make a claim depend on
 /// DNS.
 fn on_this_box(daemon_addr: &str, mine: &[String]) -> bool {
@@ -235,7 +235,7 @@ fn on_this_box(daemon_addr: &str, mine: &[String]) -> bool {
     is_loopback(host) || mine.iter().any(|a| a == host)
 }
 
-/// The host half of an address that may or may not carry a port.
+/// The host half of an address that may or may not hold a port.
 ///
 /// A bare IPv6 address is all colons, so splitting on the last one would
 /// take `::1` for a host of `:` on port 1. Anything that parses whole is
@@ -302,7 +302,7 @@ fn announced_services() -> Services {
 }
 
 /// The announced services with each finding folded into its `note`, which
-/// is what a re-register carries so a daemon restart does not lose one.
+/// is what a re-register holds so a daemon restart does not lose one.
 fn with_notes(services: &Services, notes: &BTreeMap<String, String>) -> Services {
     services
         .iter()
@@ -386,7 +386,7 @@ fn watch_service_binds(shared: &Arc<AgentShared>, services: &Services) {
                     continue;
                 }
                 // The watch outlives the first answer: a server that
-                // restarts onto the wildcard address must stop carrying
+                // restarts onto the wildcard address must stop holding
                 // "bound to 10.100.0.1 only" into every later probe failure.
                 if let Some(n) = &note {
                     log(
@@ -432,10 +432,10 @@ fn watch_service_binds(shared: &Arc<AgentShared>, services: &Services) {
 /// Addresses listening on `port`, from the kernel's own table.
 ///
 /// The agent shares the container's network namespace with the API server,
-/// which is what makes /proc/net/tcp the right place to ask. Connecting to
-/// the port would only answer that something listens.
+/// which is what makes /proc/net/tcp the right place to look. Connecting to
+/// the port would only settle that something listens.
 /// Empty means nothing listens yet, or the table could not be read (the
-/// dev boxes are macOS, which has no procfs -- there the check silently
+/// dev boxes are macOS, which does not have procfs -- there the check silently
 /// does nothing, which is correct for a warning).
 fn listening_addrs_for(port: u16) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -1047,7 +1047,7 @@ mod tests {
     }
 
     /// The reported shape: a container told to reach its own daemon by the
-    /// box's LAN address. The route then answers with that address, which is
+    /// box's LAN address. The route then replies with that address, which is
     /// not the one the daemon is known by, so claiming it puts this agent on
     /// a node beside the daemon's own.
     #[test]
@@ -1134,7 +1134,7 @@ mod tests {
         assert_eq!(listening_addrs(TCP4, false, 8000), vec!["0.0.0.0"]);
     }
 
-    /// The finding the warning exists for: the server answers on one address
+    /// The finding the warning exists for: the server listens on one address
     /// of a multi-homed node, so the port announcement promised more than
     /// the socket delivers.
     #[test]

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::state::{ActorState, PeerInfo, PgState, State};
 
 /// One peer's probed pairs as JSON, keyed local address then remote. A
-/// pair the prober has not tried yet has no entry, which readers must not
+/// pair gets an entry once the prober has tried it, which readers must not
 /// confuse with a pair that failed.
 fn probe_table(p: &PeerInfo) -> Value {
     Value::Object(

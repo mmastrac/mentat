@@ -1,7 +1,7 @@
 //! This box's own networks, and the allowlist of source addresses the
 //! router will act on.
 //!
-//! Both answer the same question from different sides: which addresses are
+//! Both settle the same question from different sides: which addresses are
 //! near enough to be worth connecting to. The interface list is the closest
 //! thing to proof of reachability available without dialling an address, so
 //! it decides candidate ranking and, by default, the allowlist too.
@@ -266,7 +266,7 @@ mod tests {
     }
 
     /// The default is `local` alone, so the interface list has to hold at
-    /// least loopback for a router to answer its own health check.
+    /// least loopback for a router to serve its own health check.
     #[test]
     fn the_default_allows_loopback() {
         let a = Allow::parse("local");

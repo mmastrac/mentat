@@ -21,7 +21,7 @@ event kind, a snapshot key or a metric. A peer sends nothing introduced
 after its counterpart's minor, so a `0.100` daemon behaves as `0.99`
 toward a `0.99` agent. Any other change is major.
 
-On a major mismatch the accepter answers `err` with its own `proto` and
+On a major mismatch the accepter returns `err` with its own `proto` and
 closes; the dialer closes on a mismatched reply. A mesh peer of another
 major does not take part in election and is redialed at the normal interval.
 An announcement of another major is dropped, logged once per source. An
@@ -57,7 +57,7 @@ every other number is an integer.
 
 The first frame identifies the link: `hello` (client), `agent_register`
 (agent), `peer_hello` (mesh), `probe` (one connection per probe) or
-`host_hello` (host). Anything else is answered with `err` and closed.
+`host_hello` (host). Anything else gets `err` and closed.
 
 A non-head daemon relays a `hello` or `agent_register` connection to the
 head: it sends the first frame there and pipes bytes both ways until either
@@ -74,9 +74,9 @@ exists while any agent, actor or client names it, and does not need
 creating.
 
 Group scoping keeps two models on one node from counting each other's GPUs.
-`nodes`, `resources`, `available` and placement answer for the sending
+`nodes`, `resources`, `available` and placement report for the sending
 client's group, from its `hello`. `status` and `actor_stop` take a group as
-an argument, since an operator asks from outside any one deployment. The
+an argument, since an operator reads from outside any one deployment. The
 snapshot files agents, actors and placement groups under `groups`.
 
 One driver holds a group: a `hello` with `session: true` is refused when
@@ -159,7 +159,7 @@ A node row, with the daemon's own node always present:
 agents stay registered and the driver reconnects, so the group continues. A
 request with neither, or both, is refused and lists the groups that exist.
 
-`all` must be spelled because the binary also answers to `ray`. Under Ray,
+`all` must be spelled because the binary is also installed as `ray`. Under Ray,
 `ray stop` stops the local node's processes; here it reaches every group the
 daemon knows, so an entrypoint running it as cleanup fails until someone
 sets a scope.
@@ -167,7 +167,7 @@ sets a scope.
 ## Claims
 
 A claim reserves nodes and links under a name. `claim` matches a shape
-against the probed topology and answers with the set it chose. The name
+against the probed topology and replies with the set it chose. The name
 holds the reservation: every holder gets the view the first claim produced,
 so ranks starting independently agree without a coordinator.
 
@@ -208,7 +208,7 @@ devices.
 | `rtt_ms` | The round trip a probe observed |
 
 A claim on a name held for a different shape is refused: re-solving would
-move nodes under whoever claimed first. Only the head answers a claim, since
+move nodes under whoever claimed first. Only the head solves a claim, since
 two daemons solving one name against their own views could each hand out a
 placement, so a claim sent elsewhere is refused with the head's address.
 
@@ -221,7 +221,7 @@ it had. A session cut by a head change keeps its claim: the holder re-sends
 claim, so a node leaving the mesh does not end one.
 
 `pg_create` with `claim` set places among the nodes the claim chose. A
-placement group asking for more than its claim holds stays pending, since
+placement group requesting more than its claim holds stays pending, since
 spilling outside it would split ranks that agreed on one view.
 
 ## Agent link
@@ -311,7 +311,7 @@ its agent and driver links so both re-register.
 The prober binds one of its own addresses, connects to one of the peer's at
 the peer's control port, sends `probe`, reads `probe_ok` and closes. Success
 requires the expected `node_id` in the reply: both fabrics in a multi-pair
-cluster may share a subnet, so an address answering does not prove the
+cluster may share a subnet, so an address replying does not prove the
 intended node did. Binding the local address makes the result describe the
 cabling; without it the result reports the routing table's preference.
 
@@ -377,9 +377,9 @@ every field is re-read over TCP and probed before it affects routing.
 
 | Field | Value |
 | --- | --- |
-| `node_ip` | What the node calls itself, naming the subnet the cluster talks on. A host off that subnet may not reach it |
+| `node_ip` | What the node calls itself, which fixes the subnet the cluster talks on. A host off that subnet may not reach it |
 | `link_ip` | The address a mesh link uses: the socket peer address inbound, the dialed address outbound |
-| `addrs` | Every address the node answers on, most preferred first, since only the node can rank its own links |
+| `addrs` | Every address the node listens on, most preferred first, since only the node can rank its own links |
 | `addr_tags` | Each address to its operator tags |
 | `addr_ifaces` | Each address to the interface it sits on. Addresses from `MENTAT_ANNOUNCE_ADDRS` are absent |
 
@@ -393,7 +393,7 @@ on one of its own subnets, then the source address of a datagram it
 received, which is proof of reach, then `link_ip`, the rest of `addrs` and
 `node_ip`. One watch per `node_id`. A node with two links broadcasts on
 both, the datagrams differing only in source address, and the unwatched one
-is kept as an alternate for when the watched one stops answering.
+is kept as an alternate for when the watched one stops replying.
 
 A service with an empty `host` resolves against its node's `addrs`. The
 agent joins its node by matching its `node_ip` against `node_ip`, `link_ip`
@@ -402,7 +402,7 @@ on `MENTAT_NODE_IP`. Every candidate passes the consumer's
 `ALLOWED_SOURCES`. A service with a `host` is used as written, because the
 operator named it. Candidates on the consumer's own subnets sort first,
 keeping the node's order within each half. The consumer probes in order,
-keeps whichever answers, falls through when it stops, and periodically re-
+keeps whichever replies, falls through when it stops, and periodically re-
 tries the higher-ranked ones.
 
 ## Placement
@@ -569,7 +569,7 @@ Router, port 6381:
 
 | Path | Returns |
 | --- | --- |
-| `GET /v1`, `/v1/models` | The routable models; the router answers this itself |
+| `GET /v1`, `/v1/models` | The routable models; the router serves this itself |
 | `POST /v1/*` | Routed by request `model`, streamed through |
 | any other POST | Routed by request `model`, for root-level endpoints such as `/tokenize` |
 | `/mcp` | Merged MCP in a flat namespace. `__group` picks the group |

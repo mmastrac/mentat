@@ -61,8 +61,8 @@ def get_node_ip_address():
             "cannot learn its own address. Set MENTAT_NODE_IP. Answering "
             "127.0.0.1 here would have every other rank dial itself."
         ) from None
-    # A daemon on loopback answers loopback, which is this node's address
-    # only to itself. Outside an actor that is a driver asking about a
+    # A daemon on loopback replies loopback, which is this node's address
+    # only to itself. Outside an actor that is a driver reading a
     # single box and is fine. Inside one it is a rank's cluster identity,
     # the address its peers dial, and no peer can reach it there.
     if found.startswith("127.") and _client.in_actor():

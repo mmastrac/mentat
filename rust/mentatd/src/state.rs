@@ -163,7 +163,7 @@ pub struct PgInfo {
     /// on one node, and on a cluster with no derived islands.
     pub island: Option<crate::island::Island>,
     /// Why the last placement attempt did not fit, kept so the pending
-    /// timeout can name the constraint rather than guess at it.
+    /// timeout can state the constraint rather than guess at it.
     pub pending_reason: Option<String>,
     /// When the group became Removed, which is what `sweep_history` ages.
     pub removed_ms: Option<u64>,
@@ -256,7 +256,7 @@ impl Patch {
 
 /// One probed (local address -> peer address) pair.
 ///
-/// Reachability is a property of the pair. The same peer address answers
+/// Reachability is a property of the pair. The same peer address replies
 /// from one of this node's links and refuses from another, which is why the
 /// prober binds a local address before connecting and why this table is two
 /// levels deep.
@@ -265,7 +265,7 @@ pub struct PairProbe {
     pub ok: bool,
     /// Round trip of the last successful probe: connect, frame, reply.
     pub rtt_ms: u64,
-    /// When the pair last answered. 0 means it never has.
+    /// When the pair last replied. 0 means it never has.
     pub last_ok_ms: u64,
     /// Why the last attempt failed. Empty while ok.
     pub error: String,
@@ -284,9 +284,9 @@ pub struct PeerInfo {
     /// The address this link actually uses: the socket's peer address
     /// inbound, the address we dialed outbound. node_ip is what the peer
     /// calls itself, which on a multi-homed box is a subnet a third party
-    /// may not route to. This one carried a working connection.
+    /// may not route to. This one held a working connection.
     pub link_ip: String,
-    /// Every address the peer says it answers on, for a consumer that can
+    /// Every address the peer says it listens on, for a consumer that can
     /// reach none of node_ip or link_ip.
     pub addrs: Vec<String>,
     /// Operator tags per address. Read here for one purpose: an `rdma` tag
@@ -511,7 +511,7 @@ pub fn node_id_for(ip: &str) -> NodeId {
 
 /// The IP a node id was built from, or None if it was not built by
 /// node_id_for. The inverse exists because the id is the only handle some
-/// views carry, and a truncated one identifies nothing: every mentat node id
+/// views hold, and a truncated one identifies nothing: every mentat node id
 /// starts with the hex of "mentat:".
 pub fn node_ip_of(node_id: &str) -> Option<String> {
     let bytes: Vec<u8> = node_id

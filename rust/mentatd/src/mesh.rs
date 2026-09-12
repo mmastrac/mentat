@@ -71,8 +71,8 @@ fn discoverer(shared: SharedRef, control_port: u16, http_port: u16) {
                     if !q["alive"].as_bool().unwrap_or(false) {
                         continue;
                     }
-                    // A peer publishes the port it answers on and the
-                    // addresses it answers at. Its own `node_ip` is the one
+                    // A peer publishes the port it listens on and the
+                    // addresses it listens at. Its own `node_ip` is the one
                     // it is filed under, so that is the address to dial.
                     if let (Some(ip), Some(port)) =
                         (q["node_ip"].as_str(), q["control_port"].as_u64())
@@ -356,7 +356,7 @@ pub fn accept_peer(
         )
     };
     if !crate::proto::major_matches(&proto) {
-        // A peer of another major takes no part in election, so the link is
+        // A peer of another major does not take part in election, so the link is
         // refused rather than kept as a half-understood member.
         let _ = writer.send(
             Msg::Err {
@@ -426,7 +426,7 @@ struct PeerIdent {
 ///
 /// A node id is the hash of an address, so a box that comes back calling
 /// itself something else joins as a second peer while the first is left
-/// behind. What ties the two together is the address list, which both carry
+/// behind. What ties the two together is the address list, which both hold
 /// in full and which is the same list.
 ///
 /// Loopback is on every box, so an overlap there identifies nothing and is
@@ -558,8 +558,8 @@ fn peer_loop(
             Msg::PeerStatus { snapshot: data } => {
                 let mut st = shared.st.lock().unwrap();
                 if let Some(p) = st.peers.get_mut(&peer_id) {
-                    // The push carries the peer's current addresses. The
-                    // hello carried the ones it had when the link came up.
+                    // The push holds the peer's current addresses. The
+                    // hello held the ones it had when the link came up.
                     let addrs = str_list(&data["addrs"]);
                     if !addrs.is_empty() && addrs != p.addrs {
                         log(
@@ -828,7 +828,7 @@ fn status_pusher(shared: SharedRef) {
 /// one TCP connection per pair, every MENTAT_PROBE_INTERVAL_MS.
 ///
 /// Same-subnet numbering across two fabrics means address arithmetic cannot
-/// answer this. Two boxes cabled together and two that merely share a subnet
+/// settle this. Two boxes cabled together and two that merely share a subnet
 /// look identical from the routing table, so the only honest answer comes
 /// from opening the connection.
 ///
@@ -850,7 +850,7 @@ fn prober(shared: SharedRef) {
         std::thread::sleep(interval);
         let my_id = shared.st.lock().unwrap().node_id.clone();
         let locals = crate::announce::local_addrs();
-        // Peers worth probing: alive, probe-answering, and with a control
+        // Peers worth probing: alive, probe-replying, and with a control
         // port to aim at. Collected before any connecting so the state lock
         // is never held across a network wait.
         let targets: Vec<(String, u16, Vec<String>)> = {
@@ -997,8 +997,8 @@ fn probe_pair(
     match read_frame(&mut reader)? {
         Some((frame, _)) => match frame.msg {
             // The reply's identity is checked. Both fabrics are numbered
-            // out of the same subnet, so an address that answers is not by
-            // itself evidence that the intended node answered.
+            // out of the same subnet, so an address that replies is not by
+            // itself evidence that the intended node replied.
             Msg::ProbeOk { node_id, .. } if node_id == peer_id => Ok(started.elapsed()),
             Msg::ProbeOk { node_id, .. } => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1124,7 +1124,7 @@ mod tests {
 
     /// The reported tombstone: one box registered as 192.168.1.93, came back
     /// identifying as 10.103.0.93, and the first entry stayed dead in every
-    /// peer's table for as long as the process lived. Both entries carry the
+    /// peer's table for as long as the process lived. Both entries hold the
     /// same address list, which is what says they are one box.
     #[test]
     fn a_renumbered_node_matches_its_own_old_entry() {

@@ -24,7 +24,7 @@ use mentat_common::logfmt::log;
 /// leading underscores keep it clear of the tools' own parameter names.
 const GROUP_ARG: &str = "__group";
 
-/// The one tool this server answers itself. A group tool of the same name
+/// The one tool this server serves itself. A group tool of the same name
 /// would be unreachable, so the merge drops it and logs.
 const NATIVE: &str = "serve_status";
 
@@ -52,7 +52,7 @@ pub async fn handle(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<Bo
         }
     };
 
-    // A client may batch requests in a list. Notifications get no entry.
+    // A client may batch requests in a list. Only a request gets an entry.
     if let Value::Array(reqs) = payload {
         let mut out = Vec::new();
         for r in reqs {
@@ -177,7 +177,7 @@ async fn tool_list(shared: &Arc<Shared>) -> Vec<Value> {
 
 /// The tool's own schema plus `__group`. The argument is required when more
 /// than one group offers the tool, since picking one for the caller would
-/// run a management action somewhere it did not ask for. With a single
+/// run a management action somewhere it did not request. With a single
 /// group there is nothing to choose and the argument may be left out.
 fn with_group_arg(m: &Merged) -> Value {
     let mut schema = m.schema.clone();

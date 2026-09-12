@@ -168,7 +168,7 @@ class Connection:
         not: repeating those is worse than reporting the failure once.
         """
         with self._lock:
-            # A connection dropped by an earlier failure carries nothing, so
+            # A connection dropped by an earlier failure holds nothing, so
             # dialing here costs the caller one round trip and no risk.
             if self.sock is None:
                 self._dial()

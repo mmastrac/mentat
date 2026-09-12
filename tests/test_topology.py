@@ -388,7 +388,7 @@ def t07_a_dead_daemon_is_forgotten_and_returns():
     for d in others:
         wait_for(lambda: n122_id not in d.status_json()["peers"], 15,
                  "the dead row to age out")
-    # No seed names the box. It rejoins through discovery.
+    # No seed lists the box. It rejoins through discovery.
     daemons["n122"] = Daemon(
         BOXES["n122"][0], peers=[f"{BOXES['n70'][0]}:{ports['n70']}"],
         port=ports["n122"], env=env,

@@ -10,7 +10,7 @@ from ray._refs import ObjectRef
 
 # .options() keys mentat understands. Anything else is accepted and ignored
 # (with a note when MENTAT_DEBUG is set) -- ray has dozens of scheduling knobs
-# that have no meaning without a Ray scheduler.
+# that only a Ray scheduler acts on.
 _KNOWN_OPTIONS = {
     "name",
     "num_cpus",

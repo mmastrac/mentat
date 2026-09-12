@@ -25,7 +25,7 @@ sys.path.insert(0, HERE)
 import mentat_testlib as tl  # noqa: E402
 from mentat_testlib import Daemon, fresh_shim, free_port, run_ok  # noqa: E402
 
-# An address no interface on this box carries, so every pair naming it must
+# An address no interface on this box holds, so every pair naming it must
 # read as failed. 10.255.255.1 is not routable from loopback and cannot be
 # bound either, so both directions fail fast.
 BOGUS = "10.255.255.1"
@@ -39,8 +39,8 @@ MESH_ENV = {
     "MENTAT_PEER_DEAD_AFTER_MS": "3000",
     "MENTAT_PROBE_INTERVAL_MS": "500",
     "MENTAT_PROBE_TIMEOUT_MS": "500",
-    # Every daemon advertises the loopback address it actually answers on
-    # plus one address nothing on this box carries. One box has no second
+    # Every daemon advertises the loopback address it actually listens on
+    # plus one address nothing on this box holds. One box lacks a second
     # fabric to cable, so the unreachable half of the matrix is stated
     # rather than wired.
     "MENTAT_ANNOUNCE_ADDRS": f"127.0.0.1=lan,{BOGUS}=connectx+rdma",
@@ -123,13 +123,13 @@ def t02b_probes_cover_each_address_pair():
     p = wait_for(pairs, 20, "d1 to probe every address pair to d2")
     assert p["127.0.0.1"]["127.0.0.1"]["ok"], p
     assert p["127.0.0.1"]["127.0.0.1"]["last_ok_ms"] > 0, p
-    # Three of the four pairs name an address this box does not carry.
+    # Three of the four pairs use an address this box does not hold.
     assert not p["127.0.0.1"][BOGUS]["ok"], p
     assert not p[BOGUS]["127.0.0.1"]["ok"], p
     assert not p[BOGUS][BOGUS]["ok"], p
     assert p["127.0.0.1"][BOGUS]["error"], "a failed pair must say why"
-    # The tags ride along, so a consumer can ask which pairs were meant to
-    # be a fabric before asking which ones work.
+    # The tags ride along, so a consumer can read which pairs were meant to
+    # be a fabric before testing which ones work.
     tags = d1.status_json()["peers"][d2_id]["addr_tags"]
     assert tags[BOGUS] == ["connectx", "rdma"], tags
 

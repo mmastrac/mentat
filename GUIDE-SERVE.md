@@ -39,10 +39,10 @@ held open, so a cluster event re-reads at once. A burst of events coalesces
 into one re-read.
 
 A daemon is watched on one address however many it is known by. The first
-answer names the node, a second address that answers as the same node is
+reply identifies the node, a second address that replies as the same node is
 kept as an alternate rather than polled, and when the polled address stops
-answering the watch moves to an alternate that does. A watch no seed named,
-that has answered nothing for `MODEL_TTL_S` and that live daemons stop
+replying the watch moves to an alternate that does. A watch no seed named,
+that has replied nothing for `MODEL_TTL_S` and that live daemons stop
 listing as a peer, is forgotten. `/status.json` lists each watch with its
 `node_id` and `alternates`.
 
@@ -58,22 +58,22 @@ about a group, the one reporting more running actors wins.
 ### Admission
 
 A group is routable on `/v1` when a live agent announces an OpenAI endpoint
-and that endpoint answers a `/models` probe. The probe is also where model
+and that endpoint replies to a `/models` probe. The probe is also where model
 names come from: whatever the engine lists under `/v1/models` is the name
 that routes to it. Nothing announces model names.
 
 A group with actor rows must also have a running one. An engine that runs
-inside actors mentat spawned has its ranks' state to answer for it: an
-endpoint still answering after every rank is gone returns `/models` from a
+inside actors mentat spawned has its ranks' state to report for it: an
+endpoint still replying after every rank is gone returns `/models` from a
 process whose ranks are gone. A group with no rows had nothing placed,
-whether it ran `ray start` without asking for a placement or registered
+whether it ran `ray start` without requesting a placement or registered
 through `python -m ray.register`, so the probe is the whole test.
 
-An engine is admitted as soon as its API answers, which on some models is
+An engine is admitted as soon as its API replies, which on some models is
 during its self-test.
 
 `/status.json` says why a model is missing. Each group has `healthy` and,
-when false, `why_not` naming the failed gate: `no announced OpenAI
+when false, `why_not` giving the failed gate: `no announced OpenAI
 endpoint`, `no running actors`, `not probed yet`, `endpoint probe failed`,
 or `endpoint probe stale`. A probe failure quotes every candidate address it
 tried and appends the agent's own bind finding when there is one.
@@ -89,7 +89,7 @@ leaves `/v1/models`, `/status.json`, the status page and the routes, and
 `group_retired` is logged once with the last reason it could not serve.
 
 Retirement is not a decision, only a listing. The group is still probed
-every round, and one answering probe brings it back before the next request.
+every round, and one successful probe brings it back before the next request.
 
 ### Candidate addresses
 
@@ -100,8 +100,8 @@ from `MENTAT_ANNOUNCE_IFACES` orders them. Every candidate is checked
 against `ALLOWED_SOURCES`. A URL-form announcement is its own single
 candidate. The router uses it as written and skips the allowlist check.
 
-The prober walks the list and keeps the first address that answers. Live
-traffic stays on it until it stops answering, then the router falls through
+The prober walks the list and keeps the first address that replies. Live
+traffic stays on it until it stops replying, then the router falls through
 to the next candidate. Every `PROBE_PROMOTE_S` the router re-tries the
 addresses ranked above the one in use, so a repaired link is taken back
 without operator action. `/status.json` shows `openai` (in use) beside
@@ -143,7 +143,7 @@ a name nothing serves returns 404. Once the upstream has taken a request it
 is never sent again. Bodies over 128 MiB are refused. One upstream request
 may run for `SERVING_TIMEOUT_S`.
 
-A streaming request whose upstream has not answered within `SSE_KEEPALIVE_S`
+A streaming request whose upstream has not replied within `SSE_KEEPALIVE_S`
 gets its headers and an SSE comment line, `: keepalive`, every interval
 until the first token, so a slow prefill does not look like an idle
 connection to the client or anything between. The status is 200 from the
@@ -165,7 +165,7 @@ ray start --address=$RAY_ADDRESS
 All three are optional. An agent without them registers as before.
 
 `MENTAT_OPENAI_API` belongs on the rank running the API server, since only
-that rank answers inference. Nothing enforces this. The agent announces
+that rank serves inference. Nothing enforces this. The agent announces
 whatever is set, and the router takes the lexically first if several ranks
 announce. `MENTAT_MCP_API` belongs on every rank, because every rank runs a
 status server. `MENTAT_MODEL_PROVIDER` specifies the engine behind
@@ -211,7 +211,7 @@ list covers addresses the router derived for itself.
 | `GET /`, `/healthz`, `/status.json` | Route table, per-group health and endpoints, `uptime_s`, `verify` |
 | `GET /stats.json` | Per-model engine and router counters, for the status page |
 
-`GET /` from a browser (an `Accept` header that asks for HTML) returns the
+`GET /` from a browser (an `Accept` header that requests HTML) returns the
 status page instead of the document.
 
 ```bash
@@ -245,7 +245,7 @@ of the numbers.
 
 ### Counting tokens
 
-`POST /v1/responses/input_tokens` answers how many prompt tokens an input
+`POST /v1/responses/input_tokens` reports how many prompt tokens an input
 would cost, in OpenAI's shape:
 
 ```bash
@@ -283,7 +283,7 @@ argument naming where to run it. Groups are ordered as in `/status.json`, so
 which one is first stays put. The argument is required when several groups
 offer the tool and optional when one does. It is stripped before the call is
 forwarded, so the container sees its own plain arguments. `tools/list`
-answers are cached per group for `TOOLS_TTL_S`.
+replies are cached per group for `TOOLS_TTL_S`.
 
 The merge skips the admission gate. A status server matters most while its
 engine is loading or wedged, which is when the gate would exclude it.
@@ -371,7 +371,7 @@ handling".
 - `SSE_KEEPALIVE_S` (default 10)
 
 Interval between `: keepalive` comment lines on a streaming response while
-the upstream has not yet answered. `0` turns them off, and the upstream's
+the upstream has not yet replied. `0` turns them off, and the upstream's
 status then passes through unchanged.
 
 - `SERVING_TIMEOUT_S` (default 1800)
@@ -393,7 +393,7 @@ How long a group's `tools/list` answer is cached.
 - `MODEL_TTL_S` (default 3600)
 
 How long a group stays listed while nothing it announces can serve, and how
-long a daemon no seed named is watched while it answers nothing. See
+long a daemon no seed named is watched while it replies to nothing. See
 "Retirement" and "Discovery". The default sits out a reboot, a weight reload
 or a fabric outage without a model disappearing mid-repair.
 
@@ -420,10 +420,10 @@ signature is checked, without a log line.
   address of every announced endpoint. With the port form that is any link
   it shares with the model's node. With the URL form it is the one address
   the announcement specifies.
-- Admission tracks the probe. A model that answers `/models` while still
+- Admission tracks the probe. A model that replies `/models` while still
   warming up is routable.
 - Health is per group. A group with one wedged rank reads healthy while its
-  API answers.
+  API replies.
 - The control port does not authenticate. Signing covers announcements only,
   and every claim in one is re-read over TCP before it affects routing.
 

@@ -71,7 +71,7 @@ enum Cmd {
         node_ip_address: Option<String>,
         #[arg(long)]
         port: Option<u16>,
-        /// Accepted and ignored: mentat has no object store, on purpose.
+        /// Accepted and ignored: mentat omits the object store, on purpose.
         #[arg(long)]
         object_store_memory: Option<u64>,
     },
@@ -237,8 +237,8 @@ fn main() {
                 );
             }
             let group = group_from_env();
-            // `--head` is a ray flag mentat has no use for, and it carries no
-            // address. An entrypoint that runs the head role with it and the
+            // `--head` is a ray flag mentat does not use, and it gives no
+            // daemon. An entrypoint that runs the head role with it and the
             // worker roles with --address sends the two to different daemons.
             // Neither daemon then counts the whole group: the gate sees one
             // node's GPUs, and the head solves a claim against nodes the

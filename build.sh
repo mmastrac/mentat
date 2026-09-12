@@ -4,7 +4,7 @@ set -euo pipefail
 # artifacts image drops into a model image of any base.
 #
 #   VERSION=0.8.0 ./build.sh
-#   DOCKER=docker ./build.sh          # if your daemon needs no sudo
+#   DOCKER=docker ./build.sh          # if your daemon runs without sudo
 #   REGISTRY=ghcr.io/mmastrac ./build.sh   # also tag for a registry
 #
 # Model images COPY --from mentat-artifacts:<ver>. Run this before those
@@ -19,7 +19,7 @@ $DOCKER build --target runtime   -t "mentatd:${VERSION}" .
 $DOCKER build --target serve     -t "mentatd-serve:${VERSION}" .
 $DOCKER build --target all       -t "mentat:${VERSION}" .
 
-# What everything downstream depends on: the artifacts image carries both
+# What everything downstream depends on: the artifacts image holds both
 # binaries, the machine probe and exactly one shim wheel, and the binaries
 # are static.
 $DOCKER run --rm "mentat-artifacts:${VERSION}" sh -c '

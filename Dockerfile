@@ -29,7 +29,7 @@ ARG RUST_IMAGE=rust:1-alpine
 ARG RUNTIME_IMAGE=alpine:3
 
 FROM ${RUST_IMAGE} AS build
-# musl-dev carries the libc the linker needs.
+# musl-dev holds the libc the linker needs.
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY rust/ /src/

@@ -3,7 +3,7 @@
 //!
 //! Two boxes are on one fabric when the operator tagged an address on each
 //! `rdma` AND a probe between those two addresses succeeded. Each half does
-//! its own work. The tag picks out the links meant to carry NCCL, which
+//! its own work. The tag picks out the links meant to hold NCCL, which
 //! matters because the LAN reaches every box and a bare probe would call
 //! that a fabric. The probe confirms the cabling, which matters because the
 //! cluster numbers both of its fabrics out of the same subnet, so a cabled
@@ -29,8 +29,8 @@ use mentat_common::logfmt::log;
 pub struct Island {
     /// Members, sorted, so two islands compare by value.
     pub nodes: Vec<NodeId>,
-    /// The address each member answers on inside this island. Every member
-    /// has one, and every pair of them answered a probe. This is what a rank
+    /// The address each member listens on inside this island. Every member
+    /// has one, and every pair of them replied to a probe. This is what a rank
     /// binds NCCL to.
     pub addr: BTreeMap<NodeId, String>,
 }
@@ -39,7 +39,7 @@ pub struct Island {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Fabrics {
     pub islands: Vec<Island>,
-    /// Nodes carrying at least one `rdma`-tagged address, whether or not a
+    /// Nodes holding at least one `rdma`-tagged address, whether or not a
     /// probe confirmed it. A group none of whose nodes appear here has not
     /// opted in and is placed without the fabric constraint, so tagging one
     /// pair cannot strand a deployment on the other.
@@ -51,7 +51,7 @@ pub struct Fabrics {
 pub struct FabricView {
     /// Node -> its RDMA-tagged addresses, in the node's own rank order.
     pub rdma: BTreeMap<NodeId, Vec<String>>,
-    /// Address pairs that answered a probe. Direction is not kept: a
+    /// Address pairs that replied to a probe. Direction is not kept: a
     /// one-way link is not a thing this fabric can have, and both daemons
     /// probe anyway.
     pub ok_pairs: BTreeSet<(String, String)>,
@@ -63,7 +63,7 @@ impl FabricView {
             || self.ok_pairs.contains(&(b.to_string(), a.to_string()))
     }
 
-    /// Every address that could carry fabric traffic, as (node, address),
+    /// Every address that could hold fabric traffic, as (node, address),
     /// sorted so every daemon walks them in the same order.
     fn ports(&self) -> Vec<(&NodeId, &String)> {
         let mut out: Vec<(&NodeId, &String)> = self
@@ -75,7 +75,7 @@ impl FabricView {
         out
     }
 
-    /// Whether two ports may carry traffic between their nodes. Two ports of
+    /// Whether two ports may hold traffic between their nodes. Two ports of
     /// one node never do: NCCL between ranks crosses boxes, and the prober
     /// never probes a node against itself.
     fn joins(&self, x: (&NodeId, &String), y: (&NodeId, &String)) -> bool {
@@ -209,7 +209,7 @@ fn gather(shared: &SharedRef) -> FabricView {
 }
 
 /// Record a node's RDMA-tagged addresses. An untagged node is left out: the
-/// tag is what says a link is meant to carry NCCL.
+/// tag is what says a link is meant to hold NCCL.
 fn note(v: &mut FabricView, node: &str, addrs: Vec<String>, tags: BTreeMap<String, Vec<String>>) {
     let tagged: Vec<String> = addrs
         .into_iter()
@@ -226,7 +226,7 @@ fn note(v: &mut FabricView, node: &str, addrs: Vec<String>, tags: BTreeMap<Strin
 
 /// Fold one peer's published peer table into the view.
 ///
-/// A node's id is the key it is filed under. The entry itself carries no id,
+/// A node's id is the key it is filed under. The entry itself omits the id,
 /// so reading one out of the object skipped every entry, and this daemon
 /// derived only the fabric it sits on: the third source contributed nothing
 /// and a four-node cluster saw two halves.
@@ -375,7 +375,7 @@ mod tests {
     /// is filed under, and reading one out of the object instead skipped
     /// every published peer, so this source contributed nothing.
     ///
-    /// Shaped like a real /status peers map, which carries no id field.
+    /// Shaped like a real /status peers map, which omits the id field.
     #[test]
     fn a_published_peer_table_is_read_by_its_keys() {
         let peers = json!({
@@ -436,7 +436,7 @@ mod tests {
         assert!(islands(&v).is_empty());
     }
 
-    /// One of a cabled pair going down leaves no pair.
+    /// One of a cabled pair going down breaks the pair.
     #[test]
     fn half_a_dead_pair_leaves_no_island() {
         let peers = json!({
@@ -497,7 +497,7 @@ mod tests {
     }
 
     /// An untagged link that probes fine is the LAN. Serving rides it;
-    /// NCCL does not, so it makes no island.
+    /// NCCL does not, so it does not form an island.
     #[test]
     fn an_untagged_link_makes_no_island() {
         let v = view(&[], &[("192.168.1.11", "192.168.1.12")]);
@@ -533,7 +533,7 @@ mod tests {
     /// reaches a different peer. Every node pair looks linked, so nothing
     /// prunes, but no single address of n1 reaches both -- and a rank binds
     /// one address. n1 is left out rather than handed an address that only
-    /// half its island answers on.
+    /// half its island listens on.
     #[test]
     fn a_node_whose_ports_split_across_links_is_left_out() {
         let v = view(
@@ -553,8 +553,8 @@ mod tests {
         assert_eq!(got[0].nodes, vec!["n2", "n3"], "{got:?}");
     }
 
-    /// Every member of an island carries an address, and every pair of those
-    /// addresses answered a probe. Placement hands each rank its entry, so a
+    /// Every member of an island holds an address, and every pair of those
+    /// addresses replied to a probe. Placement hands each rank its entry, so a
     /// gap there is a rank with nothing to bind.
     #[test]
     fn every_member_has_an_address_that_reaches_every_other() {
@@ -590,7 +590,7 @@ mod tests {
         assert_eq!(f.tagged.len(), 2);
     }
 
-    /// A node with two fabric ports picks the one that carried a probe, in
+    /// A node with two fabric ports picks the one that held a probe, in
     /// its own rank order, so every daemon derives the same address.
     #[test]
     fn the_island_address_is_the_one_that_answered() {

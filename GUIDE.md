@@ -119,7 +119,7 @@ arrived.
 
 ### daemon
 
-Run the cluster daemon. The control port must answer on loopback for agents
+Run the cluster daemon. The control port must listen on loopback for agents
 in host-network containers and on the cluster subnet for remote agents and
 peers, so a containerised daemon needs `network_mode: host`.
 
@@ -151,7 +151,7 @@ skipped.
 Register this container's GPUs with a daemon and run the agent. By default
 the agent detaches and runs beside the entrypoint with inherited stdio, so
 actor output lands in the container log. `/tmp/mentat/agent.json` records
-its pid and group. Registration retries until a daemon answers.
+its pid and group. Registration retries until a daemon replies.
 
 The agent reads `MENTAT_GROUP`, `MENTAT_NODE_IP`, `MENTAT_OPENAI_API`,
 `MENTAT_MCP_API` and `MENTAT_MODEL_PROVIDER` once at start. Export them
@@ -202,7 +202,7 @@ island's members by fabric address.
 Kill actors. Runs immediately, whatever degrade window an agent is inside.
 The driver sees the dead refs and restarts.
 
-Name a scope. Running it with neither flag, or both, prints the groups the
+Give a scope. Running it with neither flag, or both, prints the groups the
 daemon knows and exits non-zero.
 
 - `--address ADDR`
@@ -252,7 +252,7 @@ which keeps a placement from arriving somewhere with nothing to host it.
 What it announces is an endpoint and nothing else. A box whose GPUs should
 be placeable runs `mentatd start` instead, and that works for a single-rank
 engine too: mentatd-serve applies its actor gate only to groups that have
-actor rows, so a group that never asked for a placement is admitted on its
+actor rows, so a group that never requested a placement is admitted on its
 endpoint probe alone either way. This module is for an image with no `ray`
 shim at all.
 
@@ -330,7 +330,7 @@ group, so a `GPU >= TP` gate keeps working.
 `MENTAT_NODE_IP` is per rank and per container, and is best left unset: the
 daemon files each container under the box it connected from and hands every
 rank its node's address. A wrong value hangs at NCCL rendezvous, and one
-naming an address another node is known by is refused at register.
+giving an address another node is known by is refused at register.
 
 ### Workarounds to delete
 
@@ -439,24 +439,24 @@ A container reaching a daemon on another box is filed under whichever box in
 the mesh owns the address it connected from, so it does not need setting
 either, whatever link it came in on. Only a container on a box no daemon
 runs on is a node of its own, named by its source address. `MENTAT_NODE_IP`
-on a container overrides all of this and is refused when it names an address
+on a container overrides all of this and is refused when it gives an address
 of a box the mesh knows under another name.
 
 Each actor is spawned with `MENTAT_NODE_IP` set to its node's identity, so
-the shim's `get_node_ip_address()` answers the same on every rank with no
+the shim's `get_node_ip_address()` returns the same on every rank with no
 setting in the container. A fabric address, when placement chose one, sits
 above it.
 
 ### Claims
 
-A claim reserves a set of nodes under a name and answers every holder of
+A claim reserves a set of nodes under a name and returns to every holder of
 that name with the same view, so ranks starting independently agree with no
 coordinator between them. A claim ends when its last holder disconnects.
 
 The shim reads `MENTAT_CLAIM` and `MENTAT_CLAIM_SHAPE` at
 `ray.util.placement_group`, since Ray's API cannot express a shape. With
 `MENTAT_CLAIM` set, the shim claims the name first and then places inside
-the claim. A group asking for more than its claim holds stays PENDING.
+the claim. A group requesting more than its claim holds stays PENDING.
 [PROTOCOL.md](PROTOCOL.md) defines the shape.
 
 ## Environment
@@ -482,7 +482,7 @@ daemon, since every such daemon would share one node id.
 Comma-separated control addresses of other daemons. One that reaches any
 live daemon is enough: the rest of the mesh is learned from it. Seed by the
 address a node identifies itself by, its `MENTAT_NODE_IP`. A fabric address
-is renumbered when cables move and the seed then names a box that is not
+is renumbered when cables move and the seed then points at a box that is not
 there, which `peer_connect_retry` reports once a minute for as long as it
 lasts. A seed is dialed for the life of the process. A daemon learned from a
 peer stops being dialed once it has been down for `MENTAT_HISTORY_KEEP_MS`
@@ -587,7 +587,7 @@ read: a dead actor or removed placement group whose owner is gone, an agent
 whose link has been down past `MENTAT_AGENT_DEAD_AFTER_MS`, a mesh peer that
 has been dead. The age is counted from the event rather than from the owner
 leaving, so a daemon restart, which rebuilds the table before any driver
-reconnects, does not erase reasons the drivers have yet to ask for.
+reconnects, does not erase reasons the drivers have yet to request.
 
 - `MENTAT_PEER_STALE_AFTER_MS` (default 30000)
 
@@ -682,7 +682,7 @@ The shape to claim, as JSON. Invalid JSON raises at
 
 - `MENTAT_GPUS` (default: what `nvidia-smi` reports)
 
-Yields this many placeholder devices instead of asking the hardware, for
+Yields this many placeholder devices instead of reading the hardware, for
 tests on nodes without GPUs. Read by `mentatd-probe-machine`.
 
 - `MENTAT_MACHINE` (default: unset)

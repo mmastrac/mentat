@@ -308,7 +308,7 @@ fn sweep_history(st: &mut State) {
         .map(|p| p.id.clone())
         .collect();
     // An agent goes only after every actor it hosted, since a dead actor's
-    // row names its agent.
+    // row gives its agent.
     let gone_agents: Vec<String> = st
         .agents
         .values()
@@ -458,7 +458,7 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
         },
         Msg::PeerHello { .. } => crate::mesh::accept_peer(shared, reader, writer, peer_ip, first),
         // A probe gets its own connection, since the question is whether
-        // this address pair carries traffic. The node id in the answer says
+        // this address pair holds traffic. The node id in the answer says
         // the address belongs to the node the prober meant. The prober owns
         // the result.
         Msg::Probe { .. } => {
@@ -509,7 +509,7 @@ fn head_for(shared: &SharedRef) -> Head {
             if st.head_node_id == st.node_id {
                 return Head::Here;
             }
-            // The link's own address carried a connection, which the
+            // The link's own address held a connection, which the
             // control address on a multi-homed peer may not have.
             return match st.peers.get(&st.head_node_id).filter(|p| p.alive) {
                 Some(p) => {
@@ -1080,7 +1080,7 @@ fn handle_client_msg(
         Msg::ActorStop { group, all } => {
             if group.is_empty() == !all {
                 // Neither leaves the scope unsaid and both contradict. The
-                // wide form has to be asked for: this binary also answers to
+                // wide form has to be requested: this binary is also installed as
                 // `ray`, where an inherited `ray stop` in an entrypoint would
                 // otherwise reach every group on the cluster.
                 let st = shared.st.lock().unwrap();
@@ -1128,18 +1128,18 @@ fn claimed_nodes(view: &Value) -> Vec<String> {
     out
 }
 
-/// Answer a claim on `name`, solving it the first time and repeating that
-/// answer afterwards.
+/// Solve a claim on `name` the first time, and repeat that view to every
+/// later holder.
 ///
 /// The name is the reservation. A second holder of one name is not a second
 /// placement, so ranks that claim the same name agree on their nodes without
-/// a coordinator. A holder that asks for a different shape under a name
+/// a coordinator. A holder that requests a different shape under a name
 /// already taken is refused: re-solving would move nodes under whoever
 /// claimed first.
 ///
-/// Only the head answers. Two daemons solving the same name against their
+/// Only the head replies. Two daemons solving the same name against their
 /// own views could each hand out a placement, and islands are deliberately
-/// soft-consistent between daemons. The error names the head so a caller can
+/// soft-consistent between daemons. The error gives the head so a caller can
 /// go there.
 fn claim(
     st: &mut State,
@@ -1226,7 +1226,7 @@ fn release(st: &mut State, client_id: &str, key: &(String, String)) {
 }
 
 /// Drop every claim this client held. This runs where its other resources
-/// are reaped, so a disconnect needs no explicit release.
+/// are reaped, so a disconnect does not need an explicit release.
 fn release_all(st: &mut State, client_id: &str) {
     let keys: Vec<(String, String)> = st.claims.keys().cloned().collect();
     for k in keys {
@@ -1368,7 +1368,7 @@ fn create_actor(
             "bundle {bundle_index} of placement group {pg_id} is not placed"
         ));
     };
-    // The address this rank answers on inside the fabric its group was
+    // The address this rank listens on inside the fabric its group was
     // placed on. Only set when the group spans a fabric. A group on one
     // node has nothing to cross.
     let fabric_ip = pg
@@ -1408,7 +1408,7 @@ fn create_actor(
             .join(","),
     );
     spawn_env.insert("MENTAT_GCS_ADDRESS".into(), st.control_addr.clone());
-    // The node's identity, so the container carries no MENTAT_NODE_IP of
+    // The node's identity, so the container does not set a MENTAT_NODE_IP of
     // its own. The shim reads MENTAT_FABRIC_IP first.
     if !agent_node_ip.is_empty() {
         spawn_env.insert("MENTAT_NODE_IP".into(), agent_node_ip);
@@ -1486,7 +1486,7 @@ enum Res {
 
 /// What a ref currently holds.
 ///
-/// Every id carries its type, so this reads the prefix rather than inferring
+/// Every id holds its type, so this reads the prefix rather than inferring
 /// from what the id is not. `p:` is a placement group, which resolves once
 /// it reaches CREATED; `a:<hex>:<n>` is a call ref.
 fn resolve_ref(st: &State, ref_id: &str) -> Res {
@@ -1782,7 +1782,7 @@ fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
 /// The constraint applies only where it means something. A cluster with no
 /// derived island places exactly as it did before fabrics existed, which is
 /// every untagged deployment and every single-box one. A group that fits on
-/// one node needs no fabric at all, and a node is therefore its own island
+/// one node does not need a fabric at all, and a node is therefore its own island
 /// of one.
 pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
     let pending: Vec<String> = st
@@ -1860,8 +1860,8 @@ pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
 ///
 /// Opting in is per group. The operator tags one pair first and boots it,
 /// which must leave a group on the untagged pair placing as before -- and a
-/// gate asking whether the cluster had any island would strand it instead.
-/// The gate asks whether this group's own nodes claim a fabric.
+/// gate testing whether the cluster had any island would strand it instead.
+/// The gate tests whether this group's own nodes claim a fabric.
 #[allow(clippy::type_complexity)]
 fn placement_scopes(
     st: &State,
@@ -1870,7 +1870,7 @@ fn placement_scopes(
     driver_node: &str,
     claim: &str,
 ) -> Result<Vec<(Option<crate::island::Island>, Option<Vec<String>>)>, String> {
-    // A claim already answered where this group goes, and it answered for
+    // A claim already settled where this group goes, and it settled for
     // every holder of that name. Re-deriving here could pick different
     // nodes and split ranks that agreed on the claim's view.
     if !claim.is_empty() {
@@ -1976,7 +1976,7 @@ fn placement_scopes(
     Ok(scopes
         .into_iter()
         .map(|(_, _, nodes, island)| {
-            // A one-node scope carries no fabric address to inject.
+            // A one-node scope does not hold a fabric address to inject.
             let island = (island.nodes.len() > 1).then_some(island);
             (island, Some(nodes))
         })
@@ -2151,7 +2151,7 @@ fn agent_conn(
     };
     // A container claiming an address that belongs to a box the mesh files
     // under another node is refused. Registering it would put its GPUs on a
-    // node no island reaches, so its group would take no fabric and its
+    // node no island reaches, so its group would cross no fabric and its
     // ranks would talk over whichever link the address named, which reads
     // as a slow model rather than as a misconfiguration.
     let misfiled = {
@@ -2237,8 +2237,8 @@ fn agent_conn(
                         );
                     }
                 }
-                // Not known here. A daemon that restarted knows no actor at
-                // all, and killing them would take down every model on the
+                // Not known here. A daemon that restarted has forgotten
+                // every actor, and killing them would take down every model on the
                 // cluster because its own bookkeeping was lost. The process
                 // is alive on the agent, which is the fact that matters, so
                 // it is adopted from what the agent reports.
@@ -2272,13 +2272,13 @@ fn agent_conn(
             st.actors.insert(a.id.clone(), a);
         }
 
-        // The calls those actors are still working on. The agent carries
+        // The calls those actors are still working on. The agent holds
         // them (pending_refs) or holds their results to re-send
-        // (unacked_refs), and a daemon with none of its own would answer a
+        // (unacked_refs), and a daemon with none of its own would reply to a
         // driver's get with "no such ref" or leave it waiting for a result
         // it has nowhere to put.
         //
-        // A ref id is "<actor>:<n>", so it names its own actor, and the
+        // A ref id is "<actor>:<n>", so it contains its own actor, and the
         // counter is moved past what was adopted: starting again from one
         // would hand a new call the id of a call still running.
         {
@@ -2297,7 +2297,7 @@ fn agent_conn(
                     Some((a, n)) => (Some(a.to_string()), n.parse::<u64>().ok()),
                     None => (None, None),
                 };
-                // Only for actors this agent is carrying: a ref naming
+                // Only for actors this agent is holding: a ref naming
                 // something else is not this agent's to revive.
                 let owner = match actor.as_deref().and_then(|a| st.actors.get(a)) {
                     Some(a) if a.agent == agent_id => a.owner.clone(),
@@ -2330,7 +2330,7 @@ fn agent_conn(
 
         // The resume list is authoritative for what survived on the agent's
         // side. An actor this daemon still thinks is live but the agent no
-        // longer carries (agent restarted, or the actor exited during the
+        // longer holds (agent restarted, or the actor exited during the
         // outage and the exit report was lost) is dead.
         {
             let resumed: std::collections::HashSet<&str> =
@@ -2355,7 +2355,7 @@ fn agent_conn(
             }
         }
 
-        // A pending ref the agent neither carries (pending_refs), has a
+        // A pending ref the agent neither holds (pending_refs), has a
         // buffered result for (unacked_refs), nor sits in this daemon's own
         // held-call queue was lost in flight during the outage: fail it so
         // the driver raises instead of hanging forever.
@@ -2477,7 +2477,7 @@ fn agent_conn(
                         }
                     }
                     // The group comes from the actor: a path needs it, and
-                    // the event used to carry only the id and pid.
+                    // the event used to hold only the id and pid.
                     let found = st
                         .actors
                         .get(&actor_id)
@@ -2562,7 +2562,7 @@ fn agent_conn(
     // declaring death. The lifecycle sweeper marks the agent degraded after
     // MENTAT_AGENT_DEGRADED_AFTER_MS and gives up (actors dead, run()
     // sentinels resolve, driver restarts) after MENTAT_AGENT_DEAD_AFTER_MS;
-    // an agent that re-registers inside the window carries on with nothing
+    // an agent that re-registers inside the window holds on with nothing
     // lost.
     let mut st = shared.st.lock().unwrap();
     // Only if this reader owned the current registration -- a re-register may
@@ -2638,7 +2638,7 @@ mod tests {
     }
 
     /// The reported shape: a box that has booted a model dozens of times
-    /// carries a row per boot, each from a driver long gone.
+    /// holds a row per boot, each from a driver long gone.
     #[test]
     fn a_dead_actor_goes_once_its_driver_has() {
         let mut st = state_with("driver-1", 0);
@@ -2682,7 +2682,7 @@ mod tests {
 
     /// The reported shape: a container told to call itself by the LAN
     /// address of the box it runs on. Its GPUs land on a node no island
-    /// contains, and the group then takes no fabric.
+    /// contains, and the group then stays off the fabric.
     #[test]
     fn a_lan_address_for_a_fabric_box_is_named() {
         let note = misfiled("192.168.1.77", "id-192.168.1.77", &boxes())

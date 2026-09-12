@@ -11,7 +11,7 @@
 //! `addrs` maps each pretend address to the real control address of the
 //! daemon that owns it, and a dial or probe goes there with no source bound.
 //! `cut` lists pairs with no cable between them, in either order. `down`
-//! lists addresses that answer nobody. `announce` maps a node ip to what
+//! lists addresses that reply to nobody. `announce` maps a node ip to what
 //! that daemon announces in place of MENTAT_ANNOUNCE_ADDRS.
 //!
 //! The file is re-read at every use, so the daemons follow each edit.
@@ -114,7 +114,7 @@ impl TestNet {
         }
     }
 
-    /// This node's announce override, if the file carries one.
+    /// This node's announce override, if the file holds one.
     pub fn announce(&self) -> Option<String> {
         NODE_IP.get().and_then(|ip| self.announce.get(ip).cloned())
     }

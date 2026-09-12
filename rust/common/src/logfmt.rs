@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static PROGRAM: OnceLock<&'static str> = OnceLock::new();
 
-/// Name every line with `program`, so a merged log says which binary spoke.
+/// Label every line with `program`, so a merged log says which binary spoke.
 /// The default is `mentat`. A second call changes nothing.
 pub fn set_program(program: &'static str) {
     let _ = PROGRAM.set(program);

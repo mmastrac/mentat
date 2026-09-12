@@ -96,7 +96,7 @@ class FakeModel:
                 elif path == "/tokenize":
                     # Root-level on purpose: vLLM serves /tokenize outside
                     # /v1, so a router that appends to the announced base
-                    # would ask for /v1/tokenize and miss.
+                    # would request /v1/tokenize and miss.
                     outer.requests.append(body)
                     self._json(200, {"count": 3, "tokens": [1, 2, 3]})
                 elif path == "/mcp":
@@ -339,7 +339,7 @@ def t01_announcement_reaches_status():
 def t02_no_actors_yet_admits_on_the_probe_and_merges_mcp():
     # No group has actors yet. Nothing was placed, so there is no rank
     # state to gate on and the probe alone admits both: a single-rank
-    # engine that never asked ray for anything is served the same way.
+    # engine that never called ray for anything is served the same way.
     def connected():
         try:
             _, view = serve_get("/status.json")
@@ -478,7 +478,7 @@ def t05c_an_upstream_failure_after_keepalives_is_an_error_event():
 
 
 def t06_mcp_merge_routes_by_group_argument():
-    # One group offers tool_a, so it needs no group argument.
+    # One group offers tool_a, so it does not need a group argument.
     r = mcp({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
              "params": {"name": "tool_a", "arguments": {"x": 1}}})
     text = r["result"]["content"][0]["text"]
@@ -493,7 +493,7 @@ def t06_mcp_merge_routes_by_group_argument():
     assert not r["result"].get("isError"), r
     assert f"model-b ran {SHARED_TOOL}" in text, text
     assert '"n": 2' in text and "__group" not in text, text
-    # Ambiguous without it, and the error names the choices.
+    # Ambiguous without it, and the error lists the choices.
     r = mcp({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
              "params": {"name": SHARED_TOOL, "arguments": {"n": 2}}})
     assert r["result"]["isError"], r
@@ -572,7 +572,7 @@ def t08b_port_announcement_resolves_and_falls_through():
     candidates is exercised in the router's own unit tests, which can stand
     up two servers on two addresses; one loopback box cannot."""
     d = Daemon("127.0.0.1", env={
-        # The node claims two addresses. Only the first answers on the
+        # The node claims two addresses. Only the first listens on the
         # announced port, so resolution has something to choose between.
         "MENTAT_ANNOUNCE_ADDRS": "127.0.0.1=lan,10.255.255.2=connectx+rdma",
     }).wait_up()
@@ -651,7 +651,7 @@ def t08b_port_announcement_resolves_and_falls_through():
         headers={"Content-Type": "application/json"}), timeout=10).read())
     assert any(t["name"] == "tool_p" for t in r["result"]["tools"]), r
 
-    # Kill the only address that answers: no candidate is left, so the group
+    # Kill the only address that replies: no candidate is left, so the group
     # closes and says which addresses it tried.
     mP.stop()
 
@@ -731,9 +731,9 @@ def free_udp_port():
 
 
 def t10_udp_announce_replaces_the_seed_list():
-    # A router with MENTAT_DAEMONS set EMPTY has no seeds at all; the only
+    # A router with MENTAT_DAEMONS set EMPTY starts without seeds. The only
     # way it can learn of the daemon is the daemon's own UDP announcement,
-    # sent here as a loopback unicast (broadcast has no meaning on lo).
+    # sent here as a loopback unicast (broadcast does not apply on lo).
     udp_port = free_udp_port()
     d = Daemon("127.0.0.1", env={
         "MENTAT_ANNOUNCE_PORT": str(udp_port),

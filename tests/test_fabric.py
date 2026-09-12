@@ -32,7 +32,7 @@ FABRIC_ENV = {
     "MENTAT_PROBE_INTERVAL_MS": "300",
     "MENTAT_PROBE_TIMEOUT_MS": "500",
     "MENTAT_ISLAND_HOLD_DOWN_MS": "500",
-    # The one address every daemon here answers on, declared a fabric. The
+    # The one address every daemon here listens on, declared a fabric. The
     # probes are what decide whether the declaration holds.
     "MENTAT_ANNOUNCE_ADDRS": "127.0.0.1=connectx+rdma",
 }
@@ -62,7 +62,7 @@ def t01_probes_confirm_the_tagged_fabric():
         return isl[0] if len(isl) == 1 and set(isl[0]["nodes"]) == ids else None
 
     i = wait_for(island, 25, "d1 to derive one island covering all three nodes")
-    # Every member carries the address its probes actually answered on. That
+    # Every member holds the address its probes actually replied on. That
     # is the address a rank binds NCCL to.
     assert set(i["addrs"].values()) == {"127.0.0.1"}, i
 
@@ -105,7 +105,7 @@ def t02_a_two_bundle_group_lands_inside_the_island():
     ]
     state["ray"] = ray
     state["actors"] = actors
-    # Each rank is told the address that carries the fabric it was placed
+    # Each rank is told the address that holds the fabric it was placed
     # on, so nothing has to be hand-matched per node and per container.
     for a in actors:
         env = ray.get(a.env_dump.remote())
@@ -158,7 +158,7 @@ time.sleep(3600)
         return None
 
     why = wait_for(pending_reason, 20, "the split group to report why it cannot place")
-    # The message has to name the constraint. "not enough GPUs" is what this
+    # The message has to state the constraint. "not enough GPUs" is what this
     # used to say, and it is wrong here: there are exactly enough.
     assert "one rdma fabric" in why, why
     assert "'split'" in why, why
@@ -170,7 +170,7 @@ def t03b_an_untagged_group_places_beside_a_tagged_one():
     from booting -- which is what a cluster-wide gate would do, since the
     tagged pair alone makes the cluster have an island."""
     d1 = state["d1"]
-    # Neither node carries an rdma tag: no daemon claims 127.0.0.8 or
+    # Neither node holds an rdma tag: no daemon claims 127.0.0.8 or
     # 127.0.0.9, so nothing put them on a fabric.
     for ip in ("127.0.0.8", "127.0.0.9"):
         d1.start_agent("untagged", gpus=1, container=f"u{ip[-1]}",

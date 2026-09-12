@@ -1,7 +1,7 @@
 //! `POST /v1/responses/input_tokens`: how many prompt tokens an input would
-//! cost, in OpenAI's shape, answered from the serving engine's own tokenizer.
+//! cost, in OpenAI's shape, replied from the serving engine's own tokenizer.
 //!
-//! The router owns this route rather than proxying it. vLLM has no such
+//! The router owns this route rather than proxying it. vLLM does not serve that
 //! endpoint, and a request for it lands on the `/v1/responses/{response_id}`
 //! pattern and comes back 405.
 //!
@@ -39,7 +39,7 @@ use crate::{
 /// Deliberately crude. The true cost depends on resolution, tiling and the
 /// model's own patch size, none of which the router can see without
 /// downloading the media and running the engine's preprocessor. A caller
-/// sizing a request against a context window needs an answer that is close
+/// sizing a request against a context window needs an settle that is close
 /// and cheap, and one image priced within a few thousand tokens moves a
 /// 262144-token budget by about 1%.
 const IMAGE_TOKENS: u64 = 4_000;
@@ -98,7 +98,7 @@ pub async fn count(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<Box
     // Counting means knowing how the engine turns an input into tokens. The
     // router can only claim that for an engine it recognises, and a number
     // produced for one it does not would be a guess a caller cannot tell
-    // from a measurement.
+    // from a probe.
     let provider = group_table(shared)
         .get(group)
         .map(|e| e.provider.clone())
@@ -200,7 +200,7 @@ fn split_input(payload: &Value) -> (Vec<Value>, u64) {
 /// API's way (`input_text`, `input_image`) or chat completions' way (`text`,
 /// `image_url`), and clients mix them, so both are read.
 ///
-/// A part of some other type contributes whatever `text` it carries and
+/// A part of some other type contributes whatever `text` it holds and
 /// nothing else, which undercounts an attachment this router cannot price.
 fn split_content(content: &Value) -> (String, u64) {
     match content {
@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(media, 0);
     }
 
-    /// The Responses API carries the system prompt beside the input, and the
+    /// The Responses API holds the system prompt beside the input, and the
     /// template charges for it, so it has to reach the engine as a message.
     #[test]
     fn instructions_lead_as_a_system_message() {
@@ -284,7 +284,7 @@ mod tests {
     }
 
     /// vLLM serves /tokenize at the root while the announced base ends in
-    /// /v1, so appending would ask for /v1/tokenize and get a 404.
+    /// /v1, so appending would request /v1/tokenize and get a 404.
     #[test]
     fn tokenize_climbs_out_of_v1() {
         assert_eq!(tokenize_root("http://h:8000/v1"), "http://h:8000");

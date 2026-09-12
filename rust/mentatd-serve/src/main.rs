@@ -3,7 +3,7 @@
 //! traffic, and this binary never touches cluster control.
 //!
 //! Two aggregations over what model containers announce at `ray start`
-//! (MENTAT_OPENAI_API / MENTAT_MCP_API, carried on AgentRegister):
+//! (MENTAT_OPENAI_API / MENTAT_MCP_API, held on AgentRegister):
 //!   - one OpenAI-compatible endpoint that routes by model name to the
 //!     announcing group's API, streaming passed through untouched;
 //!   - one MCP endpoint merging the per-container management MCPs, tools
@@ -15,7 +15,7 @@
 //! polled for /status, with a /events WebSocket held open so any cluster
 //! event triggers an immediate re-read. Routing is gated on health: a group
 //! is admitted only while it has a running actor and its announced endpoint
-//! answers a probe.
+//! replies to a probe.
 
 mod mcp;
 mod net;
@@ -59,7 +59,7 @@ pub type HttpClient = Client<HttpConnector, Full<Bytes>>;
 /// this on every round: the endpoint serves perfectly and the probe fails
 /// perfectly.
 ///
-/// `fresh` exists to answer that. One retry over a new connection separates
+/// `fresh` exists to settle that. One retry over a new connection separates
 /// a stale socket from an endpoint that is actually gone.
 /// Why a request did not get a response.
 pub struct SendError {
@@ -175,7 +175,7 @@ pub struct Config {
     /// retries a refused upstream connection, before it is refused.
     pub model_wait: Duration,
     /// Interval between SSE comment lines sent to a streaming client while
-    /// the upstream has not yet answered. Zero turns them off.
+    /// the upstream has not yet replied. Zero turns them off.
     pub sse_keepalive: Duration,
     pub mcp_timeout: Duration,
     pub tools_ttl: Duration,
@@ -273,7 +273,7 @@ pub struct DaemonView {
     pub status: Option<Value>,
     pub seen: Option<Instant>,
     pub error: Option<String>,
-    /// The daemon's own id, once a poll has answered.
+    /// The daemon's own id, once a poll has replied.
     pub node_id: Option<String>,
     /// Named in MENTAT_DAEMONS. Watched for the life of the process.
     pub seed: bool,
@@ -292,7 +292,7 @@ impl DaemonView {
 }
 
 /// One node's watch: the address being polled, and the others the watch
-/// falls through to when it stops answering. Every discovery source hands
+/// falls through to when it stops replying. Every discovery source hands
 /// over whichever address it saw, and watching each would poll a daemon
 /// once per link.
 pub struct NodeWatch {
@@ -308,7 +308,7 @@ pub struct ProbeResult {
     pub seen: Instant,
     pub error: Option<String>,
     /// The candidate this group is currently routed to. Sticky: once an
-    /// address answers, the router keeps using it rather than re-deciding
+    /// address replies, the router keeps using it rather than re-deciding
     /// every round, so a flapping preferred link cannot move live traffic
     /// between addresses on every probe.
     pub selected: Option<String>,
@@ -338,12 +338,12 @@ pub struct Shared {
     /// group -> latest endpoint probe. Present only for probe candidates
     /// (openai announced, actors running).
     pub probes: Mutex<HashMap<String, ProbeResult>>,
-    /// "group url" -> cached tools/list answer for the MCP merge.
+    /// "group url" -> cached tools/list report for the MCP merge.
     pub tools: Mutex<HashMap<String, (Instant, Vec<Value>)>>,
     /// Wakes the prober when a daemon view changes, so admission does not
     /// wait out a full probe interval after boot.
     pub refresh: tokio::sync::Notify,
-    /// Requests being carried right now, keyed by a per-process id. Rows
+    /// Requests being held right now, keyed by a per-process id. Rows
     /// leave on drop, so a client hangup clears its own.
     pub inflight: Mutex<BTreeMap<u64, ui::Inflight>>,
     pub next_req: AtomicU64,
@@ -395,7 +395,7 @@ pub struct GroupEntry {
     /// behind that endpoint. Empty when the container did not say.
     pub provider: String,
     /// Whether the group has actor rows, running or dead. An endpoint that
-    /// outlives every rank still answers `/models`, and only rank state
+    /// outlives every rank still serves `/models`, and only rank state
     /// catches it. A group with no rows had nothing placed, so the probe
     /// is its whole test.
     pub placed: bool,
@@ -751,8 +751,8 @@ pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<Value>, String> 
             ep.announced
         ));
     }
-    // An endpoint that outlives every rank still answers /models. A group
-    // that never had actors has no rank state to consult.
+    // An endpoint that outlives every rank still serves /models. A group
+    // that never had actors does not have rank state to consult.
     if e.placed && e.running == 0 {
         return Err("no running actors".into());
     }
@@ -798,7 +798,7 @@ pub fn model_ids(models: &[Value]) -> Vec<String> {
 }
 
 /// model name -> (group, announced base URL), healthy groups only. Names come
-/// from probing the endpoint's /models, so SERVED_NAME needs no announcing.
+/// from probing the endpoint's /models, so SERVED_NAME does not need announcing.
 ///
 /// Names and routes only. This runs on every proxied request, where cloning
 /// each engine's full `/models` object would be paid per request.
@@ -817,7 +817,7 @@ pub fn model_table(shared: &Shared) -> BTreeMap<String, (String, String)> {
     out
 }
 
-/// What `/v1/models` answers: every healthy group's `/models` entries as the
+/// What `/v1/models` replies: every healthy group's `/models` entries as the
 /// engine wrote them, so a client sees the same `max_model_len` and `root` it
 /// would reading the engine direct. `owned_by` becomes the serving group,
 /// which through a router is the useful owner and what `/status.json`
@@ -902,7 +902,7 @@ pub fn status_view(shared: &Shared) -> Value {
                     "provider": e.provider,
                     "mcp": e.mcp.as_ref().and_then(|x| x.best()),
                     "healthy": health.is_ok(),
-                    // Names only. /v1/models carries the whole entries, and
+                    // Names only. /v1/models holds the whole entries, and
                     // repeating them here would crowd out the health fields.
                     "models": health.as_ref().ok().map(|m| model_ids(m)),
                     "why_not": health.as_ref().err(),
@@ -931,7 +931,7 @@ pub fn status_view(shared: &Shared) -> Value {
 /// first answer, best first.
 pub fn ensure_watched(shared: &Arc<Shared>, addr: String, others: Vec<String>) {
     // An address already remembered as another way to reach a watched node
-    // needs no watch of its own.
+    // does not need a watch of its own.
     if shared
         .nodes
         .lock()
@@ -957,14 +957,14 @@ pub fn ensure_watched(shared: &Arc<Shared>, addr: String, others: Vec<String>) {
 ///
 /// The first answer names the node. If a fresh watch already owns it, this
 /// address becomes that watch's alternate and this task ends. When the
-/// polled address stops answering the watch moves to an alternate that
-/// does, and an unseeded address that answers nothing for `model_ttl` while
+/// polled address stops replying the watch moves to an alternate that
+/// does, and an unseeded address that replies nothing for `model_ttl` while
 /// no live daemon lists it is forgotten.
 async fn watch_daemon(shared: Arc<Shared>, mut addr: String, others: Vec<String>) {
     let seed = shared.cfg.daemons.contains(&addr);
     let mut node: Option<String> = None;
     let mut failing_since: Option<Instant> = None;
-    // Addresses to try before the node has answered on any, since the
+    // Addresses to try before the node has replied on any, since the
     // best-ranked one may be on a link this box cannot use.
     let mut untried: std::collections::VecDeque<String> =
         others.into_iter().filter(|o| *o != addr).collect();
@@ -1140,7 +1140,7 @@ fn claim_node(shared: &Shared, id: &str, addr: &str) -> bool {
                 w.alternates.insert(addr.to_string());
                 false
             } else {
-                // The holder is stale and this address answers, so this
+                // The holder is stale and this address replies, so this
                 // watch takes over.
                 let old = std::mem::replace(&mut w.addr, addr.to_string());
                 w.alternates.remove(addr);
@@ -1153,7 +1153,7 @@ fn claim_node(shared: &Shared, id: &str, addr: &str) -> bool {
     }
 }
 
-/// Poll each alternate of a node once. The first that answers as that node
+/// Poll each alternate of a node once. The first that replies as that node
 /// is the new address.
 async fn try_alternates(shared: &Arc<Shared>, id: &str, current: &str) -> Option<String> {
     let mut alts: Vec<String> = shared
@@ -1169,7 +1169,7 @@ async fn try_alternates(shared: &Arc<Shared>, id: &str, current: &str) -> Option
                 .collect()
         })
         .unwrap_or_default();
-    // Loopback names the box the router runs on rather than the peer, and
+    // Loopback is the box the router runs on rather than the peer, and
     // is right only where router and daemon share one. The set is ordered
     // lexicographically, which puts `127.` ahead of a real address, so the
     // preference `peer_addresses` established is restored here.
@@ -1345,7 +1345,7 @@ async fn udp_listener(shared: Arc<Shared>) {
         }
         // A restart resets seq, which the new boot_id distinguishes from a
         // replay. One announcement per interface repeats a seq, and dropping
-        // the repeat costs nothing: the address it carries is the same one.
+        // the repeat costs nothing: the address it holds is the same one.
         match seen.get(&node) {
             Some((b, last)) if *b == boot && seq <= *last => continue,
             _ => seen.insert(node, (boot, seq)),
@@ -1364,8 +1364,8 @@ async fn udp_listener(shared: Arc<Shared>) {
         // here, and so is any advertised address before it is chosen,
         // further down. The advertised address itself is not, because nothing acts
         // on it any more -- gating a field the router only reads would fail
-        // discovery closed over a subnet the operator has no reason to be
-        // thinking about, and say nothing about why.
+        // discovery closed over a subnet the operator never thinks about, and
+        // say nothing about why.
         let src_ip = src.ip().to_string();
         let local = local_nets();
         if !shared.cfg.allowed_sources.permits(&src_ip, &local) {
@@ -1386,7 +1386,7 @@ async fn udp_listener(shared: Arc<Shared>) {
         // The node ranks its own addresses, most preferred first, because
         // only it knows which link is the fast one. Take the best it offers
         // that lands on a subnet we are attached to. Failing that, the
-        // source address, which at least carried this packet here.
+        // source address, which at least held this packet here.
         let ranked: Vec<String> = v["addrs"]
             .as_array()
             .into_iter()
@@ -1445,7 +1445,7 @@ async fn udp_listener(shared: Arc<Shared>) {
 
 /// Which address to watch for a node that just announced itself.
 ///
-/// The source address is proof: it carried this datagram here. An advertised
+/// The source address is proof: it held this datagram here. An advertised
 /// address is only a claim, so it wins only when the node ranked it higher
 /// and this box is on its subnet, and only after passing the same allowlist
 /// the source did -- otherwise an announcement could name any host and have
@@ -1465,8 +1465,8 @@ fn announce_address(ranked: &[String], src_ip: &str, allowed: &Allow, local: &[N
 
 /// The addresses a daemon reports for a peer, best first, and the best one.
 ///
-/// Candidates run in order of evidence: link_ip carried the mesh link, addrs
-/// is what the peer says it answers on, node_ip is only the name it calls
+/// Candidates run in order of evidence: link_ip held the mesh link, addrs
+/// is what the peer says it listens on, node_ip is only the name it calls
 /// itself. An address on one of our own subnets beats that order outright,
 /// since the pair's cluster identity is a subnet a LAN-only box cannot route
 /// to.
@@ -1485,7 +1485,7 @@ fn peer_addresses(p: &Value, local: &[Net]) -> (Option<String>, Vec<String>) {
         push(a.as_str());
     }
     push(p["node_ip"].as_str());
-    // Loopback names the reporting box rather than the peer, and is right
+    // Loopback is the reporting box rather than the peer, and is right
     // only when router, reporter and peer share one box. It goes last.
     let lo = |c: &String| c.starts_with("127.") || c == "::1";
     cands.sort_by_key(lo);
@@ -1512,7 +1512,7 @@ enum Applied {
 /// Fold one /events frame into the stored snapshot.
 ///
 /// The first frame of a stream is a snapshot, which seeds the view without
-/// an HTTP read. After that each event carries a `patch`: paths into the
+/// an HTTP read. After that each event holds a `patch`: paths into the
 /// snapshot and the rows to store there.
 ///
 /// A daemon replicates its peers' events, and those describe the
@@ -1574,7 +1574,7 @@ fn apply_frame(
 /// is absent. Returns false when the path does not lead through objects.
 ///
 /// Intermediate objects are created, since the first event for a collection
-/// names a row under a key the snapshot has never carried.
+/// addresses a row under a key the snapshot has never held.
 fn patch_at(root: &mut Value, at: &[Value], value: Option<&Value>) -> bool {
     let keys: Vec<&str> = at.iter().filter_map(Value::as_str).collect();
     if keys.len() != at.len() {
@@ -1631,7 +1631,7 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) -> Option<String> {
         Ok(snap) => {
             let node_id = snap["node_id"].as_str().map(str::to_string);
             if shared.cfg.discover_peers {
-                // Membership follows the mesh: every peer entry carries its
+                // Membership follows the mesh: every peer entry holds its
                 // HTTP address (PeerHello inbound, PeerHelloOk outbound), so
                 // one seed daemon reveals the rest.
                 let local = local_nets();
@@ -1703,7 +1703,7 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) -> Option<String> {
 /// A group announced by port has several candidate addresses, and the probe
 /// decides among them the same way it decides anything else: by trying. The
 /// selection is sticky, falls through on failure, and is re-raised to the
-/// node's preferred address when that address answers again -- so a dropped
+/// node's preferred address when that address replies again -- so a dropped
 /// cable moves serving onto the LAN and a reconnected one moves it back,
 /// without either transition needing an operator.
 async fn prober(shared: Arc<Shared>) {
@@ -1722,7 +1722,7 @@ async fn prober(shared: Arc<Shared>) {
             let client = shared.client.clone();
             let t = shared.cfg.probe_timeout;
             // Sticky selection and the promotion clock, read before the
-            // round so the probe itself holds no lock.
+            // round so the probe itself runs unlocked.
             let (sticky, promote) = {
                 let probes = shared.probes.lock().unwrap();
                 match probes.get(&group) {
@@ -1753,7 +1753,7 @@ async fn prober(shared: Arc<Shared>) {
             let pr = match res {
                 Ok((url, mut models)) => {
                     if models.is_empty() {
-                        // An endpoint that answers but lists nothing still
+                        // An endpoint that replies but lists nothing still
                         // serves, so fall back to the group name. Only `id`
                         // is known here, and the listing fills the rest in.
                         models.push(json!({"id": group.clone()}));
@@ -1772,7 +1772,7 @@ async fn prober(shared: Arc<Shared>) {
                     models: Vec::new(),
                     seen: now,
                     error: Some(e),
-                    // Nothing answered, so there is nothing to be routed to;
+                    // Nothing replied, so there is nothing to be routed to;
                     // clearing it means recovery starts from the top of the
                     // ranking rather than from the last thing that worked.
                     selected: None,
@@ -1812,7 +1812,7 @@ async fn prober(shared: Arc<Shared>) {
     }
 }
 
-/// Probe candidates until one answers.
+/// Probe candidates until one replies.
 ///
 /// Order is the whole behaviour. With a sticky selection the router probes
 /// that address first and only walks the list when it fails, so a working
@@ -1822,7 +1822,7 @@ async fn prober(shared: Arc<Shared>) {
 /// preferred link.
 ///
 /// Returns whether the top-ranked candidate was tried this round (which is
-/// what resets the promotion clock) and either the answering URL with the
+/// what resets the promotion clock) and either the replying URL with the
 /// endpoint's own model entries, or every candidate's error.
 async fn probe_candidates(
     client: &HttpClients,
@@ -1973,7 +1973,7 @@ async fn handle(
         if p.is_empty() { "/" } else { p }.to_string()
     };
     match (req.method().clone(), path.as_str()) {
-        // A browser asking for `/` gets the page. Everything else, curl and
+        // A browser requesting `/` gets the page. Everything else, curl and
         // the status pollers included, gets the document it always got.
         (Method::GET, "/") if ui::wants_html(req.headers()) => ui::page(),
         (Method::GET, "/" | "/healthz" | "/status.json") => {
@@ -1985,7 +1985,7 @@ async fn handle(
             &json!({"object": "list", "data": model_objects(&shared)}),
         ),
         (Method::POST, "/mcp") => mcp::handle(&shared, req).await,
-        // Owned rather than proxied: vLLM has no such endpoint, and the path
+        // Owned rather than proxied: vLLM does not serve that endpoint, and the path
         // lands on its /v1/responses/{response_id} pattern for a 405.
         (Method::POST, "/v1/responses/input_tokens") => tokens::count(&shared, req).await,
         // The model in the body routes anything else posted. vLLM's
@@ -2264,7 +2264,7 @@ mod tests {
     }
 
     /// The reported failure: the peer calls itself by an address on a subnet
-    /// this box has no route to, and the reachable one is only in addrs.
+    /// this box cannot route to, and the reachable one is only in addrs.
     #[test]
     fn a_reachable_addr_beats_an_unroutable_identity() {
         let p = serde_json::json!({
@@ -2279,7 +2279,7 @@ mod tests {
     }
 
     /// With nothing on a local subnet, the link address still leads: it
-    /// carried a connection, and a routed network needs no local wire.
+    /// held a connection, and a routed network does not need a local wire.
     #[test]
     fn link_ip_leads_when_nothing_is_local() {
         let p = serde_json::json!({
@@ -2323,7 +2323,7 @@ mod tests {
     }
 
     /// The bare entry a probe synthesises when an endpoint lists nothing, and
-    /// an entry carrying fields this router predates. Both reach the listing
+    /// an entry holding fields this router predates. Both reach the listing
     /// intact.
     #[test]
     fn a_sparse_or_unfamiliar_entry_survives() {
@@ -2554,7 +2554,7 @@ mod tests {
 
     /// A working route is not re-decided every round. Without stickiness the
     /// router would move live traffic back to the preferred address the
-    /// instant it answered a probe, mid-generation.
+    /// instant it replied to a probe, mid-generation.
     #[tokio::test]
     async fn a_working_selection_is_probed_first_and_kept() {
         let (top, low) = (
@@ -2576,7 +2576,7 @@ mod tests {
     }
 
     /// The failure this whole path exists for: the preferred address stops
-    /// answering and the group keeps serving on the next one.
+    /// replying and the group keeps serving on the next one.
     #[tokio::test]
     async fn a_dead_top_candidate_falls_through() {
         let up = models_endpoint("model-x").await;
@@ -2590,7 +2590,7 @@ mod tests {
     }
 
     /// And back again once the cable is in: a promotion round tries the
-    /// higher-ranked candidate first, so recovery needs no operator.
+    /// higher-ranked candidate first, so recovery does not need an operator.
     #[tokio::test]
     async fn a_promotion_round_takes_the_preferred_address_back() {
         let top = models_endpoint("model-x").await;
@@ -2692,8 +2692,8 @@ mod tests {
         assert!(v["groups"]["glm"]["actors"]["a:1"].is_null());
     }
 
-    /// The first event for a collection names a key the snapshot has never
-    /// carried, so the objects along the way are created.
+    /// The first event for a collection uses a key the snapshot has never
+    /// held, so the objects along the way are created.
     #[test]
     fn a_patch_creates_the_objects_it_walks_through() {
         let mut v = snap();
@@ -2735,7 +2735,7 @@ mod tests {
     }
 
     /// A daemon on this box reaches its peers from loopback, and the peer
-    /// reports that as the link address. It names this box, and watching
+    /// reports that as the link address. It is this box, and watching
     /// it would poll the local daemon under the peer's name.
     #[test]
     fn a_loopback_link_address_is_not_the_peer() {

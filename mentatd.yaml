@@ -9,8 +9,8 @@
 # naming this daemon itself is skipped. MENTAT_NODE_IP is this node's
 # cluster identity and defaults to the default route's address, which is the
 # LAN on these boxes. Set it only when that is the wrong link. Containers
-# need no address: the daemon files each under the box it connected from and
-# hands every rank its node's address.
+# do not need an address: the daemon files each under the box it connected
+# from and hands every rank its node's address.
 #
 # MENTAT_ANNOUNCE_IFACES lets the daemons probe which links are cabled
 # together and hand each rank MENTAT_FABRIC_IP, which retires the per-node
@@ -23,7 +23,7 @@ services:
   mentatd:
     image: ${IMAGE:-mentatd:0.8.0}
     container_name: mentatd
-    # The control port must answer on 127.0.0.1:6379 for agents in
+    # The control port must listen on 127.0.0.1:6379 for agents in
     # host-network model containers and on the cluster subnets for remote
     # agents and the mesh.
     network_mode: host

@@ -15,7 +15,7 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// The wire version an announcement payload carries. Every announcement is
+/// The wire version an announcement payload holds. Every announcement is
 /// signed, so `proto` is the only discriminator a listener needs.
 pub const PROTO: &str = "0.99";
 
@@ -26,8 +26,8 @@ pub const CLOCK_SKEW_S: f64 = 30.0;
 
 /// The mesh key, from a mounted file or the environment.
 ///
-/// `Ok(None)` means no key was asked for, which runs unsigned. `Err` means a
-/// key was asked for and could not be had: a named file that will not read,
+/// `Ok(None)` means no key was requested, which runs unsigned. `Err` means a
+/// key was requested and could not be had: a named file that will not read,
 /// or one that reads empty. Those are misconfigurations rather than choices,
 /// and a daemon that shrugged at them would sign nothing, refuse every
 /// signed announcement its peers send, and look from the outside like a node
@@ -65,7 +65,7 @@ fn from_env(v: Option<&str>) -> Result<Option<Vec<u8>>, String> {
     Ok((!key.is_empty()).then(|| key.to_vec()))
 }
 
-/// Trailing newlines are what a secret file almost always carries, and a key
+/// Trailing newlines are what a secret file almost always holds, and a key
 /// that differs by one byte between nodes fails every verification with no
 /// clue why.
 fn trim_ascii(v: &[u8]) -> &[u8] {
@@ -163,7 +163,7 @@ pub fn fresh(t: f64, now: f64) -> bool {
     (now - t).abs() <= CLOCK_SKEW_S
 }
 
-/// Seconds since the epoch, as the announcement carries them.
+/// Seconds since the epoch, as the announcement holds them.
 pub fn now_s() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -174,8 +174,8 @@ pub fn now_s() -> f64 {
 /// A per-process identifier, so a restarted daemon's sequence numbers can
 /// start over without the listener reading them as replay.
 pub fn boot_id() -> String {
-    // read_exact, never fs::read: /dev/urandom has no end, so reading to EOF
-    // never returns.
+    // read_exact, never fs::read: /dev/urandom does not end, so reading to
+    // EOF never returns.
     let mut buf = [0u8; 8];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;

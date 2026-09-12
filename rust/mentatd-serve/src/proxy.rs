@@ -30,7 +30,7 @@ const MAX_BODY: usize = 128 * 1024 * 1024;
 /// The announced base ends in `/v1`, since that is what an OpenAI client is
 /// handed. vLLM serves some endpoints there and others at the root:
 /// `/tokenize` and `/detokenize` are root-level, so concatenating them onto
-/// the base would ask for `/v1/tokenize` and get a 404. A root-level path is
+/// the base would request `/v1/tokenize` and get a 404. A root-level path is
 /// resolved against the base with its `/v1` removed.
 ///
 /// A base that does not end in `/v1` is used as given, since then it is
@@ -53,7 +53,7 @@ struct Routed {
 
 /// Read those two out of a body, whatever form it takes.
 ///
-/// JSON carries both as top-level fields. The audio endpoints are
+/// JSON holds both as top-level fields. The audio endpoints are
 /// multipart/form-data instead, and spell the model as a text field beside
 /// the upload. Either way the body is forwarded byte for byte: this reads it
 /// to pick a route and changes nothing.
@@ -101,7 +101,7 @@ fn boundary_of(content_type: &str) -> Option<&str> {
 ///
 /// The parts are walked rather than the body searched for a field name,
 /// because an upload's bytes can spell anything, `name="model"` included.
-/// A part carrying a filename is skipped without its value being touched.
+/// A part holding a filename is skipped without its value being touched.
 fn form_fields(body: &[u8], boundary: &str) -> BTreeMap<String, String> {
     let delim = format!("--{boundary}");
     let mut out = BTreeMap::new();
@@ -361,7 +361,7 @@ impl Call {
     }
 }
 
-/// A request the router answers itself.
+/// A request the router serves itself.
 struct Refusal {
     status: StatusCode,
     body: Value,
@@ -390,7 +390,7 @@ impl Refusal {
 type Dispatched = Result<(String, hyper::Response<Incoming>, Tracked), Refusal>;
 
 enum Keep {
-    /// Comment lines every tick until the upstream answers.
+    /// Comment lines every tick until the upstream replies.
     Waiting(
         tokio::sync::oneshot::Receiver<Dispatched>,
         tokio::time::Interval,
@@ -402,7 +402,7 @@ enum Keep {
     Done,
 }
 
-/// A stream body that starts before the upstream has answered.
+/// A stream body that starts before the upstream has replied.
 struct KeepaliveBody {
     state: Keep,
 }

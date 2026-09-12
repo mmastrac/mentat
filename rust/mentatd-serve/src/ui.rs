@@ -1,12 +1,12 @@
 //! The status page and the numbers behind it.
 //!
 //! The engine knows its own queue depth, KV usage and token totals, and
-//! publishes them on `/metrics`. It has no endpoint for individual requests.
-//! The router knows each request it is carrying right now -- when it arrived,
+//! publishes them on `/metrics`. It does not expose individual requests.
+//! The router knows each request it is holding right now -- when it arrived,
 //! how big it was, whether the first byte has come back -- and knows nothing
 //! about what the engine is doing with it. The page shows both side by side.
 //!
-//! `GET /` answers HTML to a browser and the existing status document to
+//! `GET /` returns HTML to a browser and the existing status document to
 //! everything else, chosen by `Accept`. Nothing that scripts against `/`,
 //! `/healthz` or `/status.json` sees a change.
 
@@ -26,11 +26,11 @@ use crate::{
 };
 
 /// A scrape is 60-odd KiB of Prometheus text and the page polls every couple
-/// of seconds, so one scrape is shared across whatever asks for it inside
+/// of seconds, so one scrape is shared across whatever requests it inside
 /// this window. Several open tabs then cost what one costs.
 const METRICS_TTL_MS: u128 = 1_000;
 
-/// One request the router is carrying, as the router sees it.
+/// One request the router is holding, as the router sees it.
 ///
 /// The engine's own view of the same request stays separate from this one.
 /// vLLM's metrics are aggregates, so there is no id to join on.
@@ -53,7 +53,7 @@ pub struct Inflight {
 ///
 /// The drop is what makes the table honest. A client that hangs up mid-stream
 /// takes the response body with it, so this runs then too, and a cancelled
-/// request leaves no row behind.
+/// request is dropped with it.
 pub struct Tracked {
     shared: Arc<Shared>,
     id: u64,
@@ -138,7 +138,7 @@ impl Body for TrackedBody {
     }
 }
 
-/// One Prometheus series that carries a `model_name`, reduced to the parts
+/// One Prometheus series that holds a `model_name`, reduced to the parts
 /// the page uses.
 ///
 /// A full parser is not needed. Only a handful of names are read, so a line
@@ -295,7 +295,7 @@ async fn fetch_text(
 }
 
 /// What the page polls: one row per served model, plus every request the
-/// router is carrying.
+/// router is holding.
 pub async fn stats(shared: &Arc<Shared>) -> Value {
     let mut rows = Vec::new();
     let mut counts: std::collections::HashMap<String, u64> = Default::default();
@@ -336,7 +336,7 @@ pub async fn stats(shared: &Arc<Shared>) -> Value {
             }));
         }
         // A group with no healthy model still belongs on the page, since
-        // "why did it stop serving" is the question being asked.
+        // "why did it stop serving" is the question at hand.
         if health.is_err() {
             rows.push(json!({
                 "model": e.group,
@@ -559,7 +559,7 @@ python_gc_objects_collected_total{generation="0"} 1234.0
         assert!(f["abort"].is_null());
     }
 
-    /// A scrape carries hundreds of series this page never shows, and
+    /// A scrape holds hundreds of series this page never shows, and
     /// process-level ones that are not even vllm's.
     #[test]
     fn unasked_series_are_skipped() {

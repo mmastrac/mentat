@@ -1,7 +1,7 @@
 //! Zero-config discovery: mentatd announces its addresses over UDP so
-//! mentatd-serve needs no daemon list.
+//! mentatd-serve does not need a daemon list.
 //!
-//! With MENTAT_SECRET set, datagrams are HMAC-SHA256 signed and carry a
+//! With MENTAT_SECRET set, datagrams are HMAC-SHA256 signed and hold a
 //! timestamp and per-boot sequence number, matching spark-agent's mesh
 //! discovery so one key serves both. Without it they go out unsigned, as
 //! version 1, and a listener holding a key refuses them on version alone.
@@ -58,7 +58,7 @@ pub fn start(shared: SharedRef) {
             }
         })
         .collect();
-    // A key that was asked for and cannot be had stops the daemon here. It
+    // A key that was requested and cannot be had stops the daemon here. It
     // would otherwise sign nothing and refuse every signed announcement its
     // peers send, which from outside is a node that never joined the mesh.
     let key = match secret::load() {
@@ -148,14 +148,14 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
     }
 }
 
-/// One selected interface: the address it carries and the tags it was given.
+/// One selected interface: the address it holds and the tags it was given.
 pub struct Iface {
     pub iface: getifaddrs::Interface,
     pub tags: Vec<String>,
 }
 
 /// One MENTAT_ANNOUNCE_IFACES entry: an interface-name pattern and the tags
-/// every address it matches carries.
+/// every address it matches holds.
 struct Spec {
     pat: String,
     tags: Vec<String>,
@@ -215,7 +215,7 @@ fn glob_match(pat: &str, name: &str) -> bool {
 
 /// Rank and tags for one interface name, or None when no entry matches it.
 ///
-/// First match wins for all three answers. Several interfaces matching one
+/// First match wins for all three replies. Several interfaces matching one
 /// entry share that entry's rank and sort among themselves in kernel order.
 fn match_spec(spec: &[Spec], name: &str) -> Option<(usize, Vec<String>)> {
     spec.iter()
@@ -237,7 +237,7 @@ fn match_spec(spec: &[Spec], name: &str) -> Option<(usize, Vec<String>)> {
 /// order. There is no negation syntax, because an explicit list is already
 /// an allowlist.
 ///
-/// An entry may carry tags, which travel with the address:
+/// An entry may hold tags, which travel with the address:
 ///
 ///     MENTAT_ANNOUNCE_IFACES=en*f*np*=connectx+rdma,en*=lan
 ///
@@ -245,8 +245,8 @@ fn match_spec(spec: &[Spec], name: &str) -> Option<(usize, Vec<String>)> {
 /// on. mesh::prober is what decides whether the claim holds.
 ///
 /// Unset, every up non-loopback IPv4 interface except the container bridges,
-/// which carry no peers and would have every node announcing to itself, in
-/// whatever order the kernel lists them and with no tags.
+/// where no peer sits and every node would announce to itself, in whatever
+/// order the kernel lists them and with no tags.
 fn selected_ifaces() -> Vec<Iface> {
     let spec = parse_spec(&std::env::var("MENTAT_ANNOUNCE_IFACES").unwrap_or_default());
     let Ok(ifaces) = getifaddrs::InterfaceFilter::new().v4().get() else {
@@ -290,7 +290,7 @@ fn selected_ifaces() -> Vec<Iface> {
 ///
 /// It exists for the node whose advertisable address is not on any of its
 /// own interfaces -- and for the tests, which build topologies a single box
-/// has no cabling for. It replaces what this node says it answers on, and
+/// is not cabled for. It replaces what this node says it listens on, and
 /// nothing else: broadcast still goes out on the selected interfaces, so a
 /// node using this and no MENTAT_ANNOUNCE_ADDR still announces where it
 /// always did.
@@ -304,7 +304,7 @@ fn announced_override() -> Option<Vec<(String, Vec<String>)>> {
     }
     // Checked here rather than at first use. A typo would otherwise be
     // announced to the whole mesh and surface much later as one failing
-    // probe per peer, naming the address but not where it came from.
+    // probe per peer, giving the address but not where it came from.
     let (ok, bad): (Vec<_>, Vec<_>) = spec
         .into_iter()
         .partition(|s| s.pat.parse::<std::net::Ipv4Addr>().is_ok());
@@ -332,11 +332,11 @@ fn broadcast_targets(port: u16) -> Vec<String> {
         .collect()
 }
 
-/// Every address this node answers on, for consumers that cannot reach the
+/// Every address this node listens on, for consumers that cannot reach the
 /// one it calls itself. A listener should still prefer the address a packet
 /// actually arrived from; this list is what to fall back to.
-/// Every IPv4 address this box answers on, whatever the announce settings
-/// select. `local_addrs` is the announced subset and answers a different
+/// Every IPv4 address this box listens on, whatever the announce settings
+/// select. `local_addrs` is the announced subset and reports a different
 /// question: this one is "is that host me".
 pub fn all_local_addrs() -> Vec<String> {
     let Ok(ifaces) = getifaddrs::InterfaceFilter::new().v4().get() else {
@@ -360,7 +360,7 @@ pub fn local_addrs() -> Vec<String> {
 }
 
 /// The interface each address sits on, for the addresses discovered from
-/// one. A placement caller asks which link reaches a node, and the answer is
+/// one. A placement caller needs which link reaches a node, and the answer is
 /// an address and the interface to bind it on.
 ///
 /// MENTAT_ANNOUNCE_ADDRS names addresses without an interface, so those are
@@ -380,7 +380,8 @@ pub fn local_addr_ifaces() -> BTreeMap<String, String> {
 }
 
 /// Tags per address, for the addresses that were given any. Empty unless
-/// MENTAT_ANNOUNCE_IFACES names tags, so a datagram carries no dead weight.
+/// MENTAT_ANNOUNCE_IFACES names tags, so every tag a datagram holds is
+/// one an operator set.
 pub fn local_addr_tags() -> BTreeMap<String, Vec<String>> {
     if let Some(o) = announced_override() {
         return o.into_iter().filter(|(_, t)| !t.is_empty()).collect();

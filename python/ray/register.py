@@ -112,13 +112,13 @@ def register_frame(args):
         "proto": PROTO,
         "agent_id": agent_id(args),
         "group": args.group,
-        # Empty asks the daemon to decide. It files an agent that claims
+        # Empty leaves the daemon to decide. It files an agent that claims
         # nothing under its own node when the connection came from that box,
         # and under the address it saw otherwise, which is right in both
         # cases. MENTAT_NODE_IP overrides it, as everywhere else.
         "node_ip": args.node_ip,
-        # A register-only container hosts no actor, so it offers no device
-        # for one to land on.
+        # A register-only container does not host actors, so its device
+        # list is empty.
         "machine": {"memory": 0, "cpus": os.cpu_count() or 1, "gpus": []},
         "container": args.container,
         "pid": os.getpid(),

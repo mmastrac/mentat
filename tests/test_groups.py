@@ -103,7 +103,7 @@ def t02_liveness_at_tp4():
 
 
 def t03_parallel_groups_share_nodes():
-    # Two more "models" on nodes already carrying tp4 agents -- including the
+    # Two more "models" on nodes already holding tp4 agents -- including the
     # same model deployed twice under distinct MENTAT_GROUP values.
     cluster.start_agent("qwen-a", gpus=1, container="qa", node_ip="127.0.0.1")
     cluster.start_agent("qwen-b", gpus=1, container="qb", node_ip="127.0.0.2")
@@ -196,7 +196,7 @@ else:
                      "MENTAT_CLAIM_SHAPE": json.dumps(solo)})
     assert fenced is None, f"two bundles escaped a one-node claim: {fenced}"
 
-    # The same claim, asked for what it actually holds, places.
+    # The same claim, requested what it actually holds, places.
     inside = run(1, {"MENTAT_CLAIM": "fence-test",
                      "MENTAT_CLAIM_SHAPE": json.dumps(solo)})
     assert inside is not None and len(inside) == 1, inside

@@ -6,7 +6,7 @@
 //!
 //! The defaults are sized for the serving pair: model boot legitimately takes
 //! minutes (weights, container pulls), while an agent link blip should heal in
-//! seconds. GUIDE.md carries the same table for operators.
+//! seconds. GUIDE.md holds the same table for operators.
 
 use std::sync::OnceLock;
 
@@ -36,7 +36,7 @@ pub struct Cfg {
     /// link has been down past the give-up threshold, a mesh peer that has
     /// been dead. Each is history the moment it stops mattering, and one
     /// knob ages all of it so a daemon that has watched a model boot forty
-    /// times does not carry forty of each.
+    /// times does not hold forty of each.
     pub history_keep_ms: u64,
     /// MENTAT_PEER_STALE_AFTER_MS, default 30_000. A mesh peer that has not
     /// been heard from (status push or pong) for this long is logged stale --
@@ -52,7 +52,7 @@ pub struct Cfg {
     pub election_hold_down_ms: u64,
     /// MENTAT_PROBE_INTERVAL_MS, default 15_000. How often each daemon
     /// re-probes reachability to every live peer, one probe per (own
-    /// address x peer address) pair. Slow on purpose: the table answers
+    /// address x peer address) pair. Slow on purpose: the table replies
     /// "is this cable up", which changes on the timescale of cables.
     pub probe_interval_ms: u64,
     /// MENTAT_PROBE_TIMEOUT_MS, default 2_000. How long one probe waits for

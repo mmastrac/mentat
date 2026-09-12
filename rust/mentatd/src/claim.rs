@@ -1,6 +1,6 @@
-//! Matching a requested shape against the cluster's measured topology.
+//! Matching a requested shape against the cluster's probed topology.
 //!
-//! Placement today answers one question: put these bundles inside one fabric
+//! Placement today settles one question: put these bundles inside one fabric
 //! island. It cannot say "a cabled pair here and a cabled pair there, with
 //! only IP between them", which is what pipeline parallel over two
 //! tensor-parallel pairs needs. A request here names its sets, says which of them need a fabric,
@@ -25,7 +25,7 @@ use crate::state::NodeId;
 pub enum Link {
     /// An operator-tagged fabric address, probe-confirmed between every pair.
     Rdma,
-    /// Anything that answered a probe.
+    /// Anything that replied to a probe.
     Any,
 }
 
@@ -65,7 +65,7 @@ pub struct Request {
     pub between: Vec<BetweenReq>,
 }
 
-/// One address a node answers on.
+/// One address a node listens on.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Port {
     pub addr: String,
@@ -86,14 +86,14 @@ impl Port {
 pub struct Topology {
     /// Fabric islands, as the island module derived them.
     pub islands: Vec<Island>,
-    /// Every address each node answers on.
+    /// Every address each node listens on.
     pub ports: BTreeMap<NodeId, Vec<Port>>,
-    /// Address pairs that answered a probe, with the round trip observed.
+    /// Address pairs that replied to a probe, with the round trip observed.
     /// Undirected: a one-way link is not something to place on.
     pub links: BTreeMap<(String, String), u64>,
     /// GPUs free on each node right now.
     pub free_gpus: BTreeMap<NodeId, f64>,
-    /// Hostname per node, carried through for the answer to be readable.
+    /// Hostname per node, held through for the answer to be readable.
     pub hosts: BTreeMap<NodeId, String>,
     /// The GPU vendor each node offers. One per node today: a set is placed
     /// on one vendor, since no collective spans two.
@@ -158,7 +158,7 @@ pub struct Path {
 
 impl Path {
     /// Each end names its set, so a reader with three sets can tell which
-    /// `between` answered which request without recomputing the solve.
+    /// `between` showed which request without recomputing the solve.
     fn to_json(&self, hosts: &BTreeMap<NodeId, String>, sets: &BTreeMap<NodeId, String>) -> Value {
         let end = |n: &NodeId, p: &Port| {
             json!({
@@ -517,7 +517,7 @@ pub fn parse(shape: &Value) -> Result<Request, String> {
 
 /// The topology as this daemon currently sees it.
 ///
-/// Ports come from the peer table, which carries each node's addresses, the
+/// Ports come from the peer table, which holds each node's addresses, the
 /// operator's tags and the interface each sits on. Links come from the
 /// probes, self to peer and peer to peer alike, so a fabric this daemon is
 /// not on still counts.
@@ -583,7 +583,7 @@ pub fn topology(st: &crate::state::State) -> Topology {
             }
         }
     }
-    // A node with no agent has no GPUs to give.
+    // Only a node with an agent has GPUs to give.
     for a in st.agents.values().filter(|a| a.alive) {
         *t.free_gpus.entry(a.node_id.clone()).or_insert(0.0) += st.free_gpus_of(&a.id).len() as f64;
         if let Some(g) = a.machine.gpus.first() {
@@ -593,7 +593,7 @@ pub fn topology(st: &crate::state::State) -> Topology {
         }
         // An agent can register a node no daemon peers for, which leaves it
         // holding GPUs with no address to bind. What it told us on register
-        // is an address, so it stands in. It carries no tag, which limits
+        // is an address, so it stands in. It is untagged, which limits
         // that node to plain links.
         t.ports.entry(a.node_id.clone()).or_insert_with(|| {
             vec![Port {
@@ -786,7 +786,7 @@ mod tests {
     /// the constrained set goes first whatever order the caller wrote.
     ///
     /// nE is off both fabrics and sorts first, so a loose set placed before
-    /// the cabled one would take nA and leave no pair.
+    /// the cabled one would take nA and break the pair.
     #[test]
     fn a_constrained_set_is_placed_before_a_loose_one() {
         let mut t = two_pairs();
@@ -810,7 +810,7 @@ mod tests {
         assert_eq!(s.sets["loose"][0].node, "n0");
     }
 
-    /// The same view answers the same way, or one name would mean two
+    /// The same view resolves the same way, or one name would mean two
     /// placements.
     #[test]
     fn the_answer_is_stable() {
