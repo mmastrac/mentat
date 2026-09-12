@@ -1,30 +1,19 @@
-//! What this box is, as `mentatd-probe-machine` reports it.
-//!
-//! The vendor knowledge lives in that script rather than here: a box with a
-//! part the probe does not know is fixed by editing a file, not by building
-//! a binary. This module runs it, reads one JSON object off its stdout, and
-//! refuses to guess when it cannot.
-
 use std::process::Command;
 
 use crate::proto::Machine;
 use mentat_common::logfmt::log;
 
-/// The probe's name. Found beside this binary first, then on PATH, the same
-/// way `mentatd <name>` resolves an external subcommand.
+// The probe script holds the vendor detection. A part it does not know takes
+// an edit there, and mentatd stays unchanged.
 const PROBE: &str = "mentatd-probe-machine";
 
-/// What this box is.
-///
-/// `MENTAT_MACHINE=<json>` bypasses the probe with a whole inventory, which
-/// is how the heterogeneous and UMA tests describe a box they are not
-/// running on. `MENTAT_MACHINE_PROBE=<path>` names a probe directly.
-///
-/// Every failure here exits. An agent that registers a box with no devices
-/// reads as a scheduling bug minutes later, in a different process, and the
-/// cause is one missing file.
 pub fn detect_machine() -> Machine {
-    if let Ok(raw) = std::env::var("MENTAT_MACHINE") {
+    // `docker run -e MENTAT_MACHINE` exports the name with no value, which
+    // is not a request to bypass the probe.
+    if let Some(raw) = std::env::var("MENTAT_MACHINE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
         return parse(&raw, "MENTAT_MACHINE");
     }
     let probe = match probe_path() {
@@ -59,17 +48,10 @@ pub fn detect_machine() -> Machine {
 }
 
 fn probe_path() -> Option<std::path::PathBuf> {
-    if let Some(p) = std::env::var_os("MENTAT_MACHINE_PROBE") {
-        return Some(std::path::PathBuf::from(p));
+    match std::env::var_os("MENTAT_MACHINE_PROBE").filter(|p| !p.is_empty()) {
+        Some(p) => Some(std::path::PathBuf::from(p)),
+        None => crate::find_sibling(PROBE),
     }
-    let sibling = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join(PROBE)));
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    sibling
-        .into_iter()
-        .chain(std::env::split_paths(&path).map(|d| d.join(PROBE)))
-        .find(|p| p.is_file())
 }
 
 fn parse(raw: &str, from: &str) -> Machine {
@@ -79,6 +61,9 @@ fn parse(raw: &str, from: &str) -> Machine {
     }
 }
 
+// Every probe failure stops the agent. An agent that registers no devices
+// starts normally and fails minutes later as a scheduling error in another
+// process.
 fn fatal(why: String) -> ! {
     log("machine_probe_failed", &[("error", why.clone())]);
     eprintln!("mentatd: {why}");

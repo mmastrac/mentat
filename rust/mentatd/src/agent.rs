@@ -82,7 +82,7 @@ pub fn run(opts: AgentOpts) -> ! {
     // agent ids made their registrations replace each other in a loop on
     // first deployment.
     let agent_id = format!("{}@{}@{}", opts.group, container, node_ip);
-    let machine = crate::gpu::detect_machine();
+    let machine = crate::machine::detect_machine();
     let sock_dir = std::env::var("MENTAT_SOCK_DIR").unwrap_or_else(|_| "/tmp/mentat".into());
     let _ = std::fs::create_dir_all(&sock_dir);
     let services = announced_services();

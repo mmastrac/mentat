@@ -1745,9 +1745,12 @@ fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
             }
         }
         if !ids.is_empty() {
-            st.emit(
+            // Nothing to patch: `driver_disconnected` already removed the
+            // client row, and each actor's own event follows.
+            st.emit_patch(
                 "driver_gone_reaping",
-                json!({ "patch": [], "actors": ids.len() }),
+                Vec::new(),
+                &format!("{} actors in group {group}", ids.len()),
             );
         }
         ids

@@ -993,30 +993,51 @@ async fn watch_daemon(shared: Arc<Shared>, mut addr: String, others: Vec<String>
                     node = Some(id);
                 }
                 match ws::EventStream::connect(&testnet::mapped(&addr)).await {
-                    Ok(mut es) => loop {
-                        match es.next(shared.cfg.poll_interval).await {
-                            Ok(Some(_event)) => {
-                                // Coalesce a burst (boot emits many events
-                                // at once) into one re-read.
-                                while let Ok(Some(_)) = es.next(Duration::from_millis(200)).await {}
+                    Ok(mut es) => {
+                        // The stream's own `seq`, so a gap is visible. A
+                        // missed event leaves a view that is wrong, and
+                        // nothing later says so.
+                        let mut last_seq: Option<u64> = None;
+                        let mut last_full = Instant::now();
+                        loop {
+                            // Counters move without events, so the snapshot
+                            // is re-read on the poll interval whatever the
+                            // stream is doing. That read is also what
+                            // discovers peers.
+                            if last_full.elapsed() >= shared.cfg.poll_interval {
                                 if poll_status(&shared, &addr).await.is_none() {
                                     break;
                                 }
+                                last_full = Instant::now();
+                                last_seq = None;
                             }
-                            Ok(None) => {
-                                if poll_status(&shared, &addr).await.is_none() {
+                            let frame = match es.next(shared.cfg.poll_interval).await {
+                                Ok(Some(f)) => f,
+                                Ok(None) => continue,
+                                Err(e) => {
+                                    log(
+                                        "daemon_events_lost",
+                                        &[("daemon", addr.clone()), ("error", e.to_string())],
+                                    );
                                     break;
                                 }
-                            }
-                            Err(e) => {
-                                log(
-                                    "daemon_events_lost",
-                                    &[("daemon", addr.clone()), ("error", e.to_string())],
-                                );
-                                break;
+                            };
+                            let Ok(ev) = serde_json::from_str::<Value>(&frame) else {
+                                continue;
+                            };
+                            match apply_frame(&shared, &addr, node.as_deref(), &ev, &mut last_seq) {
+                                Applied::Yes => shared.refresh.notify_one(),
+                                Applied::Skip => {}
+                                Applied::Resync => {
+                                    if poll_status(&shared, &addr).await.is_none() {
+                                        break;
+                                    }
+                                    last_full = Instant::now();
+                                    last_seq = None;
+                                }
                             }
                         }
-                    },
+                    }
                     Err(e) => {
                         let mut d = shared.daemons.lock().unwrap();
                         let v = d
@@ -1475,6 +1496,132 @@ fn peer_addresses(p: &Value, local: &[Net]) -> (Option<String>, Vec<String>) {
         .or_else(|| cands.first())
         .cloned();
     (best, cands)
+}
+
+/// What one /events frame did to the stored view.
+enum Applied {
+    /// The view moved. Readers should wake.
+    Yes,
+    /// Nothing to do: another node's replicated event, or a frame with no
+    /// patch in it.
+    Skip,
+    /// The view cannot be trusted. Re-read the snapshot.
+    Resync,
+}
+
+/// Fold one /events frame into the stored snapshot.
+///
+/// The first frame of a stream is a snapshot, which seeds the view without
+/// an HTTP read. After that each event carries a `patch`: paths into the
+/// snapshot and the rows to store there.
+///
+/// A daemon replicates its peers' events, and those describe the
+/// originating node's snapshot while this daemon's summarises its peers
+/// rather than holding their rows. So only the watched daemon's own events
+/// are applied, and every other node arrives on its own stream.
+fn apply_frame(
+    shared: &Arc<Shared>,
+    addr: &str,
+    node: Option<&str>,
+    ev: &Value,
+    last_seq: &mut Option<u64>,
+) -> Applied {
+    let mut d = shared.daemons.lock().unwrap();
+    let Some(view) = d.get_mut(addr) else {
+        return Applied::Skip;
+    };
+    if ev["type"].as_str() == Some("snapshot") {
+        view.status = Some(ev["data"].clone());
+        view.seen = Some(Instant::now());
+        view.error = None;
+        *last_seq = ev["seq"].as_u64();
+        return Applied::Yes;
+    }
+    if ev["node"].as_str() != node {
+        return Applied::Skip;
+    }
+    let Some(seq) = ev["seq"].as_u64() else {
+        return Applied::Resync;
+    };
+    match *last_seq {
+        Some(prev) if seq == prev + 1 => {}
+        Some(prev) => {
+            log(
+                "daemon_events_gap",
+                &[
+                    ("daemon", addr.to_string()),
+                    ("expected", (prev + 1).to_string()),
+                    ("got", seq.to_string()),
+                ],
+            );
+            return Applied::Resync;
+        }
+        // No snapshot frame yet, so there is no view to patch.
+        None => return Applied::Resync,
+    }
+    let Some(snapshot) = view.status.as_mut() else {
+        return Applied::Resync;
+    };
+    if !apply_patch(snapshot, ev) {
+        return Applied::Resync;
+    }
+    *last_seq = Some(seq);
+    view.seen = Some(Instant::now());
+    Applied::Yes
+}
+
+/// Store `value` at `at` in the snapshot, or remove that path when `value`
+/// is absent. Returns false when the path does not lead through objects.
+///
+/// Intermediate objects are created, since the first event for a collection
+/// names a row under a key the snapshot has never carried.
+fn patch_at(root: &mut Value, at: &[Value], value: Option<&Value>) -> bool {
+    let keys: Vec<&str> = at.iter().filter_map(Value::as_str).collect();
+    if keys.len() != at.len() {
+        return false;
+    }
+    let Some((leaf, parents)) = keys.split_last() else {
+        return false;
+    };
+    let mut cur = root;
+    for key in parents {
+        let Some(obj) = cur.as_object_mut() else {
+            return false;
+        };
+        cur = obj
+            .entry((*key).to_string())
+            .or_insert_with(|| Value::Object(Default::default()));
+    }
+    let Some(obj) = cur.as_object_mut() else {
+        return false;
+    };
+    match value {
+        Some(v) => obj.insert((*leaf).to_string(), v.clone()),
+        None => obj.remove(*leaf),
+    };
+    true
+}
+
+/// Apply one event's `patch` to a stored snapshot. Returns false when the
+/// caller has to re-read instead.
+fn apply_patch(snapshot: &mut Value, event: &Value) -> bool {
+    let Some(patch) = event["patch"].as_array() else {
+        return false;
+    };
+    // Every entry lands, or none does. A half-applied event leaves a view
+    // that is wrong with nothing to say so.
+    let mut staged = snapshot.clone();
+    for entry in patch {
+        let Some(at) = entry["at"].as_array() else {
+            return false;
+        };
+        let value = entry.get("value");
+        if !patch_at(&mut staged, at, value) {
+            return false;
+        }
+    }
+    *snapshot = staged;
+    true
 }
 
 /// One /status read. Returns the daemon's node id on success.
@@ -2514,6 +2661,67 @@ mod tests {
         let addr = l.local_addr().unwrap();
         drop(l);
         addr
+    }
+
+    fn snap() -> Value {
+        json!({
+            "node_id": "n1",
+            "groups": {"glm": {"actors": {"a:1": {"state": "spawning"}}}},
+        })
+    }
+
+    /// The event's row replaces the one the snapshot held, so a reader has
+    /// either the old row or the new one.
+    #[test]
+    fn a_patch_replaces_one_row() {
+        let mut v = snap();
+        let ev = json!({"patch": [
+            {"at": ["groups", "glm", "actors", "a:1"], "value": {"state": "running"}},
+        ]});
+        assert!(apply_patch(&mut v, &ev));
+        assert_eq!(v["groups"]["glm"]["actors"]["a:1"]["state"], "running");
+    }
+
+    /// An entry with no `value` removes the path, which is how a node_leave
+    /// and a driver_disconnected arrive.
+    #[test]
+    fn a_patch_with_no_value_removes_the_path() {
+        let mut v = snap();
+        let ev = json!({"patch": [{"at": ["groups", "glm", "actors", "a:1"]}]});
+        assert!(apply_patch(&mut v, &ev));
+        assert!(v["groups"]["glm"]["actors"]["a:1"].is_null());
+    }
+
+    /// The first event for a collection names a key the snapshot has never
+    /// carried, so the objects along the way are created.
+    #[test]
+    fn a_patch_creates_the_objects_it_walks_through() {
+        let mut v = snap();
+        let ev = json!({"patch": [
+            {"at": ["groups", "new", "agents", "g1"], "value": {"alive": true}},
+        ]});
+        assert!(apply_patch(&mut v, &ev));
+        assert_eq!(v["groups"]["new"]["agents"]["g1"]["alive"], true);
+    }
+
+    /// Every entry lands or none does. A half-applied event leaves a view
+    /// that is wrong with nothing to say so.
+    #[test]
+    fn a_patch_that_cannot_finish_changes_nothing() {
+        let mut v = snap();
+        let before = v.clone();
+        let ev = json!({"patch": [
+            {"at": ["islands"], "value": []},
+            {"at": ["node_id", "deeper"], "value": 1},
+        ]});
+        assert!(!apply_patch(&mut v, &ev));
+        assert_eq!(v, before);
+    }
+
+    #[test]
+    fn a_frame_with_no_patch_is_refused() {
+        let mut v = snap();
+        assert!(!apply_patch(&mut v, &json!({"type": "actor_running"})));
     }
 
     #[test]

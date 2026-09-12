@@ -1,26 +1,15 @@
 #!/bin/sh
-# What this box is, as the `machine` object an agent registers with:
+# Prints one JSON object on stdout: the machine an agent registers with.
+# Integers only. mentatd exits when this script fails or its output does not
+# parse, so the fallbacks below give a figure rather than an error.
 #
-#   {"memory": <bytes>, "cpus": <n>,
-#    "gpus": [{"index": 0, "vendor": "nvidia", "name": "RTX 6000",
-#              "memory": <bytes>, "uma": false}]}
-#
-# Printed on stdout, one line, integers only. A float does not survive the
-# JSON round trip a signature verifier takes.
-#
-# The daemon runs this instead of asking nvidia-smi itself, so a box with a
-# part this script does not know can be fixed by editing a file rather than
-# by building a binary. Exit non-zero with a reason on stderr and the agent
-# refuses to start, which is louder than registering a box with no devices.
-#
-# MENTAT_GPUS=<n> yields n placeholder devices, for the GPU-free CI and
-# macOS runs. It is the only override here: MENTAT_MACHINE bypasses this
-# script entirely and is read by the daemon.
+# MENTAT_GPUS is the only override read here. MENTAT_MACHINE replaces the
+# whole object and mentatd reads it instead.
 set -eu
 
 # Product names whose device addresses the system pool rather than board
-# memory of its own. On those `memory.total` is the pool or unavailable, and
-# a consumer adding it to the machine total would count it twice.
+# memory of its own. GB10 is the DGX Spark. The match is a substring, so add
+# a part here when one ships.
 UMA_NAMES="GB10"
 
 system_memory() {
@@ -29,7 +18,7 @@ system_memory() {
              END { if (!found) print 0 }' /proc/meminfo
         return
     fi
-    # macOS, where a dev box runs the tests with no /proc.
+    # macOS, which has no /proc.
     if sysctl -n hw.memsize 2>/dev/null; then
         return
     fi
@@ -45,6 +34,8 @@ cpu_count() {
 MEM=$(system_memory)
 CPUS=$(cpu_count)
 
+# Placeholder devices for a box with no GPU. A node whose agent registers
+# none cannot take a bundle rank.
 fake_gpus() {
     awk -v n="$1" 'BEGIN {
         sep = ""
@@ -56,8 +47,9 @@ fake_gpus() {
     }'
 }
 
-# index, name, memory.total in MiB, or `[N/A]` on a part with no board
-# memory. --nounits keeps the unit off the figure so awk gets a number.
+# index, name, and memory.total in MiB, or `[N/A]` on a part with no board
+# memory of its own. nounits keeps the unit off the figure so awk gets a
+# number.
 nvidia_gpus() {
     nvidia-smi --query-gpu=index,name,memory.total \
                --format=csv,noheader,nounits 2>/dev/null |

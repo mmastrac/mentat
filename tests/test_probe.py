@@ -100,7 +100,8 @@ def t08_a_box_whose_nvidia_smi_fails_has_no_gpus():
 
 
 def t09_every_figure_is_an_integer():
-    """A float does not survive the JSON round trip a verifier takes."""
+    """`Machine` types these as u64 and u32, so a float makes the output
+    unparseable and the agent exits at start."""
     m = probe("0, NVIDIA L40S, 46068\n")
     assert isinstance(m["memory"], int) and isinstance(m["cpus"], int), m
     for g in m["gpus"]:

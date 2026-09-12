@@ -12,7 +12,7 @@ mod announce;
 mod claim;
 mod config;
 mod daemon;
-mod gpu;
+mod machine;
 mod http;
 mod island;
 mod mesh;
@@ -120,14 +120,22 @@ const BUILTIN: &[&str] = &[
 
 /// `mentatd-<name>` beside this binary, else the first one on PATH.
 fn find_subcommand(name: &str) -> Option<std::path::PathBuf> {
-    let file = format!("mentatd-{name}");
+    find_sibling(&format!("mentatd-{name}"))
+}
+
+/// `file` beside this binary, else the first one on PATH.
+///
+/// An install puts every mentat program in one directory, so a sibling is
+/// the one that matches this build. PATH is the fallback for a dev tree,
+/// where the binary sits under `target/`.
+pub fn find_sibling(file: &str) -> Option<std::path::PathBuf> {
     let sibling = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join(&file)));
+        .and_then(|p| p.parent().map(|d| d.join(file)));
     let path = std::env::var_os("PATH").unwrap_or_default();
     sibling
         .into_iter()
-        .chain(std::env::split_paths(&path).map(|d| d.join(&file)))
+        .chain(std::env::split_paths(&path).map(|d| d.join(file)))
         .find(|p| p.is_file())
 }
 
