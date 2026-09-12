@@ -22,15 +22,14 @@ sys.path.insert(0, HERE)
 import mentat_testlib as tl  # noqa: E402
 from mentat_testlib import run_ok  # noqa: E402
 
-# The control and HTTP ports a daemon binds with no flags, which is what a
-# container reaching 127.0.0.1:6379 relies on.
+# Every port a daemon binds with no flags. A container reaching
+# 127.0.0.1:6379 is reaching its own box's daemon, and 6382 is where the
+# announcements it hears arrive.
 #
-# The announcement port is NOT the default here. A test daemon must never
-# join, or be heard by, a real cluster on the same LAN, and this suite now
-# listens as well as sends. The suite picks a free port for it instead, since
-# what is under test is that no address is configured, not which port the
-# datagram uses.
-CONTROL, HTTP = 6379, 6380
+# A real cluster may share the LAN. MENTAT_UNIVERSE keeps the two apart: a
+# receiver checks `universe` before the key, so each side drops the other's
+# announcements silently.
+CONTROL, HTTP, ANNOUNCE = 6379, 6380, 6382
 
 #: Every address variable a deployment could set. The point of the suite is
 #: that none of them is in the environment.
@@ -77,20 +76,23 @@ def clean_env(**extra):
 
 
 def setup():
-    for p in (CONTROL, HTTP):
+    for p in (CONTROL, HTTP, ANNOUNCE):
         if not port_free(p):
             print(f"port {p} is in use; skipping (these are the defaults under test)")
             raise SystemExit(0)
     tl.build_binary()
     tmp = tempfile.mkdtemp(prefix="mentat-auto-")
     # No --node-ip, no --port, no --peers: every flag left at its default.
-    announce = free_udp_port()
+    log_path = os.path.join(tmp, "daemon.log")
+    log_file = open(log_path, "w")
     daemon = subprocess.Popen(
         [tl.BINARY, "daemon", "--head-json", os.path.join(tmp, "head.json")],
         env=clean_env(
             MENTAT_SECRET=tl.TEST_SECRET,
-            MENTAT_ANNOUNCE_PORT=str(announce),
+            MENTAT_UNIVERSE=tl.TEST_UNIVERSE,
         ),
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
     )
     tl._children.append(daemon)
     deadline = time.time() + 15
@@ -102,7 +104,11 @@ def setup():
             time.sleep(0.05)
     else:
         raise TimeoutError("daemon never bound the default port")
-    state.update(tmp=tmp, daemon=daemon, announce=announce)
+    def daemon_log():
+        with open(log_path) as f:
+            return f.read().splitlines()
+
+    state.update(tmp=tmp, daemon=daemon, daemon_log=daemon_log)
 
 
 def status(group=None):
@@ -252,6 +258,7 @@ def t04_two_daemons_mesh_with_no_seed_list():
         other = next(u for n, (_, _, u) in ports.items() if n != name)
         env = clean_env(
             MENTAT_SECRET=tl.TEST_SECRET,
+            MENTAT_UNIVERSE=tl.TEST_UNIVERSE,
             MENTAT_ANNOUNCE_PORT=str(udp),
             MENTAT_ANNOUNCE_INTERVAL_S="1",
             MENTAT_ELECTION_HOLD_DOWN_MS="500",
@@ -302,7 +309,52 @@ def t04_two_daemons_mesh_with_no_seed_list():
             p.terminate()
 
 
-def t05_the_router_with_no_seed_list_finds_the_daemon():
+def t05_a_foreign_universe_and_a_wrong_key_are_both_refused():
+    """The two checks a datagram passes before the listener acts on it.
+
+    A foreign universe belongs to another cluster on the same LAN, which is
+    routine, so the drop is silent. A matching universe with a bad signature
+    is an intruder, so the drop is logged.
+    """
+    import hashlib
+    import hmac as _hmac
+
+    def signed(universe, key, node):
+        payload = {
+            "proto": "0.99",
+            "node_id": node,
+            "universe": universe,
+            "control": "10.9.9.9:6379",
+            "http": "10.9.9.9:6380",
+            "addrs": ["10.9.9.9"],
+            "addr_tags": {},
+            "boot_id": "deadbeefdeadbeef",
+            "seq": 1,
+            "t": int(time.time()),
+        }
+        canon = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        sig = _hmac.new(key.encode(), canon.encode(), hashlib.sha256).hexdigest()
+        return json.dumps({"p": payload, "sig": sig}).encode()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    before = len(state["daemon_log"]())
+    # Another cluster. Dropped before the key is checked, with no log line.
+    sock.sendto(signed("someone-else", tl.TEST_SECRET, "n-other"), ("127.0.0.1", ANNOUNCE))
+    # This cluster, wrong key. Refused with one log line naming the source.
+    sock.sendto(signed(tl.TEST_UNIVERSE, "not-the-key", "n-intruder"), ("127.0.0.1", ANNOUNCE))
+    sock.close()
+    time.sleep(2)
+
+    # Neither one becomes a peer.
+    peers = status().get("peers", {})
+    assert "n-other" not in peers and "n-intruder" not in peers, peers
+    added = state["daemon_log"]()[before:]
+    rejected = [l for l in added if "announce_rejected" in l]
+    assert len(rejected) == 1, added
+    assert "someone-else" not in "".join(added), added
+
+
+def t06_the_router_with_no_seed_list_finds_the_daemon():
     """MENTAT_DAEMONS empty. The only way in is the UDP announcement."""
     tl.build_serve()
     port = tl.free_port()
@@ -311,7 +363,7 @@ def t05_the_router_with_no_seed_list_finds_the_daemon():
         POLL_INTERVAL_S="1",
         PROBE_INTERVAL_S="0.5",
         MENTAT_SECRET=tl.TEST_SECRET,
-        MENTAT_ANNOUNCE_PORT=str(state["announce"]),
+        MENTAT_UNIVERSE=tl.TEST_UNIVERSE,
         ALLOWED_SOURCES="local",
     )
     env["MENTAT_DAEMONS"] = ""

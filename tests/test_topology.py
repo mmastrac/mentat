@@ -25,6 +25,7 @@ from mentat_testlib import Daemon, run_ok  # noqa: E402
 FAST = {
     # Announcements are signed, so every process here shares one key.
     "MENTAT_SECRET": tl.TEST_SECRET,
+    "MENTAT_UNIVERSE": tl.TEST_UNIVERSE,
     "MENTAT_PEER_STATUS_INTERVAL_MS": "200",
     "MENTAT_PEER_STALE_AFTER_MS": "1000",
     "MENTAT_PEER_DEAD_AFTER_MS": "1500",
@@ -446,6 +447,7 @@ def t09_the_router_watches_each_node_once():
              "MODEL_TTL_S": "4",
              "MENTAT_ANNOUNCE_PORT": "0",
              "MENTAT_SECRET": tl.TEST_SECRET,
+             "MENTAT_UNIVERSE": tl.TEST_UNIVERSE,
              # The simulated net's addresses are on no interface here, so
              # `local` alone would reject every one. It stays in the list
              # for the loopback this test reads /status.json over.

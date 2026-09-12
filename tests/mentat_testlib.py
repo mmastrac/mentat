@@ -18,6 +18,11 @@ import urllib.request
 #: daemon and the router have to agree on one.
 TEST_SECRET = "test-secret"
 
+#: The cluster a test belongs to. A receiver checks `universe` before the
+#: key, so a test daemon and a production one on the same LAN drop each
+#: other's announcements silently.
+TEST_UNIVERSE = "mentat-test"
+
 #: The machine probe as it sits in the tree. An installed mentat finds it
 #: beside the binary. A test runs out of cargo's target dir, where there is
 #: no such sibling.
@@ -121,6 +126,7 @@ class Cluster:
                 # Announcements are signed or absent, so every process in a
                 # test cluster shares one key.
                 "MENTAT_SECRET": TEST_SECRET,
+                "MENTAT_UNIVERSE": TEST_UNIVERSE,
                 **self.daemon_env,
             },
         )
@@ -149,6 +155,7 @@ class Cluster:
             "MENTAT_GPUS": str(gpus),
             "MENTAT_MACHINE_PROBE": MACHINE_PROBE,
             "MENTAT_SECRET": TEST_SECRET,
+            "MENTAT_UNIVERSE": TEST_UNIVERSE,
             "MENTAT_NODE_IP": node_ip,
             "CONTAINER_NAME": container,
             "MENTAT_SOCK_DIR": self.tmp,
@@ -241,6 +248,7 @@ class Daemon:
                 # Announcements are signed or absent, so every process in a
                 # test cluster shares one key.
                 "MENTAT_SECRET": TEST_SECRET,
+                "MENTAT_UNIVERSE": TEST_UNIVERSE,
                 **(env or {}),
             },
         )
@@ -271,6 +279,7 @@ class Daemon:
             "MENTAT_GPUS": str(gpus),
             "MENTAT_MACHINE_PROBE": MACHINE_PROBE,
             "MENTAT_SECRET": TEST_SECRET,
+            "MENTAT_UNIVERSE": TEST_UNIVERSE,
             "MENTAT_NODE_IP": self.node_ip,
             "CONTAINER_NAME": container,
             "MENTAT_SOCK_DIR": tmp or self.tmp,
