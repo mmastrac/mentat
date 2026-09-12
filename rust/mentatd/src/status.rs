@@ -109,6 +109,23 @@ pub fn claim_row(c: &crate::state::ClaimInfo) -> Value {
     })
 }
 
+pub fn peer_row(p: &PeerInfo) -> Value {
+    json!({
+        "node_ip": p.node_ip,
+        "link_ip": p.link_ip,
+        "addrs": p.addrs,
+        "addr_tags": p.addr_tags,
+        "addr_ifaces": p.addr_ifaces,
+        "probes": probe_table(p),
+        "control_port": p.control_port,
+        "http_port": p.http_port,
+        "alive": p.alive,
+        "stale": p.stale,
+        "last_seen_ms": p.last_seen_ms,
+        "dead_since_ms": p.dead_since_ms,
+    })
+}
+
 pub fn client_row(c: &crate::state::ClientInfo) -> Value {
     json!({
         "group": c.group,

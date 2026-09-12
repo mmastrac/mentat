@@ -145,32 +145,54 @@ fn metrics(shared: &SharedRef) -> String {
     groups.sort();
     groups.dedup();
 
-    out.push_str("# TYPE mentat_agents gauge\n# TYPE mentat_gpus_total gauge\n# TYPE mentat_gpus_used gauge\n");
+    out.push_str(
+        "# TYPE mentat_agents gauge\n# TYPE mentat_gpus_total gauge\n\
+# TYPE mentat_gpus_used gauge\n# TYPE mentat_gpu_memory_bytes gauge\n\
+# TYPE mentat_memory_bytes gauge\n",
+    );
     for g in &groups {
-        let alive = st.agents.values().filter(|a| a.alive && &a.group == g);
-        let mut n = 0usize;
-        let mut total = 0usize;
-        let mut free = 0usize;
-        let mut vendor = String::from("nvidia");
-        for a in alive {
-            n += 1;
-            total += a.machine.gpus.len();
-            free += st.free_gpus_of(&a.id).len();
-            vendor = a
-                .machine
-                .gpus
-                .first()
-                .map(|g| g.vendor.clone())
-                .unwrap_or_default();
+        let alive: Vec<&crate::state::AgentInfo> = st
+            .agents
+            .values()
+            .filter(|a| a.alive && &a.group == g)
+            .collect();
+        out.push_str(&format!("mentat_agents{{group=\"{g}\"}} {}\n", alive.len()));
+        out.push_str(&format!(
+            "mentat_memory_bytes{{group=\"{g}\"}} {}\n",
+            alive.iter().map(|a| a.machine.memory).sum::<u64>()
+        ));
+        // One series per vendor present. A box may hold two models, and a
+        // total across them would not say what the group can place.
+        let mut vendors: Vec<&str> = alive
+            .iter()
+            .flat_map(|a| a.machine.gpus.iter().map(|d| d.vendor.as_str()))
+            .collect();
+        vendors.sort();
+        vendors.dedup();
+        for v in vendors {
+            let mut total = 0usize;
+            let mut used = 0usize;
+            let mut bytes = 0u64;
+            for a in &alive {
+                let free = st.free_gpus_of(&a.id);
+                for d in a.machine.gpus.iter().filter(|d| d.vendor == v) {
+                    total += 1;
+                    bytes += d.memory;
+                    if !free.contains(&d.index) {
+                        used += 1;
+                    }
+                }
+            }
+            out.push_str(&format!(
+                "mentat_gpus_total{{group=\"{g}\",vendor=\"{v}\"}} {total}\n"
+            ));
+            out.push_str(&format!(
+                "mentat_gpus_used{{group=\"{g}\",vendor=\"{v}\"}} {used}\n"
+            ));
+            out.push_str(&format!(
+                "mentat_gpu_memory_bytes{{group=\"{g}\",vendor=\"{v}\"}} {bytes}\n"
+            ));
         }
-        out.push_str(&format!(
-            "mentat_agents{{group=\"{g}\",vendor=\"{vendor}\"}} {n}\n"
-        ));
-        out.push_str(&format!("mentat_gpus_total{{group=\"{g}\"}} {total}\n"));
-        out.push_str(&format!(
-            "mentat_gpus_used{{group=\"{g}\"}} {}\n",
-            total - free
-        ));
     }
 
     out.push_str("# TYPE mentat_actors gauge\n");
@@ -207,6 +229,8 @@ fn metrics(shared: &SharedRef) -> String {
             "mentat_actor_exits_total{{kind=\"{kind}\"}} {v}\n"
         ));
     }
+    out.push_str("# TYPE mentat_relayed_total counter\n");
+    out.push_str(&format!("mentat_relayed_total {}\n", st.counters.relayed));
     out.push_str("# TYPE mentat_calls_total counter\n");
     out.push_str(&format!("mentat_calls_total {}\n", st.counters.calls_total));
     out.push_str("# TYPE mentat_clients_total counter\n");

@@ -485,20 +485,23 @@ fn endpoint_of(
     allowed: &Allow,
     local: &[Net],
 ) -> Option<Endpoint> {
-    let note = agent["service_notes"][svc]
+    let entry = &agent["services"][svc];
+    let note = entry["note"]
         .as_str()
         .filter(|n| !n.is_empty())
         .map(str::to_string);
-    if let Some(url) = agent["services"][svc].as_str().filter(|u| !u.is_empty()) {
+    let port = entry["port"].as_u64()?;
+    let path = entry["path"].as_str().unwrap_or_default();
+    // A host the operator named is used as written and passes no check:
+    // naming one is the operator saying which address to use.
+    if let Some(host) = entry["host"].as_str().filter(|h| !h.is_empty()) {
+        let url = format!("http://{host}:{port}{path}");
         return Some(Endpoint {
-            candidates: vec![url.to_string()],
-            announced: url.to_string(),
+            candidates: vec![url.clone()],
+            announced: url,
             note,
         });
     }
-    let sp = &agent["services_ports"][svc];
-    let port = sp["port"].as_u64()?;
-    let path = sp["path"].as_str().unwrap_or_default();
     let node_ip = agent["node_ip"].as_str().unwrap_or_default();
     let mut hosts: Vec<String> = nodes
         .get(node_ip)
@@ -565,16 +568,20 @@ pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
             continue;
         };
         for (name, g) in snap["groups"].as_object().into_iter().flatten() {
+            // Every collection is keyed by id, so a row is a value here.
             let agents: Vec<&Value> = g["agents"]
-                .as_array()
+                .as_object()
                 .into_iter()
                 .flatten()
+                .map(|(_, a)| a)
                 .filter(|a| a["alive"].as_bool().unwrap_or(false))
                 .collect();
-            let actors = g["actors"].as_array().into_iter().flatten();
-            let placed = g["actors"].as_array().is_some_and(|a| !a.is_empty());
+            let actors = g["actors"].as_object();
+            let placed = actors.is_some_and(|a| !a.is_empty());
             let running = actors
-                .filter(|a| a["state"].as_str() == Some("running"))
+                .into_iter()
+                .flatten()
+                .filter(|(_, a)| a["state"].as_str() == Some("running"))
                 .count();
             let resolve = |a: &Value, svc: &str| {
                 endpoint_of(a, svc, &nodes, &shared.cfg.allowed_sources, &local)
@@ -587,7 +594,12 @@ pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
                     .iter()
                     .filter_map(|a| {
                         resolve(a, "openai")
-                            .map(|e| (e, a["provider"].as_str().unwrap_or_default().to_string()))
+                            .map(|e| {
+                                let p = a["services"]["openai"]["provider"]
+                                    .as_str()
+                                    .unwrap_or_default();
+                                (e, p.to_string())
+                            })
                     })
                     .collect(),
             );
@@ -598,11 +610,7 @@ pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
                 .iter()
                 .filter_map(|a| {
                     resolve(a, "mcp").map(|m| {
-                        (
-                            a["services"]["openai"].is_null()
-                                && a["services_ports"]["openai"].is_null(),
-                            m,
-                        )
+                        (a["services"]["openai"].is_null(), m)
                     })
                 })
                 .min_by(|x, y| (x.0, x.1.best()).cmp(&(y.0, y.1.best())))
@@ -1221,7 +1229,18 @@ async fn udp_listener(shared: Arc<Shared>) {
     // given verifies nothing and drops every signed announcement, so it
     // watches an empty cluster and says only that each datagram failed.
     let key = match secret::load() {
-        Ok(k) => k,
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            // Every announcement is signed, so a listener with no key can
+            // verify nothing and would watch an empty cluster while saying
+            // only that each datagram failed.
+            log(
+                "announce_listen_off",
+                &[("why", "no MENTAT_SECRET or MENTAT_SECRET_FILE".to_string())],
+            );
+            eprintln!("mentatd-serve: discovery needs MENTAT_SECRET or MENTAT_SECRET_FILE");
+            std::process::exit(1);
+        }
         Err(why) => {
             log("announce_secret_unusable", &[("error", why.clone())]);
             eprintln!("mentatd-serve: {why}");
@@ -1232,18 +1251,12 @@ async fn udp_listener(shared: Arc<Shared>) {
         "announce_listen",
         &[
             ("port", port.to_string()),
-            (
-                "verify",
-                match key {
-                    Some(_) => "required".to_string(),
-                    None => "off (no MENTAT_SECRET)".to_string(),
-                },
-            ),
+            ("verify", "required".to_string()),
         ],
     );
     shared
         .verify
-        .store(key.is_some(), std::sync::atomic::Ordering::Relaxed);
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     // node_id -> (boot_id, last accepted seq). Bounds replay within a boot.
     let mut seen: HashMap<String, (String, u64)> = HashMap::new();
     // Sources already complained about, so a 5s broadcast cannot flood the
@@ -1253,7 +1266,9 @@ async fn udp_listener(shared: Arc<Shared>) {
     // unroutable-looking, so the note lands once rather than every round.
     let mut noted: HashSet<String> = HashSet::new();
     let universe = secret::universe();
-    let mut buf = [0u8; 2048];
+    // One Ethernet frame, which is the sender's own cap. Anything longer
+    // is not an announcement this build wrote.
+    let mut buf = [0u8; 1400];
     loop {
         let Ok((n, src)) = sock.recv_from(&mut buf).await else {
             continue;
@@ -1265,73 +1280,50 @@ async fn udp_listener(shared: Arc<Shared>) {
             Some(u) if u != universe => continue,
             _ => {}
         }
-        // A key makes signatures mandatory, so a stripped signature or a
-        // replayed version-1 datagram cannot downgrade this listener.
-        let v = match &key {
-            Some(k) => {
-                let Some(p) = secret::verify(&buf[..n], k) else {
-                    // A wrong key and a stripped signature look the same from
-                    // here, and both mean the sender cannot be trusted.
-                    if warned.insert(src.ip().to_string()) {
-                        log(
-                            "announce_rejected",
-                            &[
-                                ("src", src.ip().to_string()),
-                                ("why", "bad signature or unsigned".to_string()),
-                            ],
-                        );
-                    }
-                    continue;
-                };
-                if p["mentat_announce"].as_u64() != Some(secret::SIGNED_VERSION) {
-                    continue;
-                }
-                let Some(t) = p["t"].as_f64() else { continue };
-                if !secret::fresh(t, secret::now_s()) {
-                    continue;
-                }
-                let node = p["node_id"].as_str().unwrap_or_default().to_string();
-                let boot = p["boot_id"].as_str().unwrap_or_default().to_string();
-                let seq = p["seq"].as_u64().unwrap_or(0);
-                if node.is_empty() || boot.is_empty() {
-                    continue;
-                }
-                // A restart resets seq, which the new boot_id distinguishes
-                // from a replay. One announcement per interface repeats a
-                // seq. Dropping the repeat costs nothing, since the address
-                // it carries is the same one.
-                match seen.get(&node) {
-                    Some((b, last)) if *b == boot && seq <= *last => continue,
-                    _ => seen.insert(node, (boot, seq)),
-                };
-                p
+        let Some(v) = secret::verify(&buf[..n], &key) else {
+            // A wrong key and a stripped signature look the same from here,
+            // and both mean the sender cannot be trusted.
+            if warned.insert(src.ip().to_string()) {
+                log(
+                    "announce_rejected",
+                    &[
+                        ("src", src.ip().to_string()),
+                        ("why", "bad signature or unsigned".to_string()),
+                    ],
+                );
             }
-            None => {
-                let Ok(p) = serde_json::from_slice::<Value>(&buf[..n]) else {
-                    continue;
-                };
-                if p["mentat_announce"].as_u64() != Some(1) {
-                    // A signed announcement to a listener with no key. Left
-                    // unverified it would be a downgrade, so it is dropped --
-                    // and said out loud, since the cause is one missing
-                    // variable and the symptom is an empty route table.
-                    if p.get("sig").is_some() && warned.insert(src.ip().to_string()) {
-                        log(
-                            "announce_unverifiable",
-                            &[
-                                ("src", src.ip().to_string()),
-                                (
-                                    "why",
-                                    "signed announcement, and this router has no MENTAT_SECRET"
-                                        .to_string(),
-                                ),
-                            ],
-                        );
-                    }
-                    continue;
-                }
-                p
+            continue;
+        };
+        let offered = v["proto"].as_str().unwrap_or_default();
+        if !proto_major_matches(offered) {
+            if warned.insert(format!("proto:{}", src.ip())) {
+                log(
+                    "announce_proto_mismatch",
+                    &[
+                        ("src", src.ip().to_string()),
+                        ("offered", offered.to_string()),
+                        ("here", PROTO.to_string()),
+                    ],
+                );
             }
+            continue;
+        }
+        let Some(t) = v["t"].as_u64() else { continue };
+        if !secret::fresh(t as f64, secret::now_s()) {
+            continue;
+        }
+        let node = v["node_id"].as_str().unwrap_or_default().to_string();
+        let boot = v["boot_id"].as_str().unwrap_or_default().to_string();
+        let seq = v["seq"].as_u64().unwrap_or(0);
+        if node.is_empty() || boot.is_empty() {
+            continue;
+        }
+        // A restart resets seq, which the new boot_id distinguishes from a
+        // replay. One announcement per interface repeats a seq, and dropping
+        // the repeat costs nothing: the address it carries is the same one.
+        match seen.get(&node) {
+            Some((b, last)) if *b == boot && seq <= *last => continue,
+            _ => seen.insert(node, (boot, seq)),
         };
         let Some(http) = v["http"].as_str() else {
             continue;
@@ -1731,6 +1723,22 @@ async fn probe_candidates(
 // ---------------------------------------------------------------------------
 // HTTP plumbing shared by the modules
 // ---------------------------------------------------------------------------
+
+/// The wire version this router speaks. A daemon of another major is
+/// dropped: its snapshot would be read with the wrong shapes.
+pub const PROTO: &str = "0.99";
+
+fn proto_major_matches(peer: &str) -> bool {
+    fn major(v: &str) -> Option<&str> {
+        let (maj, rest) = v.split_once('.')?;
+        rest.parse::<u32>().ok()?;
+        Some(maj)
+    }
+    match (major(PROTO), major(peer)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
 
 pub fn full_body(bytes: impl Into<Bytes>) -> BoxedBody {
     Full::new(bytes.into()).map_err(|e| match e {}).boxed()
@@ -2284,8 +2292,7 @@ mod tests {
         collect_node_addrs(&snap, &mut nodes);
         let agent = serde_json::json!({
             "node_ip": "10.100.0.1",
-            "services": {},
-            "services_ports": {"openai": {"port": 8000, "path": "/v1"}},
+            "services": {"openai": {"host": "", "port": 8000, "path": "/v1"}},
         });
         let allowed = Allow::parse("10.0.0.0/8, 192.168.1.0/24");
         let ep = endpoint_of(&agent, "openai", &nodes, &allowed, &subnets()).unwrap();
@@ -2307,8 +2314,7 @@ mod tests {
     fn a_verbatim_url_is_neither_re_derived_nor_gated() {
         let agent = serde_json::json!({
             "node_ip": "10.100.0.1",
-            "services": {"openai": "http://203.0.113.7:8000/v1"},
-            "services_ports": {},
+            "services": {"openai": {"host": "203.0.113.7", "port": 8000, "path": "/v1"}},
         });
         let ep = endpoint_of(
             &agent,
@@ -2334,8 +2340,7 @@ mod tests {
         );
         let agent = serde_json::json!({
             "node_ip": "10.100.0.1",
-            "services": {},
-            "services_ports": {"openai": {"port": 8000, "path": "/v1"}},
+            "services": {"openai": {"host": "", "port": 8000, "path": "/v1"}},
         });
         let ep = endpoint_of(
             &agent,

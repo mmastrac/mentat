@@ -15,9 +15,9 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Format version carried in `mentat_announce`. Unsigned announcements are
-/// version 1, so a listener holding a key can refuse them by version alone.
-pub const SIGNED_VERSION: u64 = 2;
+/// The wire version an announcement payload carries. Every announcement is
+/// signed, so `proto` is the only discriminator a listener needs.
+pub const PROTO: &str = "0.99";
 
 /// A datagram older or newer than this is refused. Wide enough for clock
 /// skew between cluster boxes, narrow enough that a captured packet stops
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn announcement_survives_the_listener_path() {
         let payload = serde_json::json!({
-            "mentat_announce": SIGNED_VERSION,
+            "proto": "0.99",
             "node_id": "6d656e7461743a3137322e31382e302e33",
             "control": "172.18.0.3:6379",
             "http": "172.18.0.3:6380",

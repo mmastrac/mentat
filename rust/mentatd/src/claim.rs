@@ -46,6 +46,9 @@ pub struct SetReq {
     /// GPUs per member, one entry per node wanted.
     pub bundles: Vec<f64>,
     pub link: Link,
+    /// Pins the set to one GPU vendor. Empty lets the daemon pick one, and
+    /// it still picks only one: no collective spans vendors.
+    pub vendor: String,
 }
 
 /// A requirement between two sets.
@@ -92,6 +95,9 @@ pub struct Topology {
     pub free_gpus: BTreeMap<NodeId, f64>,
     /// Hostname per node, carried through for the answer to be readable.
     pub hosts: BTreeMap<NodeId, String>,
+    /// The GPU vendor each node offers. One per node today: a set is placed
+    /// on one vendor, since no collective spans two.
+    pub vendors: BTreeMap<NodeId, String>,
 }
 
 impl Topology {
@@ -151,15 +157,21 @@ pub struct Path {
 }
 
 impl Path {
-    fn to_json(&self, hosts: &BTreeMap<NodeId, String>) -> Value {
-        let name = |n: &NodeId| hosts.get(n).cloned().unwrap_or_else(|| n.clone());
+    /// Each end names its set, so a reader with three sets can tell which
+    /// `between` answered which request without recomputing the solve.
+    fn to_json(&self, hosts: &BTreeMap<NodeId, String>, sets: &BTreeMap<NodeId, String>) -> Value {
+        let end = |n: &NodeId, p: &Port| {
+            json!({
+                "set": sets.get(n).cloned().unwrap_or_default(),
+                "node": n,
+                "host": hosts.get(n).cloned().unwrap_or_else(|| n.clone()),
+                "addr": p.addr,
+                "iface": p.iface,
+            })
+        };
         json!({
-            "from": name(&self.from),
-            "to": name(&self.to),
-            "from_node": self.from,
-            "to_node": self.to,
-            "local": {"addr": self.local.addr, "iface": self.local.iface},
-            "remote": {"addr": self.remote.addr, "iface": self.remote.iface},
+            "from": end(&self.from, &self.local),
+            "to": end(&self.to, &self.remote),
             "rtt_ms": self.rtt_ms,
         })
     }
@@ -170,6 +182,9 @@ impl Path {
 pub struct Member {
     pub node: NodeId,
     pub bind: Port,
+    /// The GPU vendor this member's bundles sit on. One vendor per set,
+    /// since no collective spans vendors.
+    pub vendor: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,6 +206,7 @@ impl Solution {
                         json!({
                             "node": m.node,
                             "host": name(&m.node),
+                            "vendor": m.vendor,
                             "bind": m.bind.addr,
                             "iface": m.bind.iface,
                             "tags": m.bind.tags,
@@ -200,9 +216,20 @@ impl Solution {
                 (k.clone(), Value::Array(members))
             })
             .collect();
+        // Which set each node landed in, so a `between` end can name it.
+        let mut of_set: BTreeMap<NodeId, String> = BTreeMap::new();
+        for (k, ms) in &self.sets {
+            for m in ms {
+                of_set.insert(m.node.clone(), k.clone());
+            }
+        }
         json!({
             "sets": sets,
-            "between": self.between.iter().map(|p| p.to_json(&t.hosts)).collect::<Vec<_>>(),
+            "between": self
+                .between
+                .iter()
+                .map(|p| p.to_json(&t.hosts, &of_set))
+                .collect::<Vec<_>>(),
         })
     }
 }
@@ -338,6 +365,11 @@ pub fn solve(t: &Topology, req: &Request) -> Result<Solution, String> {
             members.push(Member {
                 node: n.clone(),
                 bind,
+                vendor: if s.vendor.is_empty() {
+                    t.vendors.get(n).cloned().unwrap_or_default()
+                } else {
+                    s.vendor.clone()
+                },
             });
         }
         sets.insert(s.name.clone(), members);
@@ -461,6 +493,7 @@ pub fn parse(shape: &Value) -> Result<Request, String> {
                 name,
                 bundles,
                 link: Link::parse(s["link"].as_str().unwrap_or("ip"))?,
+                vendor: s["vendor"].as_str().unwrap_or_default().to_string(),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -553,6 +586,11 @@ pub fn topology(st: &crate::state::State) -> Topology {
     // A node with no agent has no GPUs to give.
     for a in st.agents.values().filter(|a| a.alive) {
         *t.free_gpus.entry(a.node_id.clone()).or_insert(0.0) += st.free_gpus_of(&a.id).len() as f64;
+        if let Some(g) = a.machine.gpus.first() {
+            t.vendors
+                .entry(a.node_id.clone())
+                .or_insert_with(|| g.vendor.clone());
+        }
         // An agent can register a node no daemon peers for, which leaves it
         // holding GPUs with no address to bind. What it told us on register
         // is an address, so it stands in. It carries no tag, which limits
@@ -658,6 +696,7 @@ mod tests {
                     name: n.to_string(),
                     bundles: vec![1.0; *k],
                     link: *l,
+                        vendor: String::new(),
                 })
                 .collect(),
             between: between

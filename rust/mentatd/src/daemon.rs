@@ -190,10 +190,14 @@ fn sweep_lifecycle(shared: &SharedRef) {
                 ("why", why.clone()),
             ],
         );
-        st.emit(
-            "pg_timeout",
-            json!({ "group": group, "pg_id": pg_id, "waited_ms": age, "why": why }),
-        );
+        let row = st.pgs.get(&pg_id).map(crate::status::pg_row);
+        if let Some(row) = row {
+            st.emit_patch(
+                "pg_timeout",
+                vec![Patch::set(&["groups", &group, "placement_groups", &pg_id], row)],
+                &format!("waited {age} ms: {why}"),
+            );
+        }
         shared.cv.notify_all();
     }
 
@@ -224,10 +228,14 @@ fn sweep_lifecycle(shared: &SharedRef) {
                 ("down_ms", down.to_string()),
             ],
         );
-        st.emit(
-            "agent_degraded",
-            json!({ "group": group, "agent": agent, "down_ms": down }),
-        );
+        let row = st.agents.get(&agent).map(|a| crate::status::agent_row(&st, a));
+        if let Some(row) = row {
+            st.emit_patch(
+                "agent_degraded",
+                vec![Patch::set(&["groups", &group, "agents", &agent], row)],
+                &format!("down {down} ms"),
+            );
+        }
     }
     for (agent, group, down) in give_up {
         let orphaned: Vec<String> = st
@@ -245,11 +253,14 @@ fn sweep_lifecycle(shared: &SharedRef) {
                 ("actors", orphaned.len().to_string()),
             ],
         );
-        st.emit(
-            "agent_dead",
-            json!({ "group": group, "agent": agent, "down_ms": down,
-                    "actors": orphaned.len() }),
-        );
+        let row = st.agents.get(&agent).map(|a| crate::status::agent_row(&st, a));
+        if let Some(row) = row {
+            st.emit_patch(
+                "agent_dead",
+                vec![Patch::set(&["groups", &group, "agents", &agent], row)],
+                &format!("down {down} ms, {} actors orphaned", orphaned.len()),
+            );
+        }
         for id in orphaned {
             mark_actor_dead(
                 &mut st,
@@ -696,10 +707,14 @@ fn client_conn(
         let node_ip = st.node_ip.clone();
         let gcs = st.control_addr.clone();
         if session {
-            st.emit(
-                "driver_connected",
-                json!({ "group": group, "client_id": client_id, "kind": kind }),
-            );
+            let row = st.clients.get(&client_id).map(crate::status::client_row);
+            if let Some(row) = row {
+                st.emit_patch(
+                    "driver_connected",
+                    vec![Patch::set(&["clients", &client_id], row)],
+                    "",
+                );
+            }
         }
         st.client_links.push((client_id.clone(), writer.clone()));
         let _ = writer.send(
@@ -887,10 +902,14 @@ fn handle_client_msg(
                     removed_ms: None,
                 },
             );
-            st.emit(
-                "pg_created",
-                json!({ "group": group, "pg_id": pg_id, "bundles": n }),
-            );
+            let row = st.pgs.get(&pg_id).map(crate::status::pg_row);
+            if let Some(row) = row {
+                st.emit_patch(
+                    "pg_created",
+                    vec![Patch::set(&["groups", &group, "placement_groups", &pg_id], row)],
+                    "",
+                );
+            }
             try_place(&mut st, &shared.cv);
             (
                 // The id is also the handle `ref_get` resolves once the
@@ -1414,11 +1433,14 @@ fn create_actor(
         },
     );
     st.counters.actors_spawned += 1;
-    st.emit(
-        "actor_spawning",
-        json!({ "group": group, "actor_id": actor_id, "name": name,
-                "agent": agent_id, "node_id": node_id }),
-    );
+    let row = st.actors.get(&actor_id).map(crate::status::actor_row);
+    if let Some(row) = row {
+        st.emit_patch(
+            "actor_spawning",
+            vec![Patch::set(&["groups", &group, "actors", &actor_id], row)],
+            "",
+        );
+    }
 
     let gcs = st.control_addr.clone();
     let send_res = agent_writer.send(
@@ -1642,10 +1664,15 @@ pub fn mark_actor_dead(st: &mut State, cv: &std::sync::Condvar, actor_id: &str, 
         actor.queued_calls.clear();
         let group = actor.group.clone();
         let name = actor.name.clone();
-        st.emit(
-            "actor_dead",
-            json!({ "group": group, "actor_id": actor_id, "name": name, "reason": reason }),
-        );
+        let row = st.actors.get(actor_id).map(crate::status::actor_row);
+        if let Some(row) = row {
+            st.emit_patch(
+                "actor_dead",
+                vec![Patch::set(&["groups", &group, "actors", actor_id], row)],
+                reason,
+            );
+        }
+        let _ = name;
     }
     for (rid, r) in st.refs.iter_mut() {
         if r.actor.as_deref() == Some(actor_id) && matches!(r.state, RefState::Pending) {
@@ -1669,9 +1696,10 @@ fn reap_client(shared: &SharedRef, client_id: &str) {
         let mut st = shared.st.lock().unwrap();
         let group = client_group(&st, client_id);
         st.clients.remove(client_id);
-        st.emit(
+        st.emit_patch(
             "driver_disconnected",
-            json!({ "group": group, "client_id": client_id }),
+            vec![Patch::remove(&["clients", client_id])],
+            "",
         );
         group
     };
@@ -1719,7 +1747,7 @@ fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
         if !ids.is_empty() {
             st.emit(
                 "driver_gone_reaping",
-                json!({ "group": group, "client_id": client_id, "actors": ids.len() }),
+                json!({ "patch": [], "actors": ids.len() }),
             );
         }
         ids
@@ -1803,11 +1831,15 @@ pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
             pg.island = island;
             pg.pending_reason = None;
         }
-        st.emit(
-            "pg_ready",
-            json!({ "group": group, "pg_id": pg_id, "bundles": n,
-                    "island_nodes": members }),
-        );
+        let row = st.pgs.get(&pg_id).map(crate::status::pg_row);
+        if let Some(row) = row {
+            st.emit_patch(
+                "pg_ready",
+                vec![Patch::set(&["groups", &group, "placement_groups", &pg_id], row)],
+                "",
+            );
+        }
+        let _ = (n, members);
         cv.notify_all();
     }
 }
@@ -2441,7 +2473,19 @@ fn agent_conn(
                             a.state = ActorState::Running;
                         }
                     }
-                    st.emit("actor_running", json!({ "actor_id": actor_id, "pid": pid }));
+                    // The group comes from the actor: a path needs it, and
+                    // the event used to carry only the id and pid.
+                    let found = st
+                        .actors
+                        .get(&actor_id)
+                        .map(|a| (a.group.clone(), crate::status::actor_row(a)));
+                    if let Some((group, row)) = found {
+                        st.emit_patch(
+                            "actor_running",
+                            vec![Patch::set(&["groups", &group, "actors", &actor_id], row)],
+                            "",
+                        );
+                    }
                 } else {
                     mark_actor_dead(
                         &mut st,
@@ -2536,11 +2580,14 @@ fn agent_conn(
         } else {
             String::new()
         };
-        st.emit(
-            "agent_lost",
-            json!({ "agent": agent_id, "group": group,
-                    "degrade_window_ms": cfg().agent_dead_after_ms }),
-        );
+        let row = st.agents.get(&agent_id).map(|a| crate::status::agent_row(&st, a));
+        if let Some(row) = row {
+            st.emit_patch(
+                "agent_lost",
+                vec![Patch::set(&["groups", &group, "agents", &agent_id], row)],
+                &format!("degrade window {} ms", cfg().agent_dead_after_ms),
+            );
+        }
     }
     shared.cv.notify_all();
 }

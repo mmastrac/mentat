@@ -333,10 +333,16 @@ fn run(shared: SharedRef) {
         }
         let mut st = shared.st.lock().unwrap();
         st.fabrics = fresh.clone();
-        st.emit(
+        let islands: Vec<Value> = fresh
+            .islands
+            .iter()
+            .map(|i| json!({ "nodes": i.nodes, "addrs": i.addr }))
+            .collect();
+        let tagged = fresh.tagged.len();
+        st.emit_patch(
             "islands_changed",
-            json!({ "islands": fresh.islands.iter().map(|i| &i.nodes).collect::<Vec<_>>(),
-                    "tagged_nodes": fresh.tagged.len() }),
+            vec![crate::state::Patch::set(&["islands"], json!(islands))],
+            &format!("{tagged} tagged nodes"),
         );
         candidate = None;
         // A placement group that was waiting for a fabric may fit now.

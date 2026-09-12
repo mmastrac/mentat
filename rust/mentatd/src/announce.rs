@@ -62,28 +62,30 @@ pub fn start(shared: SharedRef) {
     // would otherwise sign nothing and refuse every signed announcement its
     // peers send, which from outside is a node that never joined the mesh.
     let key = match secret::load() {
-        Ok(k) => k,
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            // Every announcement is signed, so a daemon with no key has
+            // nothing to send. Saying so at boot beats a router that
+            // watches an empty cluster and never says why.
+            log(
+                "announce_off",
+                &[("why", "no MENTAT_SECRET or MENTAT_SECRET_FILE".to_string())],
+            );
+            return;
+        }
         Err(why) => {
             log("announce_secret_unusable", &[("error", why.clone())]);
             eprintln!("mentatd: {why}");
             std::process::exit(1);
         }
     };
-    log(
-        "announce_signing",
-        &[(
-            "state",
-            match key {
-                Some(_) => "on".to_string(),
-                None => "off (no MENTAT_SECRET)".to_string(),
-            },
-        )],
-    );
-    shared.st.lock().unwrap().signing = key.is_some();
     std::thread::spawn(move || run(shared, port, interval, extra, key));
 }
 
-fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key: Option<Vec<u8>>) {
+/// One Ethernet frame on a 1500-MTU path, so a datagram never fragments.
+const MAX_DATAGRAM: usize = 1400;
+
+fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key: Vec<u8>) {
     let sock = match UdpSocket::bind(("0.0.0.0", 0)) {
         Ok(s) => s,
         Err(e) => {
@@ -106,31 +108,37 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
     loop {
         let payload = {
             let st = shared.st.lock().unwrap();
-            let mut v = serde_json::json!({
-                "mentat_announce": 1,
+            // `t` and `seq` bound replay: the first against the listener's
+            // clock, the second against the last it accepted from this boot.
+            // Integer seconds, since an f64 does not survive the JSON round
+            // trip a verifier takes. See secret::canonical.
+            let v = serde_json::json!({
+                "proto": crate::proto::PROTO,
                 "node_id": st.node_id,
                 "control": st.control_addr,
                 "http": format!("{}:{}", st.node_ip, st.http_port),
                 "universe": universe,
                 "addrs": local_addrs(),
                 "addr_tags": local_addr_tags(),
+                "boot_id": boot_id.clone(),
+                "seq": seq.fetch_add(1, Ordering::Relaxed),
+                "t": secret::now_s() as u64,
             });
-            if key.is_some() {
-                // Version 2 carries what bounds replay: t against the
-                // listener's clock, seq against the last one it accepted
-                // from this boot.
-                v["mentat_announce"] = secret::SIGNED_VERSION.into();
-                v["boot_id"] = boot_id.clone().into();
-                v["seq"] = seq.fetch_add(1, Ordering::Relaxed).into();
-                // Integer seconds: f64 does not survive a JSON round trip,
-                // so a float here breaks the signature. See secret::canonical.
-                v["t"] = (secret::now_s() as u64).into();
-            }
-            match &key {
-                Some(k) => secret::sign(&v, k),
-                None => v.to_string(),
-            }
+            secret::sign(&v, &key)
         };
+        if payload.len() > MAX_DATAGRAM {
+            // The sender is the only side that can do anything about it: a
+            // listener can only drop what it cannot read.
+            log(
+                "announce_too_large",
+                &[
+                    ("bytes", payload.len().to_string()),
+                    ("cap", MAX_DATAGRAM.to_string()),
+                ],
+            );
+            std::thread::sleep(interval);
+            continue;
+        }
         // Re-read the broadcast targets each round: interfaces come and go
         // (the QSFP link on the pair drops with the cable).
         for target in broadcast_targets(port).iter().chain(extra.iter()) {

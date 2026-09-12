@@ -511,7 +511,14 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
         },
     );
     if !was_alive {
-        st.emit("node_join", json!({ "peer": node_id, "peer_ip": node_ip }));
+        let row = st.peers.get(&node_id).map(crate::status::peer_row);
+        if let Some(row) = row {
+            st.emit_patch(
+                "node_join",
+                vec![crate::state::Patch::set(&["peers", &node_id], row)],
+                "",
+            );
+        }
     }
     shared.cv.notify_all();
     true
@@ -600,9 +607,10 @@ fn peer_loop(
             p.alive = false;
             p.dead_since_ms = now_ms_u64();
         }
-        st.emit(
+        st.emit_patch(
             "node_leave",
-            json!({ "peer": peer_id, "reason": "link closed" }),
+            vec![crate::state::Patch::remove(&["peers", &peer_id])],
+            "link closed",
         );
     }
     shared.cv.notify_all();
@@ -681,7 +689,11 @@ fn staleness_sweeper(shared: SharedRef) {
                 "peer_dead",
                 &[("peer", peer.clone()), ("silent_ms", silent.to_string())],
             );
-            st.emit("node_leave", json!({ "peer": peer, "reason": "stale" }));
+            st.emit_patch(
+                "node_leave",
+                vec![crate::state::Patch::remove(&["peers", &peer])],
+                "stale",
+            );
         }
         // A dead row goes after MENTAT_HISTORY_KEEP_MS. Its seed connector
         // keeps dialing, so the box rejoins when it returns.
@@ -734,9 +746,13 @@ fn elector(shared: SharedRef) {
             let old = std::mem::replace(&mut st.head_node_id, candidate.clone());
             st.head_generation += 1;
             let generation = st.head_generation;
-            st.emit(
+            st.emit_patch(
                 "head_change",
-                json!({ "head": candidate, "previous": old, "generation": generation }),
+                vec![
+                    crate::state::Patch::set(&["head_node_id"], json!(candidate)),
+                    crate::state::Patch::set(&["head_generation"], json!(generation)),
+                ],
+                &format!("was {old}"),
             );
             crate::daemon::head_moved(&mut st, &old);
             candidate_since = None;
