@@ -1,6 +1,6 @@
 # mentat
 
-mentat is a self-organizing cluster manager for small numbers of nodes. It can either provide its own standalong cluster, or replace an existing one (like Ray) with a much lighter-weight manager.
+mentat is a self-organizing cluster manager for small numbers of nodes. It can either provide its own standalone cluster, or replace an existing one (like Ray) with a much lighter-weight manager.
 
 It has three components: 
 
@@ -9,7 +9,7 @@ It has three components:
  - a pure-Python package that installs as `ray` and implements the surface
 vLLM's Ray executor uses.
 
-mentat is designed to build the cluster with no configuation. Registration retries forever, so daemons and containers can start in any
+mentat is designed to build the cluster with no configuration. Registration retries forever, so daemons and containers can start in any
 order. UDP can be used to locate peers, or `MENTAT_PEERS` can bootstrap it. Containers automatically use the local daemon's address. All binaries are static executables.
 
 ## Ray Compatibility
