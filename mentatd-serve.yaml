@@ -26,9 +26,10 @@ services:
       - SERVE_PORT=${SERVE_PORT:-6381}
       # The daemons' announcement port. 0 turns the listener off.
       - MENTAT_ANNOUNCE_PORT=${MENTAT_ANNOUNCE_PORT:-6382}
-      # Empty keeps the built-in default, which covers loopback and the
-      # docker bridge range: a bridge-networked client reaching this host
-      # keeps its 172.x source.
+      # Empty keeps the built-in default, `local`: every network this box
+      # has an interface on, which covers each fabric and LAN it is cabled
+      # to, loopback, and the docker bridge a bridge-networked client keeps
+      # its 172.x source from. Entries may also be CIDR blocks.
       - ALLOWED_SOURCES=${ALLOWED_SOURCES:-}
       # HMAC key for announcements. Set it here and on every daemon, or on
       # neither: a router holding a key accepts signed announcements only.

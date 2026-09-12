@@ -109,7 +109,7 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
             let mut v = serde_json::json!({
                 "mentat_announce": 1,
                 "node_id": st.node_id,
-                "control": st.gcs_address,
+                "control": st.control_addr,
                 "http": format!("{}:{}", st.node_ip, st.http_port),
                 "universe": universe,
                 "addrs": local_addrs(),

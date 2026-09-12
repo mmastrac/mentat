@@ -11,7 +11,7 @@ mentatd daemon [--port PORT] [--http-port PORT] [--node-ip ADDR]
                [--head-json PATH] [--peers ADDR,...]
 mentatd start [--address ADDR] [--block]
 mentatd status [--address ADDR] [--group NAME] [--json]
-mentatd stop [--address ADDR] [--group NAME]
+mentatd stop [--address ADDR] (--group NAME | --all)
 mentatd NAME [ARG...]
 mentatd --version
 ```
@@ -22,8 +22,8 @@ One binary fills three roles.
 
 The daemon runs on each node, on the host network. It holds the cluster
 state: nodes, agents, placement groups and actors. Daemons form a mesh over
-`MENTAT_PEERS`, replicate events, elect a head and probe reachability between
-their addresses.
+`MENTAT_PEERS`, replicate events, elect a head and probe reachability
+between their addresses.
 
 The agent runs inside each model container, started by `mentatd start`. It
 registers the container's GPUs with a daemon, spawns actor processes on
@@ -41,11 +41,11 @@ models on one node never count each other's GPUs. Running the same model
 twice means two groups. A second driver in one group is rejected at
 `ray.init`.
 
-Every group lives on the head. A daemon that is not the head relays each
-agent registration and driver session it receives to the head, so a
-container talks to the daemon on its own box and still lands in one place
-with every other rank. `RAY_ADDRESS` can name any daemon, and its default
-of `127.0.0.1:6379` is the right value everywhere.
+Every group is on the head. A daemon that is not the head relays each agent
+registration and driver session it receives to the head, so a container
+talks to the daemon on its own box and still lands in one place with every
+other rank. `RAY_ADDRESS` can name any daemon, and its default of
+`127.0.0.1:6379` is the right value everywhere.
 
 ### Mesh
 
@@ -56,8 +56,7 @@ then by every other address it announces, on the same port, so a pair seeded
 over a fabric address stays linked over the LAN while the cable is out. A
 peer's address list is refreshed from its status pushes, so a renumbered or
 newly cabled link reaches the probes and the islands without a relink. Two
-daemons that dial each other at once keep the link the lower node id
-dialed.
+daemons that dial each other at once keep the link the lower node id dialed.
 
 ### Placement
 
@@ -66,28 +65,28 @@ multi-GPU ones. A placement group that cannot be satisfied stays PENDING and
 fails after `MENTAT_PG_PENDING_TIMEOUT_MS`. While it waits, `pending_reason`
 in `/status` specifies the constraint.
 
-When nodes carry `rdma` tags, a placement group of more than one bundle is
+When nodes have `rdma` tags, a placement group of more than one bundle is
 placed inside one fabric island. See "Fabrics".
 
 ### Actors
 
 Each actor runs in its own process group, so a kill takes the whole tree.
 Actors are serial, as in Ray. `run()` never returns for a vLLM worker, so a
-call issued after it queues forever. `call_pending_long` in the log means one
-did.
+call issued after it queues forever. `call_pending_long` in the log means
+one did.
 
 When an agent's link to the daemon closes, calls are held and drained on
-reconnect. After `MENTAT_AGENT_DEGRADED_AFTER_MS` the agent is degraded, which
-is a warning. After `MENTAT_AGENT_DEAD_AFTER_MS` its actors are dead, their
-`run()` refs resolve, and the driver restarts.
+reconnect. After `MENTAT_AGENT_DEGRADED_AFTER_MS` the agent is degraded,
+which is a warning. After `MENTAT_AGENT_DEAD_AFTER_MS` its actors are dead,
+their `run()` refs resolve, and the driver restarts.
 
 A driver session ending reaps its group's actors and placement groups after
 `MENTAT_SESSION_REAP_GRACE_MS`.
 
-A dead actor keeps its row in `/status`, which is what turns a later call on
-it into `RayActorError` carrying the reason it died. Only its owner can make
-that call, so once the owner is gone the row is history. History ages out:
-after `MENTAT_HISTORY_KEEP_MS` a dead actor whose owner is gone, a removed
+A dead actor keeps its row in `/status`, which turns a later call on it into
+`RayActorError` with the reason it died. Only its owner can make that call,
+so once the owner is gone the row is history. History ages out: after
+`MENTAT_HISTORY_KEEP_MS` a dead actor whose owner is gone, a removed
 placement group whose owner is gone, an agent whose link is down and a dead
 mesh peer are all dropped, and `history_swept` and `peer_forgotten` say what
 went. A group is whatever agents and actors mention it, so a model taken out
@@ -95,27 +94,26 @@ of a compose file leaves every snapshot on its own.
 
 ### Head election
 
-A settled head stays head while it is alive. A daemon with no head takes
-the one its live peers publish, and with none published takes the lowest
-live node id. Two settled heads that meet after a partition resolve to the
-lower. Every change waits `MENTAT_ELECTION_HOLD_DOWN_MS` of stability, and
-a connection that arrives before the first election waits for it.
+A settled head stays head while it is alive. A daemon with no head takes the
+one its live peers publish, and with none published takes the lowest live
+node id. Two settled heads that meet after a partition resolve to the lower.
+Every change waits `MENTAT_ELECTION_HOLD_DOWN_MS` of stability, and a
+connection that arrives before the first election waits for it.
 
-A head change moves every group. The daemon that stops being head closes
-its agent and driver links, the agents re-register through their local
-daemon's relay carrying the actors they run, and the drivers reconnect
-under their client ids. The new head adopts both, so the ranks keep
-running. `groups_moved` is logged where they left and `actor_adopted`
-where they arrived.
+A head change moves every group. The daemon that stops being head closes its
+agent and driver links, the agents re-register through their local daemon's
+relay, reporting the actors they run, and the drivers reconnect under their
+client ids. The new head adopts both, so the ranks keep running.
+`groups_moved` is logged where they left and `actor_adopted` where they
+arrived.
 
 ### Daemon address
 
 `status`, `stop` and the shim resolve the daemon address in this order:
 
-1. The `--address` flag, or the `address` argument to `ray.init`.
-2. `RAY_ADDRESS`.
-3. The `address` field of `/tmp/mentat/head.json`.
-4. `127.0.0.1:6379`.
+1. The `--address` flag, or the `address` argument to `ray.init`. 2.
+`RAY_ADDRESS`. 3. The `address` field of `/tmp/mentat/head.json`. 4.
+`127.0.0.1:6379`.
 
 ## Commands
 
@@ -127,26 +125,26 @@ peers, so a containerised daemon needs `network_mode: host`.
 
 - `--port PORT` (default 6379)
 
-  Control port.
+Control port.
 
 - `--http-port PORT` (default 6380)
 
-  HTTP port. See "HTTP interface".
+HTTP port. See "HTTP interface".
 
 - `--node-ip ADDR` (default `MENTAT_NODE_IP`, else the source address of the
   default route)
 
-  This node's cluster identity. See `MENTAT_NODE_IP`.
+This node's cluster identity. See `MENTAT_NODE_IP`.
 
 - `--head-json PATH` (default `/tmp/mentat/head.json`)
 
-  File the daemon writes its control address to after binding. The client
-  reads it when `RAY_ADDRESS` is unset.
+File the daemon writes its control address to after binding. The client
+reads it when `RAY_ADDRESS` is unset.
 
 - `--peers ADDR,...` (default `MENTAT_PEERS`)
 
-  Control addresses of the other daemons. An entry specifying this daemon is
-  skipped.
+Control addresses of the other daemons. An entry specifying this daemon is
+skipped.
 
 ### start
 
@@ -161,19 +159,19 @@ before this command.
 
 - `--address ADDR` (default `127.0.0.1:6379`)
 
-  Daemon to register with. `MENTAT_DAEMON` overrides it.
+Daemon to register with. `MENTAT_DAEMON` overrides it.
 
 - `--block`
 
-  Run the agent in the foreground.
+Run the agent in the foreground.
 
 - `--head`, `--node-ip-address ADDR`, `--port PORT`
 
-  Accepted for Ray compatibility and ignored.
+Accepted for Ray compatibility and ignored.
 
 - `--object-store-memory N`
 
-  Accepted and ignored. Logs `object_store_flag_ignored` once.
+Accepted and ignored. Logs `object_store_flag_ignored` once.
 
 ### status
 
@@ -181,18 +179,18 @@ Print the cluster state.
 
 - `--address ADDR`
 
-  Daemon to query. See "Daemon address".
+Daemon to query. See "Daemon address".
 
 - `--group NAME` (default `MENTAT_GROUP`, then `SERVICE_NAME`)
 
-  Scope the output to one group. With a scope the first line is
-  `Resources: N.0/M.0 GPU (...)`, the line Ray's `ray status` prints and
-  entrypoints grep. With neither the flag nor the variables set, the output
-  covers the whole cluster and has no such line.
+Scope the output to one group. With a scope the first line is `Resources:
+N.0/M.0 GPU (...)`, the line Ray's `ray status` prints and entrypoints grep.
+With neither the flag nor the variables set, the output covers the whole
+cluster and does not print that line.
 
 - `--json`
 
-  Print the `/status` document instead of the text form.
+Print the `/status` document instead of the text form.
 
 The text form has one line per daemon, peer, fabric island, group and agent.
 Under each peer, `reach from <local>: <remote>=ok/<rtt>ms ...` gives the
@@ -204,14 +202,21 @@ island's members by fabric address.
 Kill actors. Runs immediately, whatever degrade window an agent is inside.
 The driver sees the dead refs and restarts.
 
+Name a scope. Running it with neither flag, or both, prints the groups the
+daemon knows and exits non-zero.
+
 - `--address ADDR`
 
-  Daemon to send to. See "Daemon address".
+Daemon to send to. See "Daemon address".
 
 - `--group NAME`
 
-  Kill only this group's actors. Unset kills every group's actors. The
-  command does not read `MENTAT_GROUP`.
+Kill this group's actors. The command does not read `MENTAT_GROUP`: the box
+you run it on is rarely the deployment you mean.
+
+- `--all`
+
+Kill every group's actors on that daemon.
 
 ### External subcommands
 
@@ -221,9 +226,10 @@ arguments, looked up beside the `mentatd` executable and then on `PATH`.
 
 ### Registering without ray
 
-A single-rank engine needs nothing mentat provides at runtime -- no placement
-group, no actors, no cross-node collectives -- but it still has to appear in
-mentatd-serve, and the only way into that listing is an agent registration.
+A single-rank engine needs nothing mentat provides at runtime -- no
+placement group, no actors, no cross-node collectives -- but it still has to
+appear in mentatd-serve, and the only way into that listing is an agent
+registration.
 
 ```
 python -m ray.register
@@ -241,40 +247,41 @@ python -m ray.register &
 exec vllm serve ...
 ```
 
-It offers no GPUs. An agent with none is never chosen for a bundle, which is
-what keeps a placement from arriving somewhere with nothing to host it. What
-it announces is an endpoint and nothing else. A box whose GPUs should be
-placeable runs `mentatd start` instead, and that works for a single-rank
+It does not offer GPUs. An agent with none is never chosen for a bundle,
+which keeps a placement from arriving somewhere with nothing to host it.
+What it announces is an endpoint and nothing else. A box whose GPUs should
+be placeable runs `mentatd start` instead, and that works for a single-rank
 engine too: mentatd-serve applies its actor gate only to groups that have
 actor rows, so a group that never asked for a placement is admitted on its
 endpoint probe alone either way. This module is for an image with no `ray`
 shim at all.
 
 `MENTAT_NODE_IP` is usually better left unset here: an agent that claims no
-address is filed under the daemon's own node when it connected from that box,
-and under the address the daemon saw otherwise, which is right in both cases.
+address is filed under the daemon's own node when it connected from that
+box, and under the address the daemon saw otherwise, which is right in both
+cases.
 
 ### The ray symlink
 
 Invoked through a symlink named `ray`, the binary accepts the same commands.
 `ray start`, `ray status` and `ray stop` are `mentatd start`, `mentatd
-status` and `mentatd stop`. `ray --version` prints
-`ray, version 2.57.0 (mentatd <ver>)`.
+status` and `mentatd stop`. `ray --version` prints `ray, version 2.57.0
+(mentatd <ver>)`.
 
-`ray stop` without `--group` kills every actor on the cluster. Remove it from
-entrypoints that ran it as cleanup.
+`ray stop` needs `--group NAME` or `--all`. Under Ray the command stops the
+local node's processes; here it reaches every actor the daemon knows, so an
+entrypoint that ran it as cleanup fails until someone says which.
 
 ## Migrating from Ray
 
-The `ray` CLI and the `ray` import name keep working.
-`--distributed-executor-backend ray`, `ray start` and `ray status` behave as
-before.
+The `ray` CLI and the `ray` import name keep working. `--distributed-
+executor-backend ray`, `ray start` and `ray status` behave as before.
 
 ### Audit vLLM
 
 The shim implements the surface vLLM's `RayExecutorV2` uses, audited against
-`0.1.dev20051+g487ecf187`. Any other attribute raises `AttributeError` naming
-it at engine boot. Check the vLLM in the image:
+`0.1.dev20051+g487ecf187`. Any other attribute raises `AttributeError`
+naming it at engine boot. Check the vLLM in the image:
 
 ```bash
 grep -rn 'ray\.' $(python -c 'import vllm,os;print(os.path.dirname(vllm.__file__))')/v1/executor/
@@ -333,7 +340,7 @@ naming an address another node is known by is refused at register.
 | `RAY_memory_monitor_refresh_ms` | There is no memory monitor. Nothing samples node memory or kills workers. |
 | Object store size caps | Same. That memory goes back to weights and KV cache. |
 | Head-first startup ordering | Registration retries forever. `ray start --head` is accepted and ignored. |
-| `ray stop` between runs | Actors get their own process group and a kill takes the whole tree. `ray stop` kills actors, see "The ray symlink". |
+| `ray stop` between runs | Actors get their own process group and a kill takes the whole tree. `ray stop` kills actors and needs a scope, see "The ray symlink". |
 
 ### Verify
 
@@ -343,11 +350,12 @@ curl -s http://<node>:6380/status | jq .
 websocat ws://<node>:6380/events      # snapshot, then lifecycle events
 ```
 
-At `ray.init` the container log prints a banner specifying the group and daemon,
-ending `-- this is NOT real Ray`. Without it the container is on real Ray.
+At `ray.init` the container log prints a banner specifying the group and
+daemon, ending `-- this is NOT real Ray`. Without it the container is on
+real Ray.
 
 A rank dying logs `event=actor_exit` with pid and signal in the container
-log, and the driver's exception carries the exit code and signal.
+log, and the driver's exception reports the exit code and signal.
 
 ### Rollback
 
@@ -379,8 +387,8 @@ this link into a fabric. Probing decides whether the claim holds.
 
 Each daemon opens one TCP connection per (own address × peer address) pair,
 with the source address bound, every `MENTAT_PROBE_INTERVAL_MS`. Binding the
-source is what makes the result describe the cabling rather than the routing
-table. Peers are probed concurrently. A pair that fails logs
+source makes the result describe the cabling rather than the routing table.
+Peers are probed concurrently. A pair that fails logs
 `fabric_addr_unverified` once and stays out of placement. Rows for an
 address this box has lost, or one missing from the peer's current list, are
 dropped after the round.
@@ -404,14 +412,14 @@ is committed after `MENTAT_ISLAND_HOLD_DOWN_MS` of stability.
 
 A placement group of more than one bundle is placed inside one island. A
 group that fits no island stays PENDING and says why, in `pending_reason`
-and again at the pending timeout. Each rank of a group placed on an island is
-spawned with `MENTAT_FABRIC_IP` set to its node's address on that island.
+and again at the pending timeout. Each rank of a group placed on an island
+is spawned with `MENTAT_FABRIC_IP` set to its node's address on that island.
 
 ### Opting in
 
-The constraint applies per group: a group none of whose nodes carry an
-`rdma` tag is placed as before. Tagging one pair leaves a deployment on an
-untagged pair unchanged.
+The constraint applies per group: a group none of whose nodes have an `rdma`
+tag is placed as before. Tagging one pair leaves a deployment on an untagged
+pair unchanged.
 
 Nothing else opts in. Each rank of a group placed on an island is spawned
 with `MENTAT_FABRIC_IP`, and the shim's `ray.util.get_node_ip_address()`
@@ -428,25 +436,25 @@ Islands are derived over node ids, and an agent joins its node by the box it
 is on. A container that reaches its daemon over loopback, or over any
 address of the daemon's own box, claims no identity and takes the daemon's.
 A container reaching a daemon on another box is filed under whichever box in
-the mesh owns the address it connected from, so it needs no setting either,
-whatever link it came in on. Only a container on a box no daemon runs on is
-a node of its own, named by its source address. `MENTAT_NODE_IP` on a
-container overrides all of this and is refused when it names an address of
-a box the mesh knows under another name.
+the mesh owns the address it connected from, so it does not need setting
+either, whatever link it came in on. Only a container on a box no daemon
+runs on is a node of its own, named by its source address. `MENTAT_NODE_IP`
+on a container overrides all of this and is refused when it names an address
+of a box the mesh knows under another name.
 
 Each actor is spawned with `MENTAT_NODE_IP` set to its node's identity, so
 the shim's `get_node_ip_address()` answers the same on every rank with no
 setting in the container. A fabric address, when placement chose one, sits
 above it.
 
-### Named placements
+### Claims
 
 A claim reserves a set of nodes under a name and answers every holder of
 that name with the same view, so ranks starting independently agree with no
 coordinator between them. A claim ends when its last holder disconnects.
 
 The shim reads `MENTAT_CLAIM` and `MENTAT_CLAIM_SHAPE` at
-`ray.util.placement_group`, since Ray's API cannot carry a shape. With
+`ray.util.placement_group`, since Ray's API cannot express a shape. With
 `MENTAT_CLAIM` set, the shim claims the name first and then places inside
 the claim. A group asking for more than its claim holds stays PENDING.
 [PROTOCOL.md](PROTOCOL.md) defines the shape.
@@ -462,251 +470,246 @@ process start.
 
 - `MENTAT_NODE_IP` (default: the source address of the default route)
 
-  This node's cluster identity. On a multi-homed node set it to the address
-  the driver sees itself on, the same one the model containers use. The
-  default is the route to the internet, which on a multi-homed node is
-  usually the wrong interface and breaks the match between driver and node.
-  Set but empty reads as unset. An identity that is still empty after that
-  stops the daemon, since every such daemon would share one node id.
+This node's cluster identity. On a multi-homed node set it to the address
+the driver sees itself on, the same one the model containers use. The
+default is the route to the internet, which on a multi-homed node is usually
+the wrong interface and breaks the match between driver and node. Set but
+empty reads as unset. An identity that is still empty after that stops the
+daemon, since every such daemon would share one node id.
 
 - `MENTAT_PEERS` (default: empty)
 
-  Comma-separated control addresses of other daemons. One that reaches any
-  live daemon is enough: the rest of the mesh is learned from it. Seed by
-  the address a node identifies itself by, its `MENTAT_NODE_IP`. A fabric
-  address is renumbered when cables move and the seed then names a box that
-  is not there, which `peer_connect_retry` reports once a minute for as
-  long as it lasts. A seed is dialed for the life of the process. A daemon
-  learned from a peer stops being dialed once it has been down for
-  `MENTAT_HISTORY_KEEP_MS` and no live peer lists it.
+Comma-separated control addresses of other daemons. One that reaches any
+live daemon is enough: the rest of the mesh is learned from it. Seed by the
+address a node identifies itself by, its `MENTAT_NODE_IP`. A fabric address
+is renumbered when cables move and the seed then names a box that is not
+there, which `peer_connect_retry` reports once a minute for as long as it
+lasts. A seed is dialed for the life of the process. A daemon learned from a
+peer stops being dialed once it has been down for `MENTAT_HISTORY_KEEP_MS`
+and no live peer lists it.
 
 - `MENTAT_ANNOUNCE_PORT` (default 6382)
 
-  UDP port announcements are sent to. `0` turns announcement off and logs
-  `announce_off`.
+UDP port announcements are sent to. `0` turns announcement off and logs
+`announce_off`.
 
 - `MENTAT_ANNOUNCE_INTERVAL_S` (default 5)
 
-  Seconds between announcements.
+Seconds between announcements.
 
 - `MENTAT_ANNOUNCE_ADDR` (default: empty)
 
-  Comma-separated unicast targets, `host` or `host:port`, for a listener
-  outside every broadcast domain this node is on. Broadcast on the selected
-  interfaces continues.
+Comma-separated unicast targets, `host` or `host:port`, for a listener
+outside every broadcast domain this node is on. Broadcast on the selected
+interfaces continues.
 
 - `MENTAT_ANNOUNCE_IFACES` (default: every up non-loopback interface except
   container bridges, in kernel order, untagged)
 
-  Comma-separated list of `name` or `name=tag+tag` entries specifying the
-  interfaces to announce on. A name is a pattern over `*` and `?`. A pattern
-  with no wildcard is an exact name, so `en` does not match `eno1`. The first
-  entry a name matches decides its rank and tags. Interfaces matching one
-  entry rank together at that entry's position, in kernel order. List order
-  is preference order: list the fast link first and a consumer that can
-  reach both takes it. There is no negation.
+Comma-separated list of `name` or `name=tag+tag` entries specifying the
+interfaces to announce on. A name is a pattern over `*` and `?`. A pattern
+with no wildcard is an exact name, so `en` does not match `eno1`. The first
+entry a name matches decides its rank and tags. Interfaces matching one
+entry rank together at that entry's position, in kernel order. List order is
+preference order: list the fast link first and a consumer that can reach
+both takes it. There is no negation.
 
-  Tags travel with the address. `rdma` is the one tag the daemon acts on.
-  Every other tag is carried for consumers to read.
+Tags travel with the address. `rdma` is the one tag the daemon acts on.
+Every other tag is stored for consumers to read.
 
 - `MENTAT_ANNOUNCE_ADDRS` (default: unset)
 
-  The same syntax with addresses in place of names. Replaces the address
-  list the node announces, for a node whose advertisable address is on none
-  of its own interfaces. Broadcast still follows the interfaces.
+The same syntax with addresses in place of names. Replaces the address list
+the node announces, for a node whose advertisable address is on none of its
+own interfaces. Broadcast still follows the interfaces.
 
 - `MENTAT_SECRET` (default: unset)
 
-  HMAC key for announcements. Set the same key on every daemon and router,
-  or on none. A keyed listener refuses unsigned announcements. Unset, the
-  mesh runs unauthenticated: `announce_signing state=off` is logged at
-  boot and `signing` in `/status` reads false. Give mentat a key of its
-  own. A key shared with another service is disclosed by whichever of them
-  is weaker.
+HMAC key for announcements. Set the same key on every daemon and router, or
+on none. A keyed listener refuses unsigned announcements. Unset, the mesh
+runs unauthenticated: `announce_signing state=off` is logged at boot and
+`signing` in `/status` reads false. Give mentat a key of its own. A key
+shared with another service is disclosed by whichever of them is weaker.
 
 - `MENTAT_SECRET_FILE` (default: unset)
 
-  Read the key from this file instead of `MENTAT_SECRET`. A file that cannot
-  be read, or reads empty, stops the process at boot with the reason.
+Read the key from this file instead of `MENTAT_SECRET`. A file that cannot
+be read, or reads empty, stops the process at boot with the reason.
 
 - `MENTAT_UNIVERSE` (default `default`)
 
-  Cluster name. An announcement from another universe is dropped before its
-  signature is checked, without a log line.
+Cluster name. An announcement from another universe is dropped before its
+signature is checked, without a log line.
 
 - `MENTAT_PROBE_INTERVAL_MS` (default 15000)
 
-  Interval between reachability probes, per address pair. The answer
-  changes on the timescale of cables, so the interval is long.
+Interval between reachability probes, per address pair. The answer changes
+on the timescale of cables, so the interval is long.
 
 - `MENTAT_PROBE_TIMEOUT_MS` (default 2000)
 
-  Deadline for one probe's connect and reply. A pair with no route fails at
-  once. The deadline bounds a dropped SYN, which the kernel would otherwise
-  retry for minutes.
+Deadline for one probe's connect and reply. A pair with no route fails at
+once. The deadline bounds a dropped SYN, which the kernel would otherwise
+retry for minutes.
 
 - `MENTAT_ISLAND_HOLD_DOWN_MS` (default 5000)
 
-  How long island membership must hold still before placement acts on a
-  change. A placement group cannot be revised after the fact, so a flapping
-  link must not move the island boundary between two consecutive placements.
+How long island membership must hold still before placement acts on a
+change. A placement group cannot be revised after the fact, so a flapping
+link must not move the island boundary between two consecutive placements.
 
 - `MENTAT_ISLAND_PLACEMENT` (default `on`)
 
-  `off` places multi-bundle groups without the one-island constraint.
+`off` places multi-bundle groups without the one-island constraint.
 
 - `MENTAT_PG_PENDING_TIMEOUT_MS` (default 600000)
 
-  How long a placement group may stay PENDING before it fails and its ready
-  ref raises in the driver. It times the whole rendezvous, from the request
-  to the agents and GPUs arriving. Ten minutes covers a cold node pulling
-  images and mounting weights. A lower value restarts the driver into the
-  same wait.
+How long a placement group may stay PENDING before it fails and its ready
+ref raises in the driver. It times the whole rendezvous, from the request to
+the agents and GPUs arriving. Ten minutes covers a cold node pulling images
+and mounting weights. A lower value restarts the driver into the same wait.
 
 - `MENTAT_AGENT_DEGRADED_AFTER_MS` (default 30000)
 
-  How long an agent's daemon link may be closed before the agent is marked
-  degraded. Calls stay held. The event is `agent_degraded`.
+How long an agent's daemon link may be closed before the agent is marked
+degraded. Calls stay held. The event is `agent_degraded`.
 
 - `MENTAT_AGENT_DEAD_AFTER_MS` (default 60000)
 
-  How long an agent's daemon link may be closed before its actors are marked
-  dead, which resolves their `run()` refs and restarts the driver. The gap
-  between this and the degrade threshold allows for short outages.
+How long an agent's daemon link may be closed before its actors are marked
+dead, which resolves their `run()` refs and restarts the driver. The gap
+between this and the degrade threshold allows for short outages.
 
 - `MENTAT_HISTORY_KEEP_MS` (default 600000)
 
-  How long a record nobody can act on stays in the tables for an operator
-  to read: a dead actor or removed placement group whose owner is gone, an
-  agent whose link has been down past `MENTAT_AGENT_DEAD_AFTER_MS`, a mesh
-  peer that has been dead. The age is counted from the event rather than
-  from the owner leaving, so a daemon restart, which rebuilds the table
-  before any driver reconnects, does not erase reasons the drivers have yet
-  to ask for.
+How long a record nobody can act on stays in the tables for an operator to
+read: a dead actor or removed placement group whose owner is gone, an agent
+whose link has been down past `MENTAT_AGENT_DEAD_AFTER_MS`, a mesh peer that
+has been dead. The age is counted from the event rather than from the owner
+leaving, so a daemon restart, which rebuilds the table before any driver
+reconnects, does not erase reasons the drivers have yet to ask for.
 
 - `MENTAT_PEER_STALE_AFTER_MS` (default 30000)
 
-  How long a mesh peer may be silent before it is logged stale.
+How long a mesh peer may be silent before it is logged stale.
 
 - `MENTAT_PEER_DEAD_AFTER_MS` (default 60000)
 
-  How long a mesh peer may be silent before `node_leave` fires and its link
-  closes. The connector keeps re-dialing it. A dead peer keeps its row in
-  `/status` for `MENTAT_HISTORY_KEEP_MS`, or until the same box rejoins
-  under a different node id, which happens when its identity address
-  changes.
+How long a mesh peer may be silent before `node_leave` fires and its link
+closes. The connector keeps re-dialing it. A dead peer keeps its row in
+`/status` for `MENTAT_HISTORY_KEEP_MS`, or until the same box rejoins under
+a different node id, which happens when its identity address changes.
 
 - `MENTAT_PEER_STATUS_INTERVAL_MS` (default 2000)
 
-  Interval between status pushes to mesh peers. The push is also the
-  heartbeat the staleness thresholds count, so keep it several times smaller
-  than `MENTAT_PEER_STALE_AFTER_MS`.
+Interval between status pushes to mesh peers. The push is also the heartbeat
+the staleness thresholds count, so keep it several times smaller than
+`MENTAT_PEER_STALE_AFTER_MS`.
 
 - `MENTAT_ELECTION_HOLD_DOWN_MS` (default 5000)
 
-  How long a head candidate must stay best before `head_change` fires. Raise
-  it if `head_change` streams. Head changes then lag by as much.
+How long a head candidate must stay best before `head_change` fires. Raise
+it if `head_change` streams. Head changes then lag by as much.
 
 - `MENTAT_SLOW_CALL_WARN_MS` (default 15000)
 
-  A call other than `run()` pending longer than this logs
-  `call_pending_long` once. The call is queued behind a blocking method or
-  the worker is stuck.
+A call other than `run()` pending longer than this logs `call_pending_long`
+once. The call is queued behind a blocking method or the worker is stuck.
 
 - `MENTAT_SESSION_REAP_GRACE_MS` (default 0)
 
-  Delay between a driver session ending and the reap of its actors and
-  placement groups. A restarting vLLM needs the old actors' names and GPUs
-  freed, so a grace delays recovery. The dead client is removed at once
-  either way, so a new driver session is never blocked by the grace. Raise
-  it only to inspect workers after a driver crash.
+Delay between a driver session ending and the reap of its actors and
+placement groups. A restarting vLLM needs the old actors' names and GPUs
+freed, so a grace delays recovery. The dead client is removed at once either
+way, so a new driver session is never blocked by the grace. Raise it only to
+inspect workers after a driver crash.
 
 - `MENTAT_TCP_DEAD_AFTER_MS` (default 75000)
 
-  Target time for TCP keepalive to declare a wedged peer dead, set through
-  `TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`. Linux only.
+Target time for TCP keepalive to declare a wedged peer dead, set through
+`TCP_KEEPIDLE`, `TCP_KEEPINTVL` and `TCP_KEEPCNT`. Linux only.
 
 ### Agent and container
 
 - `RAY_ADDRESS` (default: `/tmp/mentat/head.json`, then `127.0.0.1:6379`)
 
-  Daemon the driver and the CLI connect to. Any daemon relays to the head,
-  so the default is right on every node. See "Daemon address".
+Daemon the driver and the CLI connect to. Any daemon relays to the head, so
+the default is right on every node. See "Daemon address".
 
 - `MENTAT_DAEMON` (default: the `--address` flag, then `127.0.0.1:6379`)
 
-  Daemon the agent registers with. Overrides `--address`.
+Daemon the agent registers with. Overrides `--address`.
 
 - `MENTAT_GROUP` (default: `SERVICE_NAME`, then `default`)
 
-  The group this container belongs to. Read by the agent, the shim and the
-  `status` command.
+The group this container belongs to. Read by the agent, the shim and the
+`status` command.
 
 - `MENTAT_NODE_IP` (default: unset)
 
-  The node this agent belongs to. Leave it unset: the daemon files the agent
-  under the box it connected from. See "Node identity". Set it only for a
-  container on a box no daemon runs on.
+The node this agent belongs to. Leave it unset: the daemon files the agent
+under the box it connected from. See "Node identity". Set it only for a
+container on a box no daemon runs on.
 
 - `CONTAINER_NAME` (default: the hostname)
 
-  Part of the agent id, which is `<group>@<container>@<node_ip>`.
+Part of the agent id, which is `<group>@<container>@<node_ip>`.
 
 - `MENTAT_OPENAI_API` (default: unset)
 
-  The OpenAI-compatible endpoint this container announces. Set it on the
-  rank that runs the API server. See [GUIDE-SERVE.md](GUIDE-SERVE.md).
+The OpenAI-compatible endpoint this container announces. Set it on the rank
+that runs the API server. See [GUIDE-SERVE.md](GUIDE-SERVE.md).
 
 - `MENTAT_MCP_API` (default: unset)
 
-  The MCP endpoint this container announces. Set it on every rank.
+The MCP endpoint this container announces. Set it on every rank.
 
 - `MENTAT_MODEL_PROVIDER` (default: unset)
 
-  The engine behind `MENTAT_OPENAI_API`, for example `vllm`. Lowercased and
-  announced with the endpoint. Set it on the same rank.
+The engine behind `MENTAT_OPENAI_API`, for example `vllm`. Lowercased and
+announced with the endpoint. Set it on the same rank.
 
 - `MENTAT_CLAIM` (default: unset)
 
-  Claim this name before placing, and place inside the claim. See "Named
-  placements".
+Claim this name before placing, and place inside the claim. See "Named
+placements".
 
 - `MENTAT_CLAIM_SHAPE` (default: one `rdma` set covering the requested
   bundles)
 
-  The shape to claim, as JSON. Invalid JSON raises at
-  `ray.util.placement_group`.
+The shape to claim, as JSON. Invalid JSON raises at
+`ray.util.placement_group`.
 
 - `MENTAT_GPUS` (default: the count from `nvidia-smi`)
 
-  GPU count override, for tests on nodes without GPUs.
+GPU count override, for tests on nodes without GPUs.
 
 - `MENTAT_HOST_CONNECT_TIMEOUT_MS` (default 60000)
 
-  How long the agent waits for a spawned actor process to connect to its
-  socket. The process connects before importing anything heavy, so this
-  times Python starting.
+How long the agent waits for a spawned actor process to connect to its
+socket. The process connects before importing anything heavy, so this times
+Python starting.
 
 - `MENTAT_AGENT_PING_INTERVAL_MS` (default 2000)
 
-  Interval between agent pings to the daemon. Bounds how fast the agent
-  notices a dead daemon.
+Interval between agent pings to the daemon. Bounds how fast the agent
+notices a dead daemon.
 
 - `MENTAT_TCP_DEAD_AFTER_MS` (default 75000)
 
-  As for the daemon.
+As for the daemon.
 
 - `MENTAT_PYTHON` (default `python3`)
 
-  Interpreter the agent spawns actors with.
+Interpreter the agent spawns actors with.
 
 - `MENTAT_SOCK_DIR` (default `/tmp/mentat`)
 
-  Directory for the unix sockets between agent and actor processes.
+Directory for the unix sockets between agent and actor processes.
 
 - `MENTAT_DEBUG` (default: unset)
 
-  Set to log the `ray` keyword arguments the shim ignores.
+Set to log the `ray` keyword arguments the shim ignores.
 
 ### Actor process
 
@@ -719,16 +722,16 @@ was placed on a fabric island and specifies this rank's address on it.
 
 - `/tmp/mentat/head.json`
 
-  Written by the daemon after it binds. Carries the control address the
-  client falls back to.
+Written by the daemon after it binds. Carries the control address the client
+falls back to.
 
 - `/tmp/mentat/agent.json`
 
-  Written by `mentatd start`. Carries the detached agent's pid and group.
+Written by `mentatd start`. Carries the detached agent's pid and group.
 
 - `/tmp/mentat/`
 
-  Unix sockets between agent and actor processes. See `MENTAT_SOCK_DIR`.
+Unix sockets between agent and actor processes. See `MENTAT_SOCK_DIR`.
 
 ## HTTP interface
 
@@ -759,8 +762,8 @@ Log lines are `key=value` pairs. Lines to know:
 
 - `actor_exit`, with pid and signal, when a rank dies.
 - `call_pending_long` when a call has waited `MENTAT_SLOW_CALL_WARN_MS`.
-- `fabric_addr_unverified` when an `rdma`-tagged address has no successful
-  probe behind it.
+- `fabric_addr_unverified` when an `rdma`-tagged address does not have a
+  successful probe behind it.
 - `object_store_flag_ignored` when `--object-store-memory` was passed.
 - `bad_env_ms` and `bad_env_flag` when a variable did not parse.
 - `announce_off` when `MENTAT_ANNOUNCE_PORT=0`.
@@ -771,12 +774,12 @@ Log lines are `key=value` pairs. Lines to know:
 
 ## Limits
 
-- Every group lives on the head, and a head change moves them all. A rank
-  sees that as a short reconnect.
+- Every group is on the head, and a head change moves them all. A rank sees
+  that as a short reconnect.
 - Actors are serial. A call after `run()` never completes.
 - The audited surface holds for the vLLM it was audited against. Re-run the
   grep on every base-image change.
-- The control port has no authentication. Announcements are signed when
+- The control port does not authenticate. Announcements are signed when
   `MENTAT_SECRET` is set, and every claim in one is re-read over TCP before
   it affects routing.
 - Tested on two nodes at TP=1 through TP=4, plus GPU-free suites for the

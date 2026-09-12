@@ -25,11 +25,39 @@ pub struct Frame {
     pub msg: Msg,
 }
 
+/// The wire version this build speaks, `major.minor`.
+///
+/// 0.99 is the 1.0 candidate: the shapes are those of the 1.0 spec, and the
+/// number moves to 1.0 once the spec is accepted.
+pub const PROTO: &str = "0.99";
+
+/// Whether a peer's `proto` shares this build's major.
+///
+/// A major mismatch means a field changed type or meaning, so the link is
+/// refused. A minor difference is compatible in both directions: a peer
+/// sends nothing introduced after the minor its counterpart announced.
+pub fn major_matches(peer: &str) -> bool {
+    fn major(v: &str) -> Option<&str> {
+        let (maj, rest) = v.split_once('.')?;
+        rest.parse::<u32>().ok()?;
+        Some(maj)
+    }
+    match (major(PROTO), major(peer)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+pub fn proto() -> String {
+    PROTO.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Msg {
     // ---- client -> daemon ----
     Hello {
+        proto: String,
         client_id: String,
         group: String,
         /// True for the one connection whose EOF means "this driver is gone".
@@ -41,11 +69,14 @@ pub enum Msg {
         node_ip: String,
     },
     Nodes,
-    ClusterResources,
-    AvailablePerNode,
+    Resources,
+    Available,
     /// Claim a named placement. Every holder of one name is answered with
     /// the view the first claim produced, so ranks agree without talking to
     /// each other. Re-sent on reconnect: that is what holds the claim.
+    ///
+    /// The name belongs to the caller's group, so two groups that pick one
+    /// name hold two claims.
     Claim {
         name: String,
         /// `{"sets": [...], "between": [...]}`, matched against the measured
@@ -53,13 +84,9 @@ pub enum Msg {
         /// refused rather than re-solved.
         shape: serde_json::Value,
     },
-    /// Give up a hold. The claim ends when its last holder does.
-    Release {
-        name: String,
-    },
-    CreatePg {
-        /// GPUs per bundle, e.g. [1.0, 1.0].
-        bundles: Vec<f64>,
+    PgCreate {
+        /// Whole GPUs per bundle.
+        bundles: Vec<u32>,
         strategy: String,
         /// A claim this group must be placed inside. The claim already
         /// chose nodes, so placement picks among those rather than from
@@ -70,51 +97,55 @@ pub enum Msg {
     PgTable {
         pg_id: String,
     },
-    RemovePg {
+    PgRemove {
         pg_id: String,
     },
-    CreateActor {
+    ActorCreate {
         name: String,
-        num_gpus: f64,
+        num_gpus: u32,
         pg_id: String,
         bundle_index: usize,
         env: BTreeMap<String, String>,
         // payload: pickle (cls, args, kwargs)
     },
-    Call {
+    ActorCall {
         actor_id: String,
         method: String,
         // payload: pickle (args, kwargs)
     },
-    Get {
+    RefGet {
         ref_id: String,
         /// None = block forever, 0 = immediate poll.
         timeout_ms: Option<u64>,
     },
-    Wait {
+    RefWait {
         ref_ids: Vec<String>,
         num_returns: usize,
         timeout_ms: Option<u64>,
     },
-    KillActor {
-        actor_id: String,
-    },
     Status {
         group: Option<String>,
     },
-    StopAll {
-        group: Option<String>,
+    /// Kill a group's actors, or every group's with `all`. Neither or both
+    /// is refused: the binary also answers to `ray`, where an inherited
+    /// `ray stop` would otherwise reach the whole cluster.
+    ActorStop {
+        #[serde(default)]
+        group: String,
+        #[serde(default)]
+        all: bool,
     },
 
     // ---- daemon -> client responses ----
-    Ok0,
+    Ok,
     Err {
         error: String,
     },
     HelloOk {
+        proto: String,
         node_id: String,
         node_ip: String,
-        gcs_address: String,
+        control_addr: String,
         head_node_id: String,
     },
     NodesOk {
@@ -123,7 +154,7 @@ pub enum Msg {
     ResourcesOk {
         resources: BTreeMap<String, f64>,
     },
-    AvailOk {
+    AvailableOk {
         nodes: BTreeMap<String, BTreeMap<String, f64>>,
     },
     ClaimOk {
@@ -131,22 +162,22 @@ pub enum Msg {
         generation: u64,
         view: serde_json::Value,
     },
-    CreatePgOk {
+    PgCreateOk {
+        /// Also the handle `ref_get` resolves when the group is CREATED.
         pg_id: String,
-        ready_ref: String,
     },
     PgTableOk {
         table: Value,
     },
-    CreateActorOk {
+    ActorCreateOk {
         actor_id: String,
         node_id: String,
         gpu_ids: Vec<u32>,
     },
-    CallOk {
+    ActorCallOk {
         ref_id: String,
     },
-    GetOk {
+    RefGetOk {
         /// "ok" | "error" | "actor_died" | "timeout"
         status: String,
         /// Human-readable death reason when status == actor_died.
@@ -154,55 +185,29 @@ pub enum Msg {
         reason: String,
         // payload: pickle result or pickled exception
     },
-    WaitOk {
+    RefWaitOk {
         ready: Vec<String>,
     },
     StatusOk {
-        data: Value,
+        snapshot: Value,
     },
 
     // ---- agent <-> daemon ----
     AgentRegister {
+        proto: String,
         agent_id: String,
         group: String,
         node_ip: String,
-        gpus: Vec<u32>,
-        /// Vendor tag for the GPUs above. Always "nvidia" today; recorded per
-        /// agent so the inventory stays honest if that ever changes.
-        #[serde(default = "default_gpu_vendor")]
-        gpu_vendor: String,
-        cpus: u32,
         container: String,
         pid: u32,
+        /// What this box is: total memory, cpus, and every GPU the agent
+        /// may bind. A count cannot describe a heterogeneous box.
+        machine: Machine,
         /// Service endpoints this container announces (e.g. "openai" -> the
-        /// vLLM API URL, "mcp" -> the status-server's MCP URL), read from
-        /// MENTAT_*_API env vars. Consumed by mentatd-serve. The daemon only
-        /// stores and republishes them, and the serde default keeps an old
-        /// agent and a new daemon (or the reverse) interoperating.
+        /// vLLM API, "mcp" -> the status server), read from MENTAT_*_API.
+        /// Consumed by mentatd-serve; the daemon stores and republishes.
         #[serde(default)]
-        services: BTreeMap<String, String>,
-        /// Services announced as a port and path rather than a whole URL,
-        /// meaning "resolve the host against my node's addresses". The
-        /// router does that resolving, because only it knows which of the
-        /// node's links it shares. Old daemons ignore the field, and an
-        /// agent that only ever announces URLs never sends it.
-        #[serde(default)]
-        services_ports: BTreeMap<String, ServicePort>,
-        /// What serves the announced `openai` endpoint, from
-        /// MENTAT_MODEL_PROVIDER -- `vllm` on every current image. The
-        /// consumer needs it to know which interface an endpoint speaks,
-        /// since two engines answering /v1/chat/completions can still differ
-        /// in what else they expose. Empty when the container did not say,
-        /// and always empty from an agent that predates the field.
-        #[serde(default)]
-        provider: String,
-        /// What the agent found out about a service after announcing it,
-        /// keyed by service name -- today, that the server bound one address
-        /// rather than every address. Advisory: it explains a probe failure,
-        /// it never causes one. Also carried on a re-register so a daemon
-        /// restart does not lose the finding.
-        #[serde(default)]
-        service_notes: BTreeMap<String, String>,
+        services: BTreeMap<String, Service>,
         /// Actors still alive from before a reconnect, so the daemon can
         /// rebuild instead of orphaning them.
         resume: Vec<ResumeActor>,
@@ -213,24 +218,23 @@ pub enum Msg {
         unacked_refs: Vec<String>,
     },
     AgentRegisterOk {
+        proto: String,
         node_id: String,
     },
-    Spawn {
+    ActorSpawn {
         actor_id: String,
         name: String,
         env: BTreeMap<String, String>,
         gpu_ids: Vec<u32>,
         node_id: String,
-        gcs_address: String,
-        /// The client this actor belongs to. Carried so the agent can name
-        /// it again on resume, which is what lets a daemon that lost its
-        /// state rebuild who owns what. Empty from a daemon that predates
-        /// the field.
-        #[serde(default)]
+        control_addr: String,
+        /// The client this actor belongs to, so the agent can name it again
+        /// on resume. That is what lets a daemon that lost its state
+        /// rebuild who owns what.
         owner: String,
         // payload: pickle (cls, args, kwargs)
     },
-    SpawnResult {
+    ActorSpawnResult {
         actor_id: String,
         ok: bool,
         #[serde(default)]
@@ -240,7 +244,9 @@ pub enum Msg {
         #[serde(default)]
         pid: u32,
     },
-    CallActor {
+    /// An already-numbered call, dispatched to the agent that runs it.
+    /// `ActorCall` is the client asking for one and getting a ref back.
+    ActorDispatch {
         actor_id: String,
         ref_id: String,
         method: String,
@@ -260,7 +266,9 @@ pub enum Msg {
         exit_code: Option<i32>,
         signal: Option<i32>,
     },
-    Kill {
+    /// Terminate one actor. The client sends it to the daemon and the daemon
+    /// forwards it to the agent unchanged.
+    ActorKill {
         actor_id: String,
     },
     /// A finding about an already-announced service, sent when the agent
@@ -276,52 +284,31 @@ pub enum Msg {
 
     // ---- daemon <-> daemon (mesh) ----
     PeerHello {
+        proto: String,
         node_id: String,
         node_ip: String,
-        control_addr: String,
+        control_port: u16,
         http_port: u16,
         /// Every address the dialing daemon answers on, most preferred
         /// first. node_ip is only what it calls itself, so a third party may
-        /// not route there. Defaulted for old daemons.
-        #[serde(default)]
+        /// not route there.
         addrs: Vec<String>,
         /// Operator tags per address, for consumers that route classes of
         /// traffic over different links. Carried, never interpreted here.
-        #[serde(default)]
         addr_tags: BTreeMap<String, Vec<String>>,
         /// The interface each address sits on, where it was discovered from
-        /// one. Absent from a daemon that predates the field, and from an
-        /// address named by MENTAT_ANNOUNCE_ADDRS.
-        #[serde(default)]
+        /// one. Absent for an address named by MENTAT_ANNOUNCE_ADDRS.
         addr_ifaces: BTreeMap<String, String>,
-        /// True when this daemon answers `probe` on its control port. A
-        /// daemon that predates probing defaults to false and is never
-        /// probed, so it never logs a peer_unexpected_msg per pair.
-        #[serde(default)]
-        probes: bool,
     },
     PeerHelloOk {
+        proto: String,
         node_id: String,
         node_ip: String,
-        /// The accepting daemon's own addresses, so the dialing side records
-        /// full membership too -- without these an outbound link stored
-        /// http_port 0 and mesh-following consumers (mentatd-serve) could not
-        /// reach that daemon's HTTP side. Defaulted for old daemons.
-        #[serde(default)]
-        control_addr: String,
-        #[serde(default)]
+        control_port: u16,
         http_port: u16,
-        #[serde(default)]
         addrs: Vec<String>,
-        #[serde(default)]
         addr_tags: BTreeMap<String, Vec<String>>,
-        /// The interface each address sits on, where it was discovered from
-        /// one. Absent from a daemon that predates the field, and from an
-        /// address named by MENTAT_ANNOUNCE_ADDRS.
-        #[serde(default)]
         addr_ifaces: BTreeMap<String, String>,
-        #[serde(default)]
-        probes: bool,
     },
     /// Reachability probe, sent as the FIRST frame of its own short-lived
     /// connection rather than over the mesh link. The point is the socket
@@ -329,6 +316,7 @@ pub enum Msg {
     /// connecting, so an answer proves that one address pair carries
     /// traffic. Nothing about the mesh link would prove that.
     Probe {
+        proto: String,
         /// The prober's node id, so a mistargeted probe is visible.
         node_id: String,
         /// The address the prober bound locally. Carried for the answering
@@ -339,25 +327,31 @@ pub enum Msg {
     /// having: it says the address reached belongs to the expected node,
     /// rather than to whatever else answers on that port.
     ProbeOk {
+        proto: String,
         node_id: String,
     },
     /// Periodic push of a daemon's own snapshot, so every daemon can serve a
     /// merged cluster view without request forwarding.
     PeerStatus {
-        data: Value,
+        snapshot: Value,
     },
     /// A locally-originated event, replicated so any daemon's /events stream
-    /// carries the whole cluster. Never re-forwarded.
+    /// carries the whole cluster. Never re-forwarded. The origin is the
+    /// event's own `node`.
     PeerEvent {
-        origin: String,
-        line: String,
+        event: Value,
     },
 
     // ---- actor host (python) <-> agent, over the per-actor unix socket ----
+    /// The actor process announcing it is ready for `ctor`. The socket is
+    /// per actor, so connecting is the identification.
     HostHello {
-        actor_id: String,
+        proto: String,
     },
-    Ctor, // payload: pickle (cls, args, kwargs)
+    Ctor {
+        proto: String,
+        // payload: pickle (cls, args, kwargs)
+    },
     CtorOk,
     CtorErr {
         /// repr() of the exception, so the reason survives into Rust logs
@@ -378,8 +372,73 @@ pub enum Msg {
     },
 }
 
-pub fn default_gpu_vendor() -> String {
-    "nvidia".to_string()
+/// What a box is: total memory, cpus, and every GPU an agent may bind.
+///
+/// A count cannot describe a box with two GPU models in it, and memory has
+/// to be a figure rather than a tier because a UMA device shares the system
+/// pool. Every value is an integer, since a float does not survive the JSON
+/// round trip a signature verifier takes.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Machine {
+    /// Total system memory in bytes.
+    pub memory: u64,
+    pub cpus: u32,
+    /// Every device the agent may bind, in device order.
+    pub gpus: Vec<Gpu>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Gpu {
+    /// The device index the agent binds on `actor_spawn`.
+    pub index: u32,
+    pub vendor: String,
+    /// The vendor's product string, e.g. "RTX 6000".
+    pub name: String,
+    /// The device's own memory in bytes. For a UMA device this is the
+    /// shared pool, the same figure as the machine's `memory`, so a
+    /// consumer adding the two counts it twice.
+    pub memory: u64,
+    /// True for a device that shares the system pool (DGX Spark).
+    #[serde(default)]
+    pub uma: bool,
+}
+
+/// Where a service listens.
+///
+/// An empty `host` means the consumer resolves it against the node's
+/// addresses, because the container knows its port but not which of its
+/// node's links the consumer shares. The consumer forms
+/// `http://<host>:<port><path>`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Service {
+    #[serde(default)]
+    pub host: String,
+    pub port: u16,
+    /// Empty, or starts with `/`.
+    #[serde(default)]
+    pub path: String,
+    /// What serves the endpoint, from MENTAT_MODEL_PROVIDER. The daemon
+    /// stores and forwards it unread.
+    #[serde(default)]
+    pub provider: String,
+    /// What the agent found after announcing, such as its server binding
+    /// one address. Advisory: a failed probe quotes it.
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeActor {
+    pub actor_id: String,
+    pub name: String,
+    pub gpu_ids: Vec<u32>,
+    pub pid: u32,
+    /// The client this actor belongs to, as the daemon named it on spawn.
+    #[serde(default)]
+    pub owner: String,
+    /// Ref ids of calls the agent has relayed but not yet answered
+    /// (including the long-lived run() ref).
+    pub pending_refs: Vec<String>,
 }
 
 pub fn write_frame<W: Write>(w: &mut W, frame: &Frame, payload: &[u8]) -> io::Result<()> {
@@ -441,35 +500,6 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> io::Result<bool> {
     Ok(true)
 }
 
-/// A service announced as a port and a path, with the host left open.
-///
-/// The announcing container knows which port it serves on. It does not know
-/// which of its node's addresses the consumer can reach, and hard-coding one
-/// is what makes an endpoint unroutable from off that link. `path` is empty
-/// or starts with `/`, and the consumer forms `http://<host>:<port><path>`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServicePort {
-    pub port: u16,
-    #[serde(default)]
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResumeActor {
-    pub actor_id: String,
-    pub name: String,
-    pub gpu_ids: Vec<u32>,
-    pub pid: u32,
-    /// The client this actor belongs to, as the daemon named it on spawn.
-    /// Empty from an agent that predates the field, and from an actor
-    /// spawned by a daemon that did.
-    #[serde(default)]
-    pub owner: String,
-    /// Ref ids of calls the agent has relayed but not yet answered
-    /// (including the long-lived run() ref).
-    pub pending_refs: Vec<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,8 +509,8 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         let f = Frame {
             req: 7,
-            msg: Msg::Call {
-                actor_id: "a1".into(),
+            msg: Msg::ActorCall {
+                actor_id: "a:01".into(),
                 method: "run".into(),
             },
         };
@@ -490,8 +520,8 @@ mod tests {
         assert_eq!(g.req, 7);
         assert_eq!(p, b"PAYLOAD");
         match g.msg {
-            Msg::Call { actor_id, method } => {
-                assert_eq!(actor_id, "a1");
+            Msg::ActorCall { actor_id, method } => {
+                assert_eq!(actor_id, "a:01");
                 assert_eq!(method, "run");
             }
             other => panic!("wrong variant: {other:?}"),
@@ -512,5 +542,60 @@ mod tests {
         let mut cur = std::io::Cursor::new(buf);
         // The header is short 2 bytes.
         assert!(read_frame(&mut cur).is_err());
+    }
+
+    /// A UMA device repeats the machine total as its own `memory`, and the
+    /// figure has to come back as the integer it went out as.
+    #[test]
+    fn a_uma_machine_round_trips() {
+        let m = Machine {
+            memory: 137_438_953_472,
+            cpus: 20,
+            gpus: vec![Gpu {
+                index: 0,
+                vendor: "nvidia".into(),
+                name: "GB10".into(),
+                memory: 137_438_953_472,
+                uma: true,
+            }],
+        };
+        let back: Machine = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+    }
+
+    /// `uma` defaults, so a discrete card needs no entry for it.
+    #[test]
+    fn uma_defaults_to_false() {
+        let g: Gpu = serde_json::from_str(
+            r#"{"index":1,"vendor":"nvidia","name":"RTX 6000","memory":51539607552}"#,
+        )
+        .unwrap();
+        assert!(!g.uma);
+    }
+
+    /// An unknown `t` is a parse failure today, which closes the link. The
+    /// spec answers `err` and keeps it open, so the caller needs to tell
+    /// this case from a malformed frame.
+    #[test]
+    fn an_unknown_message_type_is_reported_as_unknown() {
+        let mut buf: Vec<u8> = Vec::new();
+        let header = br#"{"req":3,"t":"no_such_message"}"#;
+        buf.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(header);
+        let mut cur = std::io::Cursor::new(buf);
+        match read_frame(&mut cur) {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_major_mismatch_is_refused() {
+        assert!(major_matches(PROTO));
+        assert!(major_matches("0.1"));
+        assert!(!major_matches("1.0"));
+        assert!(!major_matches("nonsense"));
+        assert!(!major_matches("1"));
     }
 }

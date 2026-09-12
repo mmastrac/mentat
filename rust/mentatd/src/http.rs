@@ -154,9 +154,14 @@ fn metrics(shared: &SharedRef) -> String {
         let mut vendor = String::from("nvidia");
         for a in alive {
             n += 1;
-            total += a.gpus.len();
+            total += a.machine.gpus.len();
             free += st.free_gpus_of(&a.id).len();
-            vendor = a.gpu_vendor.clone();
+            vendor = a
+                .machine
+                .gpus
+                .first()
+                .map(|g| g.vendor.clone())
+                .unwrap_or_default();
         }
         out.push_str(&format!(
             "mentat_agents{{group=\"{g}\",vendor=\"{vendor}\"}} {n}\n"

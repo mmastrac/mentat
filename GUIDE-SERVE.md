@@ -16,9 +16,9 @@ mentatd serve
 ## Description
 
 `mentatd-serve` puts one OpenAI-compatible endpoint and one MCP endpoint in
-front of every model the cluster runs. A client specifies a model and the router
-forwards the request to the group serving it. Adding a model means starting
-another deployment. The router needs no change.
+front of every model the cluster runs. A client specifies a model and the
+router forwards the request to the group serving it. Adding a model means
+starting another deployment. The router does not change.
 
 It is a separate binary and container from `mentatd`. The daemon never
 touches inference traffic, so the router can restart, move or stop while
@@ -42,15 +42,14 @@ A daemon is watched on one address however many it is known by. The first
 answer names the node, a second address that answers as the same node is
 kept as an alternate rather than polled, and when the polled address stops
 answering the watch moves to an alternate that does. A watch no seed named,
-that has answered nothing for `MODEL_TTL_S` and that no live daemon lists as
-a peer, is forgotten. `/status.json` lists each watch with its `node_id`
-and `alternates`.
+that has answered nothing for `MODEL_TTL_S` and that live daemons stop
+listing as a peer, is forgotten. `/status.json` lists each watch with its
+`node_id` and `alternates`.
 
 An announcement is a hint. It adds one address to watch. Every claim in it
 is re-read over TCP and probed before it affects routing. The datagram's
-source address and every address it advertises must match
-`ALLOWED_SOURCES`. With `MENTAT_SECRET` set, unsigned announcements are
-refused.
+source address and every address it advertises must match `ALLOWED_SOURCES`.
+With `MENTAT_SECRET` set, unsigned announcements are refused.
 
 The group table merges every daemon's view into one entry per group name. A
 view older than three poll intervals is stale. When two daemons disagree
@@ -60,23 +59,23 @@ about a group, the one reporting more running actors wins.
 
 A group is routable on `/v1` when a live agent announces an OpenAI endpoint
 and that endpoint answers a `/models` probe. The probe is also where model
-names come from: whatever the engine lists under `/v1/models` is what routes
-to it. Nothing announces model names.
+names come from: whatever the engine lists under `/v1/models` is the name
+that routes to it. Nothing announces model names.
 
 A group with actor rows must also have a running one. An engine that runs
 inside actors mentat spawned has its ranks' state to answer for it: an
-endpoint that outlives every rank still answers `/models` from a process
-whose ranks are gone. A group with no rows had nothing placed, whether it
-ran `ray start` without asking for a placement or registered through
-`python -m ray.register`, so the probe is the whole test.
+endpoint still answering after every rank is gone returns `/models` from a
+process whose ranks are gone. A group with no rows had nothing placed,
+whether it ran `ray start` without asking for a placement or registered
+through `python -m ray.register`, so the probe is the whole test.
 
 An engine is admitted as soon as its API answers, which on some models is
 during its self-test.
 
-`/status.json` says why a model is missing. Each group carries `healthy`
-and, when false, `why_not` naming the failed gate: `no announced OpenAI
-endpoint`, `no running actors`, `not probed yet`, `endpoint probe failed`, or
-`endpoint probe stale`. A probe failure quotes every candidate address it
+`/status.json` says why a model is missing. Each group has `healthy` and,
+when false, `why_not` naming the failed gate: `no announced OpenAI
+endpoint`, `no running actors`, `not probed yet`, `endpoint probe failed`,
+or `endpoint probe stale`. A probe failure quotes every candidate address it
 tried and appends the agent's own bind finding when there is one.
 
 ### Retirement
@@ -84,22 +83,21 @@ tried and appends the agent's own bind finding when there is one.
 A daemon drops the agent and actor rows of a container that is long gone
 after its `MENTAT_HISTORY_KEEP_MS`, and a group with no rows left is gone
 from its snapshots. The router keeps its own clock per group as well,
-starting when the group is first seen and reset by every round the group
-can serve. After
-`MODEL_TTL_S` with no such round the group is retired: it leaves
-`/v1/models`, `/status.json`, the status page and the routes, and
+starting when the group is first seen and reset by every round the group can
+serve. After `MODEL_TTL_S` with no such round the group is retired: it
+leaves `/v1/models`, `/status.json`, the status page and the routes, and
 `group_retired` is logged once with the last reason it could not serve.
 
-Retirement is not a decision, only a listing. The group is still probed every
-round, and one answering probe brings it back before the next request.
+Retirement is not a decision, only a listing. The group is still probed
+every round, and one answering probe brings it back before the next request.
 
 ### Candidate addresses
 
 A port-form announcement (see "Announcing endpoints") resolves to one
-candidate URL per address of the announcing node. Candidates on a subnet
-the router is attached to sort first. Within each half, the node's own
-ranking from `MENTAT_ANNOUNCE_IFACES` orders them. Every candidate is
-checked against `ALLOWED_SOURCES`. A URL-form announcement is its own single
+candidate URL per address of the announcing node. Candidates on a subnet the
+router is attached to sort first. Within each half, the node's own ranking
+from `MENTAT_ANNOUNCE_IFACES` orders them. Every candidate is checked
+against `ALLOWED_SOURCES`. A URL-form announcement is its own single
 candidate. The router uses it as written and skips the allowlist check.
 
 The prober walks the list and keeps the first address that answers. Live
@@ -119,38 +117,38 @@ doing.
 
 ### Request handling
 
-Any POST whose body carries `model` is forwarded to the group serving that
+Any POST whose body sets `model` is forwarded to the group serving that
 model, so `/v1/chat/completions`, `/tokenize`, `/detokenize` and any other
-endpoint the engine exposes all work. A body with no `model` is refused
-with 400.
+endpoint the engine exposes all work. A body with no `model` is refused with
+400.
 
 The body is read to find that name and forwarded byte for byte, with its
-`Content-Type` as the client sent it. Two forms carry a name. JSON has it as
-a top-level field. `multipart/form-data` has it as a text field, which is how
-the audio endpoints are spelled: `/v1/audio/transcriptions` posts the upload
-beside `model`. The form's parts are walked rather than its bytes searched,
-so an upload that happens to contain `name="model"` routes on the real field.
-An upload itself is never read. A body in neither form is refused with 400.
+`Content-Type` as the client sent it. Two forms have a name. JSON has it as
+a top-level field. `multipart/form-data` has it as a text field, which is
+how the audio endpoints are spelled: `/v1/audio/transcriptions` posts the
+upload beside `model`. The form's parts are walked rather than its bytes
+searched, so an upload that happens to contain `name="model"` routes on the
+real field. An upload itself is never read. A body in neither form is
+refused with 400.
 
 The announced base ends in `/v1`. A root-level path such as `/tokenize` is
 resolved against the base with the `/v1` removed.
 
 A known model routes and streams through, frame by frame with backpressure.
-A model that is not routable when a request arrives holds the request for
-up to `MODEL_WAIT_S`, since a model that restarts is missing for a while,
-and a refused upstream connection is retried inside the same window. After
-it, a model whose group exists but is not admitted returns 503 with the
-reason and a name nothing serves returns 404. Once the upstream has taken
-a request it is never sent again. Bodies over 128 MiB are refused. One
-upstream request may run for `SERVING_TIMEOUT_S`.
+A model that is not routable when a request arrives holds the request for up
+to `MODEL_WAIT_S`, since a model that restarts is missing for a while, and a
+refused upstream connection is retried inside the same window. After it, a
+model whose group exists but is not admitted returns 503 with the reason and
+a name nothing serves returns 404. Once the upstream has taken a request it
+is never sent again. Bodies over 128 MiB are refused. One upstream request
+may run for `SERVING_TIMEOUT_S`.
 
-A streaming request whose upstream has not answered within
-`SSE_KEEPALIVE_S` gets its headers and an SSE comment line, `: keepalive`,
-every interval until the first token, so a slow prefill does not look like
-an idle connection to the client or anything between. The status is 200
-from the first comment, so an upstream failure after that arrives as an
-error event, `{"error": {...}}`, followed by `[DONE]`. The OpenAI clients
-raise on it.
+A streaming request whose upstream has not answered within `SSE_KEEPALIVE_S`
+gets its headers and an SSE comment line, `: keepalive`, every interval
+until the first token, so a slow prefill does not look like an idle
+connection to the client or anything between. The status is 200 from the
+first comment, so an upstream failure after that arrives as an error event,
+`{"error": {...}}`, followed by `[DONE]`. The OpenAI clients raise on it.
 
 ## Announcing endpoints
 
@@ -183,17 +181,17 @@ An endpoint takes one of two forms:
 | `8000/v1`, or `http://0.0.0.0:8000/v1` | Every address this node announces |
 | `http://10.0.0.1:8000/v1` | That address only |
 
-Prefer the port form. An endpoint announced on one address is reachable
-only from that link, so a router off it can never route to the model. The
-port form leaves the host to the router, which resolves it against every
-address the node announces. The same image then serves a router on the LAN
-and one on the fabric, and a group stays routable when a fabric cable drops.
+Prefer the port form. An endpoint announced on one address is reachable only
+from that link, so a router off it can never route to the model. The port
+form leaves the host to the router, which resolves it against every address
+the node announces. The same image then serves a router on the LAN and one
+on the fabric, and a group stays routable when a fabric cable drops.
 
 The port form assumes the API server binds the wildcard address, which
 `--host 0.0.0.0` does and vLLM does by default. The agent watches its own
-`/proc/net/tcp` for the announced port. If the server bound a single address, the
-agent logs `service_bind_narrow` and attaches the finding to the
-announcement, so `/status.json` says `bound to 10.0.0.1 only` beside the
+`/proc/net/tcp` for the announced port. If the server bound a single
+address, the agent logs `service_bind_narrow` and attaches the finding to
+the announcement, so `/status.json` says `bound to 10.0.0.1 only` beside the
 failed probe. The finding is advisory. The probe alone admits an endpoint.
 
 The URL form is for a server the port form cannot describe: a different
@@ -221,22 +219,21 @@ curl -s http://<node>:6381/v1/models          # what routes right now
 curl -s http://<node>:6381/status.json | jq . # and why, per group
 ```
 
-The status document carries `uptime_s`. Several of the router's guards are
-per-process, for example the once-only log of a rejected source, so a log
-line that seems to repeat may be one line per process. A line stamped
-earlier than now minus `uptime_s` came from an earlier process.
+The status document has `uptime_s`. Several of the router's guards are per-
+process, for example the once-only log of a rejected source, so a log line
+that seems to repeat may be one line per process. A line stamped earlier
+than now minus `uptime_s` came from an earlier process.
 
 ### The status page
 
-`http://<node>:6381/` in a browser is a live table of what the router is
-carrying and what each engine is doing with it. The page polls
-`/stats.json`.
+`http://<node>:6381/` in a browser is a live table of what the router routes
+and what each engine is doing with it. The page polls `/stats.json`.
 
 The engine publishes queue depth, KV usage, token totals and latency
 histograms on `/metrics`, so `running`, `waiting`, `kv`, the token counts
 and the mean TTFT, queue and inter-token columns come from the engine
-serving that model. The router adds `proxied`, the number of requests it is
-carrying for that model right now.
+serving that model. The router adds `proxied`, the number of requests in
+flight for that model.
 
 Clicking a model lists those requests one per row: body size, time waiting
 with no first byte, time to first byte once it arrives, and bytes returned.
@@ -257,20 +254,20 @@ curl -s http://<node>:6381/v1/responses/input_tokens \
 # {"object":"response.input_tokens","input_tokens":14}
 ```
 
-The router owns this route. vLLM has no such endpoint, and the path lands on
-its `/v1/responses/{response_id}` pattern for a 405.
+The router owns this route. vLLM does not serve that endpoint, and the path
+lands on its `/v1/responses/{response_id}` pattern for a 405.
 
 The serving engine counts the text. The router sends it to that group's
 `/tokenize` as a chat request, so the chat template is included.
 `instructions` becomes a leading system message and `tools` are passed
-through, because the template renders both and the engine then prices
-them. Text-only counts match the engine.
+through, because the template renders both and the engine then prices them.
+Text-only counts match the engine.
 
-Media is estimated at flat rates: 4000 tokens per image and 40000 per
-video, whatever the resolution or length. The true cost depends on tiling
-and the model's patch size, which the router cannot know without fetching
-the media and running the engine's preprocessor. An attachment that is
-neither, such as a PDF, contributes only the text that accompanies it.
+Media is estimated at flat rates: 4000 tokens per image and 40000 per video,
+whatever the resolution or length. The true cost depends on tiling and the
+model's patch size, which the router cannot know without fetching the media
+and running the engine's preprocessor. An attachment that is neither, such
+as a PDF, contributes only the text that accompanies it.
 
 The route needs `MENTAT_MODEL_PROVIDER=vllm` on the container. A group that
 announced no provider, or one the router does not know, gets a 400 naming
@@ -278,15 +275,22 @@ the group.
 
 ### The MCP merge
 
-`/mcp` merges every group's management MCP into one endpoint. Tool names
-are prefixed `<group>__`, so identical names across containers cannot
-collide. `tools/list` answers are cached per group for `TOOLS_TTL_S`.
+`/mcp` merges every group's management MCP into a single endpoint sharing
+one flat namespace. Groups run the same status server, so a name appearing
+in several of them is one tool with several places to run it: it is listed
+once, with the first group's description and schema, and gains a `__group`
+argument naming where to run it. Groups are ordered as in `/status.json`, so
+which one is first stays put. The argument is required when several groups
+offer the tool and optional when one does. It is stripped before the call is
+forwarded, so the container sees its own plain arguments. `tools/list`
+answers are cached per group for `TOOLS_TTL_S`.
 
 The merge skips the admission gate. A status server matters most while its
 engine is loading or wedged, which is when the gate would exclude it.
 
 One native tool, `serve_status`, reports the watched daemons, each group's
-health and endpoints, and the model table.
+health and endpoints, and the model table. That name is taken: a group tool
+called `serve_status` is dropped from the merge, with a log line.
 
 ## Environment
 
@@ -295,114 +299,120 @@ positive number. Anything else takes the default.
 
 - `SERVE_PORT` (default 6381)
 
-  HTTP port.
+HTTP port.
 
 - `MENTAT_DAEMONS` (default `127.0.0.1:6380`)
 
-  Comma-separated daemon HTTP addresses to seed the watch set. Unset seeds
-  the local daemon. Set and empty seeds nothing, leaving UDP as the only
-  path in. Compose cannot express empty, since `${VAR:-default}` reads it as
-  unset.
+Comma-separated daemon HTTP addresses to seed the watch set. Unset seeds the
+local daemon. Set and empty seeds nothing, leaving UDP as the only path in.
+Compose cannot express empty, since `${VAR:-default}` reads it as unset.
 
 - `MENTAT_ANNOUNCE_PORT` (default 6382)
 
-  UDP port to listen for daemon announcements on. `0` turns the listener
-  off.
+UDP port to listen for daemon announcements on. `0` turns the listener off.
 
-- `ALLOWED_SOURCES` (default `10.100.0.,192.168.1.,127.0.0.1,::1,172.`)
+- `ALLOWED_SOURCES` (default `local`)
 
-  Comma-separated address prefixes. An announcement's source address and
-  every address it advertises must match one before the router acts on it.
-  The address a node calls its own is not checked, since nothing acts on it.
-  `172.` covers bridge-networked clients, which keep a `172.x` source. A
-  rejected source logs `announce_source_not_allowed` once, with the
-  prefixes in force.
+Comma-separated entries, in any mix of three forms:
 
-  A router that shares no wire with a fabric should leave that fabric's
-  prefix out. Otherwise the router ranks the fabric address first, waits
-  `PROBE_TIMEOUT_S` on it every round, and falls through.
+- `local`: every network this box has an interface on, read from the
+  interface list at each check. That covers each fabric and LAN the router
+  is cabled to, loopback, and the docker bridge, which is how a bridge-
+  networked client keeps its `172.x` source and still gets in.
+- a CIDR block, `10.100.0.0/22` or `fd00::/8`, or a bare address as a single
+  host.
+- a literal text prefix, `172.`, for a range no single block names.
+
+An announcement's source address and every address it advertises must match
+one entry before the router acts on it. The address a node calls its own is
+not checked, since nothing acts on it. A rejected source logs
+`announce_source_not_allowed` once, with the entries in force.
+
+The default admits a fabric only when this box is on it, which is the same
+wire test candidate ranking uses. Writing out a fabric the router cannot
+reach costs a `PROBE_TIMEOUT_S` wait every round before the fall-through.
 
 - `DISCOVER_PEERS` (default `1`)
 
-  `1` adds the mesh peers of every watched daemon to the watch set. Any
-  other value disables it.
+`1` adds the mesh peers of every watched daemon to the watch set. Any other
+value disables it.
 
 - `POLL_INTERVAL_S` (default 10)
 
-  Interval between `/status` polls of each watched daemon. A daemon view
-  older than three intervals is stale.
+Interval between `/status` polls of each watched daemon. A daemon view older
+than three intervals is stale.
 
 - `PROBE_INTERVAL_S` (default 5)
 
-  Interval between endpoint probes.
+Interval between endpoint probes.
 
 - `PROBE_TIMEOUT_S` (default 3)
 
-  Deadline for one probe.
+Deadline for one probe.
 
 - `PROBE_FRESH_S` (default: three probe intervals plus one timeout)
 
-  How long a probe result stays valid. Past it the group reads
-  `endpoint probe stale`. The default clears one round that walks every candidate
-  address, since each dead one costs a whole `PROBE_TIMEOUT_S`. Setting it
-  alone makes groups flap in and out of the route table.
+How long a probe result stays valid. Past it the group reads `endpoint probe
+stale`. The default clears one round that walks every candidate address,
+since each dead one costs a whole `PROBE_TIMEOUT_S`. Setting it alone makes
+groups flap in and out of the route table.
 
 - `PROBE_PROMOTE_S` (default: six probe intervals)
 
-  How often a group serving from a lower-ranked address re-tries the
-  addresses ranked above it.
+How often a group serving from a lower-ranked address re-tries the addresses
+ranked above it.
 
 - `MODEL_WAIT_S` (default 60)
 
-  How long a request for a model that is not routable is held before it is
-  refused, and how long a refused upstream connection is retried. See
-  "Request handling".
+How long a request for a model that is not routable is held before it is
+refused, and how long a refused upstream connection is retried. See "Request
+handling".
 
 - `SSE_KEEPALIVE_S` (default 10)
 
-  Interval between `: keepalive` comment lines on a streaming response
-  while the upstream has not yet answered. `0` turns them off, and the
-  upstream's status then passes through unchanged.
+Interval between `: keepalive` comment lines on a streaming response while
+the upstream has not yet answered. `0` turns them off, and the upstream's
+status then passes through unchanged.
 
 - `SERVING_TIMEOUT_S` (default 1800)
 
-  Deadline for one upstream request. A non-streaming answer arrives when
-  generation ends, so this is sized for generation. Lower it and long
-  generations are cut before any hung request is.
+Deadline for one upstream request. A non-streaming answer arrives when
+generation ends, so this is sized for generation. Lower it and long
+generations are cut before any hung request is.
 
 - `MCP_TIMEOUT_S` (default 180)
 
-  Deadline for one forwarded MCP call and for the tokenize call behind
-  `/v1/responses/input_tokens`. Some management tools block for their whole
-  sampling window, so it is longer than `PROBE_TIMEOUT_S`.
+Deadline for one forwarded MCP call and for the tokenize call behind
+`/v1/responses/input_tokens`. Some management tools block for their whole
+sampling window, so it is longer than `PROBE_TIMEOUT_S`.
 
 - `TOOLS_TTL_S` (default 60)
 
-  How long a group's `tools/list` answer is cached.
+How long a group's `tools/list` answer is cached.
 
 - `MODEL_TTL_S` (default 3600)
 
-  How long a group stays listed while nothing it announces can serve, and
-  how long a daemon no seed named is watched while it answers nothing. See
-  "Retirement" and "Discovery". The default sits out a reboot, a weight
-  reload or a fabric outage without a model disappearing mid-repair.
+How long a group stays listed while nothing it announces can serve, and how
+long a daemon no seed named is watched while it answers nothing. See
+"Retirement" and "Discovery". The default sits out a reboot, a weight reload
+or a fabric outage without a model disappearing mid-repair.
 
 - `MENTAT_SECRET` (default: unset)
 
-  HMAC key for announcements. Must match the daemons'. A keyed router takes
-  signed announcements only, so a half-applied rollout stops discovery until
-  the seed list finds the daemons instead. `verify` in `/status.json` says
-  whether a key is in force.
+HMAC key for announcements. Must match the daemons'. A keyed router takes
+signed announcements only, so a half-applied rollout stops discovery until
+the seed list finds the daemons instead. `verify` in `/status.json` says
+whether a key is in force.
 
 - `MENTAT_SECRET_FILE` (default: unset)
 
-  Read the key from this file instead of `MENTAT_SECRET`. A file that cannot
-  be read, or reads empty, stops the process at boot with the reason.
+Read the key from this file instead of `MENTAT_SECRET`. A file that cannot
+be read, or reads empty, stops the process at boot with the reason.
 
 - `MENTAT_UNIVERSE` (default `default`)
 
-  Cluster name. An announcement from another universe is dropped before its
-  signature is checked, without a log line.
+Cluster name. An announcement from another universe is dropped before its
+signature is checked, without a log line.
 
 ## Limits
 
@@ -414,9 +424,8 @@ positive number. Anything else takes the default.
   warming up is routable.
 - Health is per group. A group with one wedged rank reads healthy while its
   API answers.
-- The control port has no authentication. Signing covers announcements
-  only, and every claim in one is re-read over TCP before it affects
-  routing.
+- The control port does not authenticate. Signing covers announcements only,
+  and every claim in one is re-read over TCP before it affects routing.
 
 ## See also
 

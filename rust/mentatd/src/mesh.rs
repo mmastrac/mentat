@@ -99,7 +99,7 @@ fn connector(shared: SharedRef, seed: String, control_port: u16, http_port: u16,
             let st = shared.st.lock().unwrap();
             match &known_id {
                 Some(id) => st.peers.get(id).map(|p| p.alive).unwrap_or(false),
-                None => st.peers.values().any(|p| p.alive && p.control_addr == seed),
+                None => st.peers.values().any(|p| p.alive && format!("{}:{}", p.node_ip, p.control_port) == seed),
             }
         };
         if covered {
@@ -168,7 +168,7 @@ fn dial_targets(shared: &SharedRef, seed: &str, known_id: Option<&str>) -> Vec<S
         None => st
             .peers
             .values()
-            .find(|p| p.control_addr == seed || p.addrs.contains(&host)),
+            .find(|p| format!("{}:{}", p.node_ip, p.control_port) == seed || p.addrs.contains(&host)),
     };
     if let Some(p) = peer {
         for a in p.addrs.iter().filter(|a| !is_loopback(a)) {
@@ -221,14 +221,14 @@ fn try_connect(
     };
     writer.send(
         Msg::PeerHello {
+            proto: crate::proto::proto(),
             node_id: my_id.clone(),
             node_ip: my_ip.clone(),
-            control_addr: format!("{my_ip}:{control_port}"),
+            control_port,
             http_port,
             addrs: crate::announce::local_addrs(),
             addr_tags: crate::announce::local_addr_tags(),
             addr_ifaces: crate::announce::local_addr_ifaces(),
-            probes: true,
         },
         1,
         &[],
@@ -247,27 +247,33 @@ fn try_connect(
         peer_addrs,
         peer_tags,
         peer_ifaces,
-        peer_probes,
     ) = match frame.msg {
         Msg::PeerHelloOk {
+            proto,
             node_id,
             node_ip,
-            control_addr,
+            control_port,
             http_port,
             addrs,
             addr_tags,
             addr_ifaces,
-            probes,
-        } => (
-            node_id,
-            node_ip,
-            control_addr,
-            http_port,
-            addrs,
-            addr_tags,
-            addr_ifaces,
-            probes,
-        ),
+        } => {
+            if !crate::proto::major_matches(&proto) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("peer speaks proto {proto}, this daemon {}", crate::proto::PROTO),
+                ));
+            }
+            (
+                node_id,
+                node_ip,
+                control_port,
+                http_port,
+                addrs,
+                addr_tags,
+                addr_ifaces,
+            )
+        }
         other => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -279,13 +285,7 @@ fn try_connect(
         // The seed list includes ourselves; harmless, just don't peer.
         return Ok(None);
     }
-    // An old daemon replies without its addresses; the dialed seed is then
-    // the best control address known, and the http port stays unknown.
-    let control = if peer_control.is_empty() {
-        seed.to_string()
-    } else {
-        peer_control
-    };
+
     let link_ip = seed
         .rsplit_once(':')
         .map(|(h, _)| h.to_string())
@@ -300,8 +300,7 @@ fn try_connect(
             addrs: peer_addrs,
             addr_tags: peer_tags,
             addr_ifaces: peer_ifaces,
-            probes: peer_probes,
-            control_addr: control,
+            control_port: peer_control,
             http_port: peer_http,
         },
         writer.clone(),
@@ -323,37 +322,53 @@ pub fn accept_peer(
     hello: (Frame, Vec<u8>),
 ) {
     let Msg::PeerHello {
+        proto,
         node_id,
         node_ip,
-        control_addr,
+        control_port,
         http_port,
         addrs,
         addr_tags,
         addr_ifaces,
-        probes,
     } = hello.0.msg
     else {
         unreachable!()
     };
-    let (my_id, my_ip, my_control, my_http) = {
+    let (my_id, my_ip, my_control_port, my_http) = {
         let st = shared.st.lock().unwrap();
         (
             st.node_id.clone(),
             st.node_ip.clone(),
-            st.gcs_address.clone(),
+            st.control_port,
             st.http_port,
         )
     };
+    if !crate::proto::major_matches(&proto) {
+        // A peer of another major takes no part in election, so the link is
+        // refused rather than kept as a half-understood member.
+        let _ = writer.send(
+            Msg::Err {
+                error: format!("proto {} here, {proto} offered", crate::proto::PROTO),
+            },
+            hello.0.req,
+            &[],
+        );
+        log(
+            "peer_proto_mismatch",
+            &[("peer", node_id.clone()), ("proto", proto)],
+        );
+        return;
+    }
     let _ = writer.send(
         Msg::PeerHelloOk {
             node_id: my_id.clone(),
+            proto: crate::proto::proto(),
             node_ip: my_ip,
-            control_addr: my_control,
+            control_port: my_control_port,
             http_port: my_http,
             addrs: crate::announce::local_addrs(),
             addr_tags: crate::announce::local_addr_tags(),
             addr_ifaces: crate::announce::local_addr_ifaces(),
-            probes: true,
         },
         hello.0.req,
         &[],
@@ -371,8 +386,7 @@ pub fn accept_peer(
             addrs,
             addr_tags,
             addr_ifaces,
-            probes,
-            control_addr,
+            control_port,
             http_port,
         },
         writer.clone(),
@@ -392,8 +406,7 @@ struct PeerIdent {
     addrs: Vec<String>,
     addr_tags: std::collections::BTreeMap<String, Vec<String>>,
     addr_ifaces: std::collections::BTreeMap<String, String>,
-    probes: bool,
-    control_addr: String,
+    control_port: u16,
     http_port: u16,
 }
 
@@ -429,8 +442,7 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
         addrs,
         addr_tags,
         addr_ifaces,
-        probes,
-        control_addr,
+        control_port,
         http_port,
     } = p;
     let mut st = shared.st.lock().unwrap();
@@ -487,9 +499,8 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
             addrs,
             addr_tags,
             addr_ifaces,
-            probes,
             probe_pairs,
-            control_addr,
+            control_port,
             http_port,
             writer,
             alive: true,
@@ -525,7 +536,7 @@ fn peer_loop(
             }
         };
         match frame.msg {
-            Msg::PeerStatus { data } => {
+            Msg::PeerStatus { snapshot: data } => {
                 let mut st = shared.st.lock().unwrap();
                 if let Some(p) = st.peers.get_mut(&peer_id) {
                     // The push carries the peer's current addresses. The
@@ -559,12 +570,9 @@ fn peer_loop(
                     }
                 }
             }
-            Msg::PeerEvent { line, .. } => {
+            Msg::PeerEvent { event } => {
                 let mut st = shared.st.lock().unwrap();
-                st.deliver_peer_event(line);
-            }
-            Msg::Ping => {
-                let _ = writer.send(Msg::Pong, frame.req, &[]);
+                st.deliver_peer_event(event.to_string());
             }
             Msg::Pong => {
                 let mut st = shared.st.lock().unwrap();
@@ -783,7 +791,7 @@ fn status_pusher(shared: SharedRef) {
             )
         };
         for w in writers {
-            let _ = w.send(Msg::PeerStatus { data: snap.clone() }, 0, &[]);
+            let _ = w.send(Msg::PeerStatus { snapshot: snap.clone() }, 0, &[]);
         }
     }
 }
@@ -821,11 +829,8 @@ fn prober(shared: SharedRef) {
             let st = shared.st.lock().unwrap();
             st.peers
                 .values()
-                .filter(|p| p.alive && p.probes && !p.addrs.is_empty())
-                .filter_map(|p| {
-                    let port: u16 = p.control_addr.rsplit_once(':')?.1.parse().ok()?;
-                    Some((p.node_id.clone(), port, p.addrs.clone()))
-                })
+                .filter(|p| p.alive && !p.addrs.is_empty())
+                .map(|p| (p.node_id.clone(), p.control_port, p.addrs.clone()))
                 .collect()
         };
         let workers: Vec<std::thread::JoinHandle<()>> = targets
@@ -954,6 +959,7 @@ fn probe_pair(
     let mut reader = BufReader::new(stream);
     writer.send(
         Msg::Probe {
+            proto: crate::proto::proto(),
             node_id: my_id.to_string(),
             local_addr: local.to_string(),
         },
@@ -965,8 +971,8 @@ fn probe_pair(
             // The reply's identity is checked. Both fabrics are numbered
             // out of the same subnet, so an address that answers is not by
             // itself evidence that the intended node answered.
-            Msg::ProbeOk { node_id } if node_id == peer_id => Ok(started.elapsed()),
-            Msg::ProbeOk { node_id } => Err(std::io::Error::new(
+            Msg::ProbeOk { node_id, .. } if node_id == peer_id => Ok(started.elapsed()),
+            Msg::ProbeOk { node_id, .. } => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("node {node_id} answered, expected {peer_id}"),
             )),

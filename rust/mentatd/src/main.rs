@@ -85,12 +85,18 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Kill actors (all, or one group's). The manual unstick lever.
+    /// Kill actors in one group, or every group's with --all. The manual
+    /// unstick lever. Clap requires exactly one of the two, so an inherited
+    /// `ray stop` in an entrypoint fails here rather than reaching the
+    /// whole cluster.
+    #[command(group = clap::ArgGroup::new("scope").required(true).multiple(false))]
     Stop {
         #[arg(long)]
         address: Option<String>,
-        #[arg(long)]
+        #[arg(long, group = "scope")]
         group: Option<String>,
+        #[arg(long, group = "scope")]
+        all: bool,
     },
     /// Internal: the detached agent process spawned by `start`.
     #[command(hide = true)]
@@ -305,7 +311,7 @@ fn main() {
                     group: scope.clone(),
                 },
             ) {
-                Ok((Msg::StatusOk { data }, _)) => {
+                Ok((Msg::StatusOk { snapshot: data }, _)) => {
                     if json {
                         println!("{data}");
                     } else {
@@ -322,9 +328,19 @@ fn main() {
                 }
             }
         }
-        Some(Cmd::Stop { address, group }) => {
+        Some(Cmd::Stop {
+            address,
+            group,
+            all,
+        }) => {
             let addr = resolve_address(address);
-            match cli_request(&addr, Msg::StopAll { group }) {
+            match cli_request(
+                &addr,
+                Msg::ActorStop {
+                    group: group.unwrap_or_default(),
+                    all,
+                },
+            ) {
                 Ok(_) => println!("stop sent"),
                 Err(e) => {
                     eprintln!("mentatd: daemon at {addr}: {e}");
@@ -377,6 +393,7 @@ fn cli_request(addr: &str, msg: Msg) -> std::io::Result<(Msg, Vec<u8>)> {
         &Frame {
             req: 1,
             msg: Msg::Hello {
+                proto: proto::proto(),
                 client_id: state::random_hex_id(),
                 group: group_from_env(),
                 session: false,

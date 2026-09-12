@@ -104,24 +104,16 @@ pub struct AgentInfo {
     pub group: String,
     pub node_id: NodeId,
     pub node_ip: String,
-    pub gpus: Vec<u32>,
-    pub gpu_vendor: String,
-    pub cpus: u32,
+    /// What this box is. A count cannot describe a heterogeneous node, so
+    /// the agent reports every device it may bind.
+    pub machine: crate::proto::Machine,
     pub container: String,
     pub pid: u32,
-    /// Announced service endpoints ("openai", "mcp" -> URL). Stored and
-    /// republished verbatim for mentatd-serve.
-    pub services: std::collections::BTreeMap<String, String>,
-    /// The same, for services announced as a port with the host left open.
-    /// The daemon does not resolve them: it does not know which links the
-    /// router shares with this node, and the router does.
-    pub services_ports: std::collections::BTreeMap<String, crate::proto::ServicePort>,
-    /// What the agent noticed about a service after announcing it, keyed by
-    /// service name. Republished so the router can say why a probe failed.
-    pub service_notes: std::collections::BTreeMap<String, String>,
-    /// What serves the announced `openai` endpoint (`vllm`). Stored and
-    /// republished verbatim, like the endpoints themselves.
-    pub provider: String,
+    /// Announced service endpoints ("openai", "mcp"). Stored and
+    /// republished verbatim for mentatd-serve, which resolves an empty
+    /// `host` against this node's addresses. The daemon does not: only the
+    /// router knows which links it shares with this node.
+    pub services: std::collections::BTreeMap<String, crate::proto::Service>,
     pub writer: FrameWriter,
     pub alive: bool,
     /// When the agent link EOFed (degrade window start). None while
@@ -155,7 +147,7 @@ pub struct PgInfo {
     pub id: PgId,
     pub group: String,
     pub owner: ClientId,
-    pub bundles: Vec<f64>,
+    pub bundles: Vec<u32>,
     pub strategy: String,
     pub assignment: Vec<Option<BundleAssignment>>,
     pub state: PgState,
@@ -196,6 +188,9 @@ pub struct RefInfo {
 pub struct ClientInfo {
     pub id: ClientId,
     pub group: String,
+    /// "driver" or "cli", as `hello` reported it. The snapshot's `clients`
+    /// row shows it, so an operator can tell a rank from a `mentatd status`.
+    pub kind: String,
     pub node_id: NodeId,
     pub has_session: bool,
 }
@@ -229,6 +224,34 @@ pub struct Counters {
     pub agents_registered: u64,
     /// Connections piped to the head.
     pub relayed: u64,
+}
+
+/// One entry of an event's `patch`: where in the snapshot to store a row.
+///
+/// `at` is an array of keys rather than a joined string, since a group name
+/// and an id are opaque and either may hold any character. An entry with no
+/// `value` removes the path.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Patch {
+    pub at: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+}
+
+impl Patch {
+    pub fn set(at: &[&str], value: Value) -> Patch {
+        Patch {
+            at: at.iter().map(|s| s.to_string()).collect(),
+            value: Some(value),
+        }
+    }
+
+    pub fn remove(at: &[&str]) -> Patch {
+        Patch {
+            at: at.iter().map(|s| s.to_string()).collect(),
+            value: None,
+        }
+    }
 }
 
 /// One probed (local address -> peer address) pair.
@@ -272,12 +295,9 @@ pub struct PeerInfo {
     pub addr_tags: std::collections::BTreeMap<String, Vec<String>>,
     /// The interface each address sits on, where the peer knew one.
     pub addr_ifaces: std::collections::BTreeMap<String, String>,
-    /// True when this peer answers probes. False for a daemon that predates
-    /// them, which is never probed.
-    pub probes: bool,
     /// What probing this peer has found, keyed local then remote address.
     pub probe_pairs: ProbeTable,
-    pub control_addr: String,
+    pub control_port: u16,
     pub http_port: u16,
     pub writer: FrameWriter,
     pub alive: bool,
@@ -294,7 +314,10 @@ pub struct State {
     pub node_id: NodeId,
     pub node_ip: String,
     pub hostname: String,
-    pub gcs_address: String,
+    pub control_addr: String,
+    /// The port half of `control_addr`. The mesh hello sends it, and a peer
+    /// dials each of this node's addresses on it.
+    pub control_port: u16,
     /// This daemon's own HTTP side-port, echoed on PeerHelloOk so the
     /// dialing side records full membership.
     pub http_port: u16,
@@ -323,8 +346,10 @@ pub struct State {
     pub clients: HashMap<ClientId, ClientInfo>,
     /// Every open client socket, so a head change can close them all.
     pub client_links: Vec<(ClientId, FrameWriter)>,
-    /// Named placements, by name. Only the head fills this in.
-    pub claims: std::collections::BTreeMap<String, ClaimInfo>,
+    /// Named placements, keyed by group then name. Only the head fills
+    /// this in. A claim name belongs to its group, so two groups that pick
+    /// one name hold two claims.
+    pub claims: std::collections::BTreeMap<(String, String), ClaimInfo>,
     pub claim_generation: u64,
     /// Agent ids already refused for a misfiled node, so a container that
     /// retries every few seconds is named once rather than every round. The
@@ -349,7 +374,7 @@ pub struct Shared {
 pub type SharedRef = Arc<Shared>;
 
 impl State {
-    pub fn new(node_ip: String, hostname: String, gcs_address: String) -> Self {
+    pub fn new(node_ip: String, hostname: String, control_addr: String) -> Self {
         let node_id = node_id_for(&node_ip);
         State {
             head_node_id: String::new(),
@@ -360,7 +385,11 @@ impl State {
             node_id,
             node_ip,
             hostname,
-            gcs_address,
+            control_port: control_addr
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse().ok())
+                .unwrap_or(0),
+            control_addr,
             http_port: 0,
             signing: false,
             agents: HashMap::new(),
@@ -395,6 +424,17 @@ impl State {
     /// Record a locally-originated event: push to live subscribers and
     /// replicate to mesh peers (who deliver to their subscribers only --
     /// events are never re-forwarded).
+    ///
+    /// `patch` names paths into the snapshot and the rows to store there, so
+    /// an event defines no shapes of its own. `why` is free text for a log.
+    pub fn emit_patch(&mut self, kind: &str, patch: Vec<Patch>, why: &str) {
+        let mut fields = json!({ "patch": patch });
+        if !why.is_empty() {
+            fields["why"] = why.into();
+        }
+        self.emit(kind, fields);
+    }
+
     pub fn emit(&mut self, kind: &str, fields: Value) {
         let seq = self.next_event_seq;
         self.next_event_seq += 1;
@@ -412,13 +452,11 @@ impl State {
         let line = data.to_string();
         mentat_common::logfmt::log("event", &[("data", line.clone())]);
         self.event_subs.retain(|tx| tx.send(line.clone()).is_ok());
-        let origin = self.node_id.clone();
         for peer in self.peers.values() {
             if peer.alive {
                 let _ = peer.writer.send(
                     crate::proto::Msg::PeerEvent {
-                        origin: origin.clone(),
-                        line: line.clone(),
+                        event: data.clone(),
                     },
                     0,
                     &[],
@@ -437,7 +475,7 @@ impl State {
         let Some(agent) = self.agents.get(agent_id) else {
             return Vec::new();
         };
-        let mut free: Vec<u32> = agent.gpus.clone();
+        let mut free: Vec<u32> = agent.machine.gpus.iter().map(|g| g.index).collect();
         for pg in self.pgs.values() {
             if pg.state == PgState::Removed {
                 continue;
@@ -490,6 +528,17 @@ pub fn node_ip_of(node_id: &str) -> Option<String> {
 }
 
 /// Random 32-hex actor/pg/client ids, ray-shaped.
+/// An actor id: `a:` and 32 hex characters.
+pub fn new_actor_id() -> String {
+    format!("a:{}", random_hex_id())
+}
+
+/// A placement group id: `p:` and 32 hex characters. It is also the handle
+/// `ref_get` resolves once the group is CREATED.
+pub fn new_pg_id() -> String {
+    format!("p:{}", random_hex_id())
+}
+
 pub fn random_hex_id() -> String {
     let mut buf = [0u8; 16];
     // /dev/urandom exists on both macOS and Linux; failure here means the OS

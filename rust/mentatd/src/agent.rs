@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::cfg;
 use crate::daemon::set_keepalive;
-use crate::gpu::detect_gpus;
-use crate::proto::{read_frame, Msg, ResumeActor, ServicePort};
+use crate::proto::{read_frame, Machine, Msg, ResumeActor, Service};
 use crate::state::{is_loopback, local_ip_toward, FrameWriter, UnixFrameWriter};
 use mentat_common::logfmt::log;
 
@@ -44,14 +43,9 @@ struct HostActor {
     kill_requested: bool,
 }
 
-/// What this container announces: whole URLs, and ports whose host the
-/// consumer resolves.
-struct Services {
-    urls: BTreeMap<String, String>,
-    ports: BTreeMap<String, ServicePort>,
-    /// What serves the `openai` endpoint, from MENTAT_MODEL_PROVIDER.
-    provider: String,
-}
+/// What this container announces, keyed by service name. An empty `host`
+/// leaves the consumer to resolve it against the node's addresses.
+type Services = BTreeMap<String, Service>;
 
 struct AgentShared {
     daemon: Mutex<Option<FrameWriter>>,
@@ -88,18 +82,10 @@ pub fn run(opts: AgentOpts) -> ! {
     // agent ids made their registrations replace each other in a loop on
     // first deployment.
     let agent_id = format!("{}@{}@{}", opts.group, container, node_ip);
-    let gpus = detect_gpus();
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
-        .unwrap_or(1);
+    let machine = crate::gpu::detect_machine();
     let sock_dir = std::env::var("MENTAT_SOCK_DIR").unwrap_or_else(|_| "/tmp/mentat".into());
     let _ = std::fs::create_dir_all(&sock_dir);
-    let (urls, ports) = announced_services();
-    let services = Services {
-        urls,
-        ports,
-        provider: announced_provider(),
-    };
+    let services = announced_services();
 
     log(
         "agent_start",
@@ -108,10 +94,9 @@ pub fn run(opts: AgentOpts) -> ! {
             ("group", opts.group.clone()),
             ("daemon", opts.daemon_addr.clone()),
             ("node_ip", node_ip.clone()),
-            ("gpus", format!("{gpus:?}")),
-            ("services", format!("{:?}", services.urls)),
-            ("service_ports", format!("{:?}", services.ports)),
-            ("provider", services.provider.clone()),
+            ("gpus", format!("{:?}", machine.gpus)),
+            ("memory", machine.memory.to_string()),
+            ("services", format!("{services:?}")),
         ],
     );
 
@@ -128,7 +113,7 @@ pub fn run(opts: AgentOpts) -> ! {
     loop {
         attempt += 1;
         match serve_once(
-            &shared, &opts, &agent_id, &container, &node_ip, &gpus, cpus, &services,
+            &shared, &opts, &agent_id, &container, &node_ip, &machine, &services,
         ) {
             Ok(()) => log("agent_daemon_link_closed", &[("agent", agent_id.clone())]),
             Err(e) => {
@@ -282,23 +267,73 @@ fn announced_provider() -> String {
 /// Service endpoints this container announces, read once at agent start.
 /// The entrypoints export these right before `ray start`. An agent without
 /// them registers exactly as before.
-fn announced_services() -> (BTreeMap<String, String>, BTreeMap<String, ServicePort>) {
-    let (mut urls, mut ports) = (BTreeMap::new(), BTreeMap::new());
+fn announced_services() -> Services {
+    let provider = announced_provider();
+    let mut out = Services::new();
     for (var, key) in [("MENTAT_OPENAI_API", "openai"), ("MENTAT_MCP_API", "mcp")] {
         let Ok(v) = std::env::var(var) else { continue };
         if v.is_empty() {
             continue;
         }
-        match parse_announcement(&v) {
-            Announcement::Url(u) => {
-                urls.insert(key.to_string(), u);
-            }
-            Announcement::Port { port, path } => {
-                ports.insert(key.to_string(), ServicePort { port, path });
-            }
+        let mut svc = match parse_announcement(&v) {
+            Announcement::Port { port, path } => Service {
+                host: String::new(),
+                port,
+                path,
+                ..Default::default()
+            },
+            Announcement::Url(u) => match split_url(&u) {
+                Some(s) => s,
+                None => {
+                    // A value the agent cannot read would otherwise be
+                    // republished for the router to fail on, one probe
+                    // timeout at a time.
+                    eprintln!("mentatd: {var} is not an endpoint: {v:?}");
+                    std::process::exit(1);
+                }
+            },
+        };
+        if key == "openai" {
+            svc.provider = provider.clone();
         }
+        out.insert(key.to_string(), svc);
     }
-    (urls, ports)
+    out
+}
+
+/// The announced services with each finding folded into its `note`, which
+/// is what a re-register carries so a daemon restart does not lose one.
+fn with_notes(services: &Services, notes: &BTreeMap<String, String>) -> Services {
+    services
+        .iter()
+        .map(|(k, v)| {
+            let mut v = v.clone();
+            v.note = notes.get(k).cloned().unwrap_or_default();
+            (k.clone(), v)
+        })
+        .collect()
+}
+
+/// `http://host:port/path` split into the fields a consumer forms a URL
+/// from. A wildcard host reads as "resolve me", the same as the port form.
+fn split_url(u: &str) -> Option<Service> {
+    let rest = u.strip_prefix("http://")?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], rest[i..].to_string()),
+        None => (rest, String::new()),
+    };
+    let (host, port) = authority.rsplit_once(':')?;
+    let host = if host == "0.0.0.0" || host == "::" {
+        String::new()
+    } else {
+        host.to_string()
+    };
+    Some(Service {
+        host,
+        port: port.parse().ok()?,
+        path,
+        ..Default::default()
+    })
 }
 
 /// Watch each port-announced service until its server binds, then say so
@@ -316,8 +351,8 @@ fn announced_services() -> (BTreeMap<String, String>, BTreeMap<String, ServicePo
 /// Verbatim URLs are skipped: naming a host is the operator saying which
 /// address to use.
 fn watch_service_binds(shared: &Arc<AgentShared>, services: &Services) {
-    for (name, sp) in &services.ports {
-        let (shared, name, port) = (shared.clone(), name.clone(), sp.port);
+    for (name, svc) in services.iter().filter(|(_, s)| s.host.is_empty()) {
+        let (shared, name, port) = (shared.clone(), name.clone(), svc.port);
         std::thread::spawn(move || {
             // The API server binds minutes after `ray start` returns, so
             // this waits rather than sampling once. Ten minutes covers a
@@ -478,8 +513,7 @@ fn serve_once(
     agent_id: &str,
     container: &str,
     node_ip: &str,
-    gpus: &[u32],
-    cpus: u32,
+    machine: &Machine,
     services: &Services,
 ) -> std::io::Result<()> {
     let stream = TcpStream::connect(&opts.daemon_addr)?;
@@ -517,18 +551,14 @@ fn serve_once(
 
     writer.send(
         Msg::AgentRegister {
+            proto: crate::proto::proto(),
             agent_id: agent_id.to_string(),
             group: opts.group.clone(),
             node_ip: node_ip.to_string(),
-            gpus: gpus.to_vec(),
-            gpu_vendor: crate::proto::default_gpu_vendor(),
-            cpus,
             container: container.to_string(),
             pid: std::process::id(),
-            services: services.urls.clone(),
-            services_ports: services.ports.clone(),
-            provider: services.provider.clone(),
-            service_notes: shared.service_notes.lock().unwrap().clone(),
+            machine: machine.clone(),
+            services: with_notes(services, &shared.service_notes.lock().unwrap()),
             resume,
             unacked_refs,
         },
@@ -539,7 +569,13 @@ fn serve_once(
     let (first, _) = read_frame(&mut reader)?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "EOF at register"))?;
     match first.msg {
-        Msg::AgentRegisterOk { node_id } => {
+        Msg::AgentRegisterOk { proto, node_id } => {
+            if !crate::proto::major_matches(&proto) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("daemon speaks proto {proto}, this agent {}", crate::proto::PROTO),
+                ));
+            }
             log(
                 "agent_registered",
                 &[("agent", agent_id.to_string()), ("node_id", node_id)],
@@ -593,7 +629,7 @@ fn serve_once(
             None => return Ok(()),
         };
         match frame.msg {
-            Msg::Spawn {
+            Msg::ActorSpawn {
                 actor_id,
                 name,
                 env,
@@ -624,10 +660,10 @@ fn serve_once(
                     spawn_actor(shared, writer, actor_id, name, env, gpu_ids, payload)
                 });
             }
-            Msg::Kill { actor_id } => {
+            Msg::ActorKill { actor_id } => {
                 kill_actor_process(shared, &actor_id);
             }
-            Msg::CallActor {
+            Msg::ActorDispatch {
                 actor_id,
                 ref_id,
                 method,
@@ -703,7 +739,7 @@ fn spawn_actor(
         Err(e) => {
             shared.actors.lock().unwrap().remove(&actor_id);
             let _ = writer.send(
-                Msg::SpawnResult {
+                Msg::ActorSpawnResult {
                     actor_id,
                     ok: false,
                     error: format!("bind {sock_path}: {e}"),
@@ -732,7 +768,7 @@ fn spawn_actor(
         Err(e) => {
             shared.actors.lock().unwrap().remove(&actor_id);
             let _ = writer.send(
-                Msg::SpawnResult {
+                Msg::ActorSpawnResult {
                     actor_id,
                     ok: false,
                     error: format!("spawn {python}: {e}"),
@@ -854,7 +890,16 @@ fn spawn_actor(
             return;
         }
     }
-    if host_writer.send(Msg::Ctor, 0, &payload).is_err() {
+    if host_writer
+        .send(
+            Msg::Ctor {
+                proto: crate::proto::proto(),
+            },
+            0,
+            &payload,
+        )
+        .is_err()
+    {
         return;
     }
     {
@@ -897,7 +942,7 @@ fn spawn_actor(
                 log("actor_ready", &[("actor", actor_id.clone())]);
                 send_daemon(
                     &shared,
-                    Msg::SpawnResult {
+                    Msg::ActorSpawnResult {
                         actor_id: actor_id.clone(),
                         ok: true,
                         error: String::new(),
@@ -913,7 +958,7 @@ fn spawn_actor(
                 );
                 send_daemon(
                     &shared,
-                    Msg::SpawnResult {
+                    Msg::ActorSpawnResult {
                         actor_id: actor_id.clone(),
                         ok: false,
                         error: format!("constructor raised: {error}"),

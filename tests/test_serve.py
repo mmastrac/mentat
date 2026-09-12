@@ -33,6 +33,11 @@ from mentat_testlib import (  # noqa: E402
 )
 
 
+# A tool name every fake model offers, so the merge has to fold it into one
+# entry. The per-model names cover the single-group case.
+SHARED_TOOL = "shared_tool"
+
+
 class FakeModel:
     """One fake vLLM + status server: /v1/models, /v1/chat/completions
     (streaming and plain), /mcp. Records requests so routing is provable."""
@@ -127,11 +132,20 @@ class FakeModel:
             def _mcp(self, body):
                 rid = body.get("id")
                 if body.get("method") == "tools/list":
+                    # One name of its own and one every model shares, so
+                    # the merge has both a single-group tool and a tool
+                    # that several groups offer.
                     self._json(200, {"jsonrpc": "2.0", "id": rid, "result": {
                         "tools": [{"name": outer.tool,
                                    "description": f"tool of {outer.model}",
                                    "inputSchema": {"type": "object",
-                                                   "properties": {}}}]}})
+                                                   "properties": {}}},
+                                  {"name": SHARED_TOOL,
+                                   "description": f"shared, per {outer.model}",
+                                   "inputSchema": {
+                                       "type": "object",
+                                       "properties": {"n": {"type": "integer"}},
+                                       "required": ["n"]}}]}})
                 elif body.get("method") == "tools/call":
                     p = body.get("params") or {}
                     self._json(200, {"jsonrpc": "2.0", "id": rid, "result": {
@@ -329,9 +343,23 @@ def t02_no_actors_yet_admits_on_the_probe_and_merges_mcp():
                "endpoints with no actors never admitted")
     # The management plane skips the health gate -- it matters most while
     # the engine is down.
-    tools = {t["name"] for t in mcp({"jsonrpc": "2.0", "id": 1,
-                                     "method": "tools/list"})["result"]["tools"]}
-    assert {"serve_status", "ga__tool_a", "gb__tool_b"} <= tools, tools
+    listed = mcp({"jsonrpc": "2.0", "id": 1,
+                  "method": "tools/list"})["result"]["tools"]
+    tools = {t["name"]: t for t in listed}
+    # One flat namespace: no group prefixes, and the tool both groups offer
+    # is listed once.
+    assert {"serve_status", "tool_a", "tool_b", SHARED_TOOL} <= set(tools), tools
+    shared = tools[SHARED_TOOL]
+    assert shared["description"] == "shared, per model-a", shared
+    schema = shared["inputSchema"]
+    assert schema["properties"]["__group"]["enum"] == ["ga", "gb"], schema
+    # The tool's own required argument survives, and the group is required
+    # too because more than one group offers the tool.
+    assert set(schema["required"]) == {"n", "__group"}, schema
+    # A tool one group offers leaves the group argument optional.
+    solo = tools["tool_a"]["inputSchema"]
+    assert solo["properties"]["__group"]["enum"] == ["ga"], solo
+    assert "required" not in solo, solo
 
 
 def t03_admit_on_running_actor():
@@ -440,18 +468,36 @@ def t05c_an_upstream_failure_after_keepalives_is_an_error_event():
     assert last.startswith(b"data: [DONE]"), lines
 
 
-def t06_mcp_merge_routes_and_strips_prefix():
+def t06_mcp_merge_routes_by_group_argument():
+    # One group offers tool_a, so it needs no group argument.
     r = mcp({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-             "params": {"name": "ga__tool_a", "arguments": {"x": 1}}})
+             "params": {"name": "tool_a", "arguments": {"x": 1}}})
     text = r["result"]["content"][0]["text"]
     assert not r["result"].get("isError"), r
-    # The container saw its own plain tool name.
     assert "model-a ran tool_a" in text and '"x": 1' in text, text
+    # The shared tool goes where __group says, and the container sees the
+    # arguments without it.
     r = mcp({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+             "params": {"name": SHARED_TOOL,
+                        "arguments": {"n": 2, "__group": "gb"}}})
+    text = r["result"]["content"][0]["text"]
+    assert not r["result"].get("isError"), r
+    assert f"model-b ran {SHARED_TOOL}" in text, text
+    assert '"n": 2' in text and "__group" not in text, text
+    # Ambiguous without it, and the error names the choices.
+    r = mcp({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+             "params": {"name": SHARED_TOOL, "arguments": {"n": 2}}})
+    assert r["result"]["isError"], r
+    assert "ga, gb" in r["result"]["content"][0]["text"], r
+    # A group that does not offer the tool is refused rather than tried.
+    r = mcp({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+             "params": {"name": "tool_a", "arguments": {"__group": "gb"}}})
+    assert r["result"]["isError"], r
+    r = mcp({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
              "params": {"name": "serve_status", "arguments": {}}})
     assert "model-a" in r["result"]["content"][0]["text"], r
-    r = mcp({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
-             "params": {"name": "nosuch__tool", "arguments": {}}})
+    r = mcp({"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+             "params": {"name": "nosuch_tool", "arguments": {}}})
     assert r["result"]["isError"], r
 
 
@@ -591,7 +637,7 @@ def t08b_port_announcement_resolves_and_falls_through():
         data=json.dumps({"jsonrpc": "2.0", "id": 1,
                          "method": "tools/list"}).encode(),
         headers={"Content-Type": "application/json"}), timeout=10).read())
-    assert any(t["name"] == "gp__tool_p" for t in r["result"]["tools"]), r
+    assert any(t["name"] == "tool_p" for t in r["result"]["tools"]), r
 
     # Kill the only address that answers: no candidate is left, so the group
     # closes and says which addresses it tried.
@@ -640,7 +686,8 @@ def t09_membership_follows_the_mesh():
              "SERVE_PORT": str(port2),
              "POLL_INTERVAL_S": "1",
              "PROBE_INTERVAL_S": "0.5",
-             "ALLOWED_SOURCES": "127."},
+             # The CIDR form of the allowlist, end to end.
+             "ALLOWED_SOURCES": "127.0.0.0/8"},
     )
     tl._children.append(serve2)
 
@@ -689,7 +736,9 @@ def t10_udp_announce_replaces_the_seed_list():
              "MENTAT_ANNOUNCE_PORT": str(udp_port),
              "SERVE_PORT": str(port4),
              "POLL_INTERVAL_S": "1",
-             "ALLOWED_SOURCES": "127."},
+             # Empty takes the default, `local`, which has to admit an
+             # announcement off the loopback interface.
+             "ALLOWED_SOURCES": ""},
     )
     tl._children.append(serve4)
 
@@ -701,7 +750,12 @@ def t10_udp_announce_replaces_the_seed_list():
                 daemons = json.load(r)["daemons"]
         except OSError:
             return False
-        e = daemons.get(f"127.0.0.1:{d.http_port}")
+        # Keyed by port, not by address: with the default allowlist the
+        # router watches whichever address the daemon ranked first, which
+        # on a box with a LAN link is not the loopback the packet came in
+        # on.
+        e = next((v for k, v in daemons.items()
+                  if k.endswith(f":{d.http_port}")), None)
         return bool(e and e.get("connected"))
 
     wait_until(discovered, 20, "announcement never reached the seedless router")
@@ -809,7 +863,7 @@ def main():
         t05_streaming_passes_through,
         t05b_a_slow_prefill_gets_keepalives_then_the_stream,
         t05c_an_upstream_failure_after_keepalives_is_an_error_event,
-        t06_mcp_merge_routes_and_strips_prefix,
+        t06_mcp_merge_routes_by_group_argument,
         t07_actor_death_closes_the_gate,
         t08_dead_endpoint_fails_the_probe,
         t08a_a_request_during_an_outage_is_held_until_the_model_returns,

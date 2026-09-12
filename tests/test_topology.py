@@ -443,6 +443,10 @@ def t09_the_router_watches_each_node_once():
              "PROBE_INTERVAL_S": "0.5",
              "MODEL_TTL_S": "4",
              "MENTAT_ANNOUNCE_PORT": "0",
+             # The simulated net's addresses are on no interface here, so
+             # `local` alone would reject every one. It stays in the list
+             # for the loopback this test reads /status.json over.
+             "ALLOWED_SOURCES": "local,192.168.1.0/24,10.100.0.0/24",
              "MENTAT_TEST_NET": net.path},
     )
     tl._children.append(p)

@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 
 use crate::config::cfg;
 use crate::proto::{read_frame, Frame, Msg};
-use crate::state::{
-    local_ip_toward, node_id_for, random_hex_id, write_json_file, ActorInfo, ActorState, AgentInfo,
+use crate::state::{Patch, 
+    local_ip_toward, node_id_for, write_json_file, ActorInfo, ActorState, AgentInfo,
     BundleAssignment, ClaimInfo, ClientInfo, FrameWriter, PgInfo, PgState, RefInfo, RefState,
     Shared, SharedRef, State,
 };
@@ -57,13 +57,13 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
         std::process::exit(1);
     }
     let hostname = hostname();
-    let gcs_address = format!("{}:{}", opts.node_ip, opts.port);
+    let control_addr = format!("{}:{}", opts.node_ip, opts.port);
     crate::testnet::set_node_ip(&opts.node_ip);
     let shared: SharedRef = Arc::new(Shared {
         st: std::sync::Mutex::new(State::new(
             opts.node_ip.clone(),
             hostname.clone(),
-            gcs_address.clone(),
+            control_addr.clone(),
         )),
         cv: std::sync::Condvar::new(),
     });
@@ -73,12 +73,12 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", opts.port))?;
     let _ = write_json_file(
         &opts.head_json,
-        &json!({ "address": gcs_address, "node_ip": opts.node_ip, "pid": std::process::id() }),
+        &json!({ "address": control_addr, "node_ip": opts.node_ip, "pid": std::process::id() }),
     );
     log(
         "daemon_up",
         &[
-            ("addr", gcs_address.clone()),
+            ("addr", control_addr.clone()),
             ("node_id", shared.st.lock().unwrap().node_id.clone()),
             ("hostname", hostname),
         ],
@@ -452,7 +452,14 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
         // the result.
         Msg::Probe { .. } => {
             let my_id = shared.st.lock().unwrap().node_id.clone();
-            let _ = writer.send(Msg::ProbeOk { node_id: my_id }, first.0.req, &[]);
+            let _ = writer.send(
+                Msg::ProbeOk {
+                    proto: crate::proto::proto(),
+                    node_id: my_id,
+                },
+                first.0.req,
+                &[],
+            );
         }
         other => {
             let _ = writer.send(
@@ -495,12 +502,11 @@ fn head_for(shared: &SharedRef) -> Head {
             // control address on a multi-homed peer may not have.
             return match st.peers.get(&st.head_node_id).filter(|p| p.alive) {
                 Some(p) => {
-                    let port = p
-                        .control_addr
-                        .rsplit_once(':')
-                        .map(|(_, port)| port)
-                        .unwrap_or("6379");
-                    let mut at = vec![format!("{}:{port}", p.link_ip), p.control_addr.clone()];
+                    let port = p.control_port;
+                    let mut at = vec![
+                        format!("{}:{port}", p.link_ip),
+                        format!("{}:{port}", p.node_ip),
+                    ];
                     at.extend(p.addrs.iter().map(|a| format!("{a}:{port}")));
                     at.dedup();
                     Head::At(at)
@@ -619,6 +625,7 @@ fn client_conn(
 ) {
     let (client_id, is_session) = {
         let Msg::Hello {
+            proto,
             client_id,
             group,
             session,
@@ -628,6 +635,16 @@ fn client_conn(
         else {
             unreachable!()
         };
+        if !crate::proto::major_matches(&proto) {
+            let _ = writer.send(
+                Msg::Err {
+                    error: format!("proto {} here, {proto} offered", crate::proto::PROTO),
+                },
+                hello.req,
+                &[],
+            );
+            return;
+        }
         let mut st = shared.st.lock().unwrap();
 
         if session {
@@ -665,6 +682,7 @@ fn client_conn(
             .or_insert_with(|| ClientInfo {
                 id: client_id.clone(),
                 group: group.clone(),
+                kind: kind.clone(),
                 node_id: node_id.clone(),
                 has_session: false,
             });
@@ -676,7 +694,7 @@ fn client_conn(
         st.counters.clients_total += 1;
         let head = st.head_node_id.clone();
         let node_ip = st.node_ip.clone();
-        let gcs = st.gcs_address.clone();
+        let gcs = st.control_addr.clone();
         if session {
             st.emit(
                 "driver_connected",
@@ -686,9 +704,10 @@ fn client_conn(
         st.client_links.push((client_id.clone(), writer.clone()));
         let _ = writer.send(
             Msg::HelloOk {
+                proto: crate::proto::proto(),
                 node_id,
                 node_ip,
-                gcs_address: gcs,
+                control_addr: gcs,
                 head_node_id: head,
             },
             hello.req,
@@ -771,16 +790,19 @@ fn handle_client_msg(
             let mut nodes: BTreeMap<String, Value> = BTreeMap::new();
             nodes.insert(
                 st.node_id.clone(),
-                node_entry(&st.node_id, &st.node_ip, 0.0, 8.0),
+                node_entry(&st.node_id, &st.node_ip, 0.0, 8.0, 0.0),
             );
             for a in st.agents.values().filter(|a| a.alive && a.group == group) {
                 let e = nodes
                     .entry(a.node_id.clone())
-                    .or_insert_with(|| node_entry(&a.node_id, &a.node_ip, 0.0, a.cpus as f64));
+                    .or_insert_with(|| {
+                        node_entry(&a.node_id, &a.node_ip, 0.0, a.machine.cpus as f64, 0.0)
+                    });
                 if let Some(res) = e.get_mut("Resources").and_then(|r| r.as_object_mut()) {
                     let g = res.get("GPU").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    res.insert("GPU".into(), json!(g + a.gpus.len() as f64));
-                    res.insert("CPU".into(), json!(a.cpus as f64));
+                    res.insert("GPU".into(), json!(g + a.machine.gpus.len() as f64));
+                    res.insert("CPU".into(), json!(a.machine.cpus as f64));
+                    res.insert("memory".into(), json!(a.machine.memory as f64));
                 }
             }
             (
@@ -790,22 +812,25 @@ fn handle_client_msg(
                 Vec::new(),
             )
         }
-        Msg::ClusterResources => {
+        Msg::Resources => {
             let st = shared.st.lock().unwrap();
             let group = client_group(&st, client_id);
             let mut res: BTreeMap<String, f64> = BTreeMap::new();
             let mut gpu = 0.0;
             let mut cpu = 0.0;
+            let mut mem = 0.0;
             for a in st.agents.values().filter(|a| a.alive && a.group == group) {
-                gpu += a.gpus.len() as f64;
-                cpu += a.cpus as f64;
+                gpu += a.machine.gpus.len() as f64;
+                cpu += a.machine.cpus as f64;
+                mem += a.machine.memory as f64;
             }
             res.insert("GPU".into(), gpu);
             res.insert("CPU".into(), cpu);
+            res.insert("memory".into(), mem);
             res.insert("object_store_memory".into(), 0.0);
             (Msg::ResourcesOk { resources: res }, Vec::new())
         }
-        Msg::AvailablePerNode => {
+        Msg::Available => {
             let st = shared.st.lock().unwrap();
             let group = client_group(&st, client_id);
             let mut nodes: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
@@ -813,14 +838,17 @@ fn handle_client_msg(
                 let free = st.free_gpus_of(&a.id).len() as f64;
                 let e = nodes.entry(a.node_id.clone()).or_default();
                 *e.entry("GPU".to_string()).or_insert(0.0) += free;
-                e.insert("CPU".to_string(), a.cpus as f64);
+                e.insert("CPU".to_string(), a.machine.cpus as f64);
+                // Memory is never reserved, so the free figure is the total.
+                e.insert("memory".to_string(), a.machine.memory as f64);
                 e.insert(format!("node:{}", a.node_ip), 1.0);
             }
-            (Msg::AvailOk { nodes }, Vec::new())
+            (Msg::AvailableOk { nodes }, Vec::new())
         }
         Msg::Claim { name, shape } => {
             let mut st = shared.st.lock().unwrap();
-            match claim(&mut st, client_id, &name, &shape) {
+            let group = client_group(&st, client_id);
+            match claim(&mut st, client_id, &group, &name, &shape) {
                 Ok((generation, view)) => (
                     Msg::ClaimOk {
                         name,
@@ -832,26 +860,14 @@ fn handle_client_msg(
                 Err(error) => (Msg::Err { error }, Vec::new()),
             }
         }
-        Msg::Release { name } => {
-            let mut st = shared.st.lock().unwrap();
-            release(&mut st, client_id, &name);
-            (
-                Msg::ClaimOk {
-                    name,
-                    generation: 0,
-                    view: Value::Null,
-                },
-                Vec::new(),
-            )
-        }
-        Msg::CreatePg {
+        Msg::PgCreate {
             bundles,
             strategy,
             claim,
         } => {
             let mut st = shared.st.lock().unwrap();
             let group = client_group(&st, client_id);
-            let pg_id = random_hex_id();
+            let pg_id = crate::state::new_pg_id();
             let n = bundles.len();
             st.pgs.insert(
                 pg_id.clone(),
@@ -877,10 +893,9 @@ fn handle_client_msg(
             );
             try_place(&mut st, &shared.cv);
             (
-                Msg::CreatePgOk {
-                    ready_ref: format!("pg:{pg_id}:ready"),
-                    pg_id,
-                },
+                // The id is also the handle `ref_get` resolves once the
+                // group is CREATED, so there is no separate ready ref.
+                Msg::PgCreateOk { pg_id },
                 Vec::new(),
             )
         }
@@ -919,16 +934,16 @@ fn handle_client_msg(
                 }
             }
         }
-        Msg::RemovePg { pg_id } => {
+        Msg::PgRemove { pg_id } => {
             let mut st = shared.st.lock().unwrap();
             if let Some(pg) = st.pgs.get_mut(&pg_id) {
                 pg.state = PgState::Removed;
                 pg.removed_ms = Some(crate::state::now_ms_u64());
             }
             try_place(&mut st, &shared.cv);
-            (Msg::Ok0, Vec::new())
+            (Msg::Ok, Vec::new())
         }
-        Msg::CreateActor {
+        Msg::ActorCreate {
             name,
             num_gpus,
             pg_id,
@@ -944,7 +959,7 @@ fn handle_client_msg(
             env,
             payload,
         ),
-        Msg::Call { actor_id, method } => {
+        Msg::ActorCall { actor_id, method } => {
             let mut st = shared.st.lock().unwrap();
             st.counters.calls_total += 1;
             let ref_id = st.new_ref_id(&actor_id);
@@ -998,7 +1013,7 @@ fn handle_client_msg(
                             let r = new_ref(RefState::Pending);
                             st.refs.insert(ref_id.clone(), r);
                             let send_res = w.send(
-                                Msg::CallActor {
+                                Msg::ActorDispatch {
                                     actor_id: actor_id.clone(),
                                     ref_id: ref_id.clone(),
                                     method: method.clone(),
@@ -1022,33 +1037,51 @@ fn handle_client_msg(
                 }
             }
             shared.cv.notify_all();
-            (Msg::CallOk { ref_id }, Vec::new())
+            (Msg::ActorCallOk { ref_id }, Vec::new())
         }
-        Msg::Get { ref_id, timeout_ms } => do_get(shared, &ref_id, timeout_ms),
-        Msg::Wait {
+        Msg::RefGet { ref_id, timeout_ms } => do_get(shared, &ref_id, timeout_ms),
+        Msg::RefWait {
             ref_ids,
             num_returns,
             timeout_ms,
         } => do_wait(shared, &ref_ids, num_returns, timeout_ms),
-        Msg::KillActor { actor_id } => {
+        Msg::ActorKill { actor_id } => {
             kill_actor(shared, &actor_id, "ray.kill");
-            (Msg::Ok0, Vec::new())
+            (Msg::Ok, Vec::new())
         }
         Msg::Status { group } => {
             let st = shared.st.lock().unwrap();
             (
                 Msg::StatusOk {
-                    data: crate::status::snapshot(&st, group.as_deref()),
+                    snapshot: crate::status::snapshot(&st, group.as_deref()),
                 },
                 Vec::new(),
             )
         }
-        Msg::StopAll { group } => {
+        Msg::ActorStop { group, all } => {
+            if group.is_empty() == !all {
+                // Neither leaves the scope unsaid and both contradict. The
+                // wide form has to be asked for: this binary also answers to
+                // `ray`, where an inherited `ray stop` in an entrypoint would
+                // otherwise reach every group on the cluster.
+                let st = shared.st.lock().unwrap();
+                let mut groups: Vec<&str> = st.actors.values().map(|a| a.group.as_str()).collect();
+                groups.sort();
+                groups.dedup();
+                return err(format!(
+                    "actor_stop takes a group or all. Groups: {}",
+                    if groups.is_empty() {
+                        "none".to_string()
+                    } else {
+                        groups.join(", ")
+                    }
+                ));
+            }
             let ids: Vec<String> = {
                 let st = shared.st.lock().unwrap();
                 st.actors
                     .values()
-                    .filter(|a| group.as_deref().is_none_or(|g| a.group == g))
+                    .filter(|a| all || a.group == group)
                     .filter(|a| !matches!(a.state, ActorState::Dead { .. }))
                     .map(|a| a.id.clone())
                     .collect()
@@ -1056,7 +1089,7 @@ fn handle_client_msg(
             for id in &ids {
                 kill_actor(shared, id, "mentat stop");
             }
-            (Msg::Ok0, Vec::new())
+            (Msg::Ok, Vec::new())
         }
         other => err(format!("unexpected client message: {other:?}")),
     }
@@ -1092,6 +1125,7 @@ fn claimed_nodes(view: &Value) -> Vec<String> {
 fn claim(
     st: &mut State,
     client_id: &str,
+    group: &str,
     name: &str,
     shape: &Value,
 ) -> Result<(u64, Value), String> {
@@ -1103,17 +1137,18 @@ fn claim(
             .peers
             .values()
             .find(|p| p.node_id == st.head_node_id)
-            .map(|p| p.control_addr.clone())
+            .map(|p| format!("{}:{}", p.node_ip, p.control_port))
             .unwrap_or_default();
         return Err(format!(
             "this node is not the head. Send claims to {} at {addr}",
             st.head_node_id
         ));
     }
-    if let Some(c) = st.claims.get_mut(name) {
+    let key = (group.to_string(), name.to_string());
+    if let Some(c) = st.claims.get_mut(&key) {
         if &c.shape != shape {
             return Err(format!(
-                "claim {name:?} is held for a different shape. Release it or use another name"
+                "claim {name:?} is held for a different shape. Use another name"
             ));
         }
         c.holders.insert(client_id.to_string());
@@ -1126,7 +1161,7 @@ fn claim(
     let generation = st.claim_generation;
     let view = solution.to_json(&topo);
     st.claims.insert(
-        name.to_string(),
+        key,
         ClaimInfo {
             shape: shape.clone(),
             view: view.clone(),
@@ -1134,32 +1169,49 @@ fn claim(
             holders: [client_id.to_string()].into_iter().collect(),
         },
     );
-    st.emit(
+    let row = {
+        let c = &st.claims[&(group.to_string(), name.to_string())];
+        crate::status::claim_row(c)
+    };
+    st.emit_patch(
         "claim_solved",
-        json!({ "name": name, "generation": generation }),
+        vec![Patch::set(&["groups", group, "claims", name], row)],
+        "",
     );
     Ok((generation, view))
 }
 
 /// Drop one hold. The claim goes with its last holder, which is how a driver
 /// that dies gives its nodes back.
-fn release(st: &mut State, client_id: &str, name: &str) {
-    let Some(c) = st.claims.get_mut(name) else {
+fn release(st: &mut State, client_id: &str, key: &(String, String)) {
+    let Some(c) = st.claims.get_mut(key) else {
         return;
     };
     c.holders.remove(client_id);
+    let (group, name) = (key.0.clone(), key.1.clone());
     if c.holders.is_empty() {
-        st.claims.remove(name);
-        st.emit("claim_released", json!({ "name": name }));
+        st.claims.remove(key);
+        st.emit_patch(
+            "claim_released",
+            vec![Patch::remove(&["groups", &group, "claims", &name])],
+            "",
+        );
+    } else {
+        let row = crate::status::claim_row(&st.claims[key]);
+        st.emit_patch(
+            "claim_released",
+            vec![Patch::set(&["groups", &group, "claims", &name], row)],
+            "",
+        );
     }
 }
 
 /// Drop every claim this client held. This runs where its other resources
 /// are reaped, so a disconnect needs no explicit release.
 fn release_all(st: &mut State, client_id: &str) {
-    let names: Vec<String> = st.claims.keys().cloned().collect();
-    for n in names {
-        release(st, client_id, &n);
+    let keys: Vec<(String, String)> = st.claims.keys().cloned().collect();
+    for k in keys {
+        release(st, client_id, &k);
     }
 }
 
@@ -1243,12 +1295,18 @@ fn client_group(st: &State, client_id: &str) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
-fn node_entry(node_id: &str, ip: &str, gpus: f64, cpus: f64) -> Value {
+fn node_entry(node_id: &str, ip: &str, gpus: f64, cpus: f64, memory: f64) -> Value {
     json!({
         "NodeID": node_id,
         "NodeManagerAddress": ip,
         "Alive": true,
-        "Resources": { "GPU": gpus, "CPU": cpus, format!("node:{ip}"): 1.0 },
+        "Resources": {
+            "GPU": gpus,
+            "CPU": cpus,
+            "memory": memory,
+            "object_store_memory": 0.0,
+            format!("node:{ip}"): 1.0,
+        },
     })
 }
 
@@ -1261,7 +1319,7 @@ fn create_actor(
     shared: &SharedRef,
     client_id: &str,
     name: String,
-    num_gpus: f64,
+    num_gpus: u32,
     pg_id: String,
     bundle_index: usize,
     env: BTreeMap<String, String>,
@@ -1299,7 +1357,7 @@ fn create_actor(
         .as_ref()
         .and_then(|i| i.addr.get(&bundle.node_id))
         .cloned();
-    if num_gpus > bundle.gpu_ids.len() as f64 {
+    if num_gpus as usize > bundle.gpu_ids.len() {
         return err(format!(
             "actor wants {num_gpus} GPUs but bundle {bundle_index} reserves {}",
             bundle.gpu_ids.len()
@@ -1318,7 +1376,7 @@ fn create_actor(
     let node_id = bundle.node_id.clone();
     let gpu_ids = bundle.gpu_ids.clone();
 
-    let actor_id = random_hex_id();
+    let actor_id = crate::state::new_actor_id();
     let mut spawn_env = env;
     spawn_env.insert("MENTAT_ACTOR_ID".into(), actor_id.clone());
     spawn_env.insert("MENTAT_NODE_ID".into(), node_id.clone());
@@ -1330,7 +1388,7 @@ fn create_actor(
             .collect::<Vec<_>>()
             .join(","),
     );
-    spawn_env.insert("MENTAT_GCS_ADDRESS".into(), st.gcs_address.clone());
+    spawn_env.insert("MENTAT_GCS_ADDRESS".into(), st.control_addr.clone());
     // The node's identity, so the container carries no MENTAT_NODE_IP of
     // its own. The shim reads MENTAT_FABRIC_IP first.
     if !agent_node_ip.is_empty() {
@@ -1362,15 +1420,15 @@ fn create_actor(
                 "agent": agent_id, "node_id": node_id }),
     );
 
-    let gcs = st.gcs_address.clone();
+    let gcs = st.control_addr.clone();
     let send_res = agent_writer.send(
-        Msg::Spawn {
+        Msg::ActorSpawn {
             actor_id: actor_id.clone(),
             name,
             env: spawn_env,
             gpu_ids: gpu_ids.clone(),
             node_id: node_id.clone(),
-            gcs_address: gcs,
+            control_addr: gcs,
             owner: client_id.to_string(),
         },
         0,
@@ -1387,7 +1445,7 @@ fn create_actor(
     }
 
     (
-        Msg::CreateActorOk {
+        Msg::ActorCreateOk {
             actor_id,
             node_id,
             gpu_ids,
@@ -1404,10 +1462,14 @@ enum Res {
     Unknown,
 }
 
+/// What a ref currently holds.
+///
+/// Every id carries its type, so this reads the prefix rather than inferring
+/// from what the id is not. `p:` is a placement group, which resolves once
+/// it reaches CREATED; `a:<hex>:<n>` is a call ref.
 fn resolve_ref(st: &State, ref_id: &str) -> Res {
-    if let Some(rest) = ref_id.strip_prefix("pg:") {
-        let pg_id = rest.strip_suffix(":ready").unwrap_or(rest);
-        return match st.pgs.get(pg_id) {
+    if ref_id.starts_with("p:") {
+        return match st.pgs.get(ref_id) {
             None => Res::Unknown,
             Some(pg) => match pg.state {
                 PgState::Created => Res::Ready {
@@ -1446,7 +1508,7 @@ fn do_get(shared: &SharedRef, ref_id: &str, timeout_ms: Option<u64>) -> (Msg, Ve
         match resolve_ref(&st, ref_id) {
             Res::Ready { ok, payload } => {
                 return (
-                    Msg::GetOk {
+                    Msg::RefGetOk {
                         status: if ok { "ok" } else { "error" }.into(),
                         reason: String::new(),
                     },
@@ -1455,7 +1517,7 @@ fn do_get(shared: &SharedRef, ref_id: &str, timeout_ms: Option<u64>) -> (Msg, Ve
             }
             Res::ActorDied { reason } => {
                 return (
-                    Msg::GetOk {
+                    Msg::RefGetOk {
                         status: "actor_died".into(),
                         reason,
                     },
@@ -1470,7 +1532,7 @@ fn do_get(shared: &SharedRef, ref_id: &str, timeout_ms: Option<u64>) -> (Msg, Ve
                 let now = Instant::now();
                 if now >= d {
                     return (
-                        Msg::GetOk {
+                        Msg::RefGetOk {
                             status: "timeout".into(),
                             reason: String::new(),
                         },
@@ -1505,13 +1567,13 @@ fn do_wait(
         if ready.len() >= want {
             // Cap at num_returns, preserving input order, like ray does.
             let capped: Vec<String> = ready.into_iter().take(num_returns).collect();
-            return (Msg::WaitOk { ready: capped }, Vec::new());
+            return (Msg::RefWaitOk { ready: capped }, Vec::new());
         }
         match deadline {
             Some(d) => {
                 let now = Instant::now();
                 if now >= d {
-                    return (Msg::WaitOk { ready }, Vec::new());
+                    return (Msg::RefWaitOk { ready }, Vec::new());
                 }
                 let (g, _) = shared.cv.wait_timeout(st, d - now).unwrap();
                 st = g;
@@ -1541,7 +1603,7 @@ fn kill_actor(shared: &SharedRef, actor_id: &str, why: &str) {
             // The authoritative Dead transition happens on ActorExit from the
             // agent, which knows the real exit status.
             let _ = w.send(
-                Msg::Kill {
+                Msg::ActorKill {
                     actor_id: actor_id.to_string(),
                 },
                 0,
@@ -1769,7 +1831,7 @@ pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
 fn placement_scopes(
     st: &State,
     group: &str,
-    bundles: &[f64],
+    bundles: &[u32],
     driver_node: &str,
     claim: &str,
 ) -> Result<Vec<(Option<crate::island::Island>, Option<Vec<String>>)>, String> {
@@ -1777,7 +1839,7 @@ fn placement_scopes(
     // every holder of that name. Re-deriving here could pick different
     // nodes and split ranks that agreed on the claim's view.
     if !claim.is_empty() {
-        let Some(c) = st.claims.get(claim) else {
+        let Some(c) = st.claims.get(&(group.to_string(), claim.to_string())) else {
             return Err(format!("claim {claim:?} is not held here"));
         };
         let nodes = claimed_nodes(&c.view);
@@ -1806,7 +1868,7 @@ fn placement_scopes(
                 .peers
                 .values()
                 .find(|p| p.node_id == st.head_node_id)
-                .map(|p| p.control_addr.clone())
+                .map(|p| format!("{}:{}", p.node_ip, p.control_port))
                 .unwrap_or_else(|| "this node".to_string());
             return Err(format!(
                 "claim {claim:?} placed a bundle on {where_}, which has no agent of \
@@ -1825,7 +1887,7 @@ fn placement_scopes(
     if bundles.len() < 2 || !opted_in {
         return Ok(vec![(None, None)]);
     }
-    let need: usize = bundles.iter().map(|b| b.ceil().max(1.0) as usize).sum();
+    let need: usize = bundles.iter().map(|b| (*b).max(1) as usize).sum();
     let free_in = |nodes: &[String]| -> usize {
         st.agents
             .values()
@@ -1895,7 +1957,7 @@ fn placement_scopes(
 fn fit(
     st: &State,
     group: &str,
-    bundles: &[f64],
+    bundles: &[u32],
     driver_node: &str,
     nodes: Option<&[String]>,
 ) -> Option<Vec<Option<BundleAssignment>>> {
@@ -1917,7 +1979,7 @@ fn fit(
 
     let mut assignment: Vec<Option<BundleAssignment>> = Vec::with_capacity(bundles.len());
     for spec in bundles {
-        let need = spec.ceil().max(1.0) as usize;
+        let need = (*spec).max(1) as usize;
         let mut placed = None;
         for (agent_id, free) in agents.iter_mut() {
             if free.len() >= need {
@@ -1974,8 +2036,8 @@ fn no_island_reason(st: &State, group: &str, bundles: usize, need: usize) -> Str
 
 /// Why the bundles did not fit, when a scope existed to try. Free GPUs are
 /// the usual answer.
-fn no_fit_reason(st: &State, group: &str, bundles: &[f64]) -> String {
-    let need: usize = bundles.iter().map(|b| b.ceil().max(1.0) as usize).sum();
+fn no_fit_reason(st: &State, group: &str, bundles: &[u32]) -> String {
+    let need: usize = bundles.iter().map(|b| (*b).max(1) as usize).sum();
     let free: usize = st
         .agents
         .values()
@@ -2000,24 +2062,31 @@ fn agent_conn(
     first: (Frame, Vec<u8>),
 ) {
     let Msg::AgentRegister {
+        proto,
         agent_id,
         group,
         node_ip,
-        gpus,
-        gpu_vendor,
-        cpus,
+        machine,
         container,
         pid,
         services,
-        services_ports,
-        service_notes,
-        provider,
         resume,
         unacked_refs,
     } = first.0.msg
     else {
         unreachable!()
     };
+
+    if !crate::proto::major_matches(&proto) {
+        let _ = writer.send(
+            Msg::Err {
+                error: format!("proto {} here, {proto} offered", crate::proto::PROTO),
+            },
+            first.0.req,
+            &[],
+        );
+        return;
+    }
 
     let (node_ip, node_id) = {
         let st = shared.st.lock().unwrap();
@@ -2091,15 +2160,10 @@ fn agent_conn(
                 group: group.clone(),
                 node_id: node_id.clone(),
                 node_ip: node_ip.clone(),
-                gpus: gpus.clone(),
-                gpu_vendor: gpu_vendor.clone(),
-                cpus,
+                machine: machine.clone(),
                 container: container.clone(),
                 pid,
                 services: services.clone(),
-                services_ports: services_ports.clone(),
-                service_notes,
-                provider,
                 writer: writer.clone(),
                 alive: true,
                 lost_at_ms: None,
@@ -2109,11 +2173,11 @@ fn agent_conn(
             },
         );
         st.counters.agents_registered += 1;
-        st.emit(
+        let row = crate::status::agent_row(&st, &st.agents[&agent_id]);
+        st.emit_patch(
             "agent_register",
-            json!({ "group": group, "agent": agent_id, "node_ip": node_ip,
-                    "gpus": gpus.len(), "container": container,
-                    "services": services, "services_ports": services_ports }),
+            vec![Patch::set(&["groups", &group, "agents", &agent_id], row)],
+            "",
         );
 
         // Resumed actors whose owner is gone (or that this daemon already
@@ -2305,13 +2369,14 @@ fn agent_conn(
         // follow it.
         let _ = writer.send(
             Msg::AgentRegisterOk {
+                proto: crate::proto::proto(),
                 node_id: node_id.clone(),
             },
             first.0.req,
             &[],
         );
         for actor_id in kills {
-            let _ = writer.send(Msg::Kill { actor_id }, 0, &[]);
+            let _ = writer.send(Msg::ActorKill { actor_id }, 0, &[]);
         }
 
         // Drain calls held during the outage, in arrival order.
@@ -2330,7 +2395,7 @@ fn agent_conn(
                         &[("ref", ref_id.clone()), ("actor", actor_id.clone())],
                     );
                     let _ = writer.send(
-                        Msg::CallActor {
+                        Msg::ActorDispatch {
                             actor_id: actor_id.clone(),
                             ref_id,
                             method,
@@ -2358,7 +2423,7 @@ fn agent_conn(
             }
         };
         match frame.msg {
-            Msg::SpawnResult {
+            Msg::ActorSpawnResult {
                 actor_id,
                 ok,
                 error,
@@ -2429,10 +2494,8 @@ fn agent_conn(
             Msg::ServiceNote { service, note } => {
                 let mut st = shared.st.lock().unwrap();
                 if let Some(a) = st.agents.get_mut(&agent_id) {
-                    if note.is_empty() {
-                        a.service_notes.remove(&service);
-                    } else {
-                        a.service_notes.insert(service, note);
+                    if let Some(s) = a.services.get_mut(&service) {
+                        s.note = note;
                     }
                 }
             }
@@ -2516,6 +2579,7 @@ mod tests {
             ClientInfo {
                 id: client.into(),
                 group: "g".into(),
+                kind: "driver".into(),
                 node_id: st.node_id.clone(),
                 has_session: true,
             },

@@ -18,6 +18,7 @@
 //! answers a probe.
 
 mod mcp;
+mod net;
 mod proxy;
 mod testnet;
 mod tokens;
@@ -25,7 +26,6 @@ mod ui;
 mod ws;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,6 +38,8 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::{json, Value};
+
+use crate::net::{local_nets, on_local_net, Allow, Net};
 
 use mentat_common::logfmt::log;
 use mentat_common::secret;
@@ -180,7 +182,7 @@ pub struct Config {
     /// How long a group stays listed while nothing it announces can serve.
     /// See `group_table`.
     pub model_ttl: Duration,
-    pub allowed_sources: Vec<String>,
+    pub allowed_sources: Allow,
     pub discover_peers: bool,
 }
 
@@ -257,13 +259,11 @@ impl Config {
             // An hour sits out a reboot, a weight reload or a fabric
             // outage without a model vanishing mid-repair.
             model_ttl: env_secs("MODEL_TTL_S", 3600.0),
-            // Own subnets plus the docker bridge ranges: a bridge-networked
-            // client (OpenWebUI) reaching this host keeps its 172.x source.
-            allowed_sources: env_str("ALLOWED_SOURCES", "10.100.0.,192.168.1.,127.0.0.1,::1,172.")
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
+            // Every wire this box is on, which is every wire a fabric,
+            // a LAN client, or a bridge-networked one (OpenWebUI keeps its
+            // 172.x source) can reach it over. An operator adding a range
+            // this box is not attached to writes it out.
+            allowed_sources: Allow::parse(&env_str("ALLOWED_SOURCES", "local")),
             discover_peers: env_str("DISCOVER_PEERS", "1") == "1",
         }
     }
@@ -482,8 +482,8 @@ fn endpoint_of(
     agent: &Value,
     svc: &str,
     nodes: &HashMap<String, Vec<String>>,
-    allowed: &[String],
-    subnets: &[(u32, u32)],
+    allowed: &Allow,
+    local: &[Net],
 ) -> Option<Endpoint> {
     let note = agent["service_notes"][svc]
         .as_str()
@@ -504,13 +504,13 @@ fn endpoint_of(
         .get(node_ip)
         .cloned()
         .unwrap_or_else(|| vec![node_ip.to_string()]);
-    hosts.retain(|h| !h.is_empty() && prefix_allowed(allowed, h));
+    hosts.retain(|h| !h.is_empty() && allowed.permits(h, local));
     // A node may list an address twice across the views it was merged from,
     // and a duplicate candidate would be probed twice and reported twice.
     let mut seen = HashSet::new();
     hosts.retain(|h| seen.insert(h.clone()));
     // Stable, so the node's own order survives inside each half.
-    hosts.sort_by_key(|h| !on_local_subnet(h, subnets));
+    hosts.sort_by_key(|h| !on_local_net(h, local));
     Some(Endpoint {
         candidates: hosts
             .iter()
@@ -548,7 +548,7 @@ fn best_openai(announced: Vec<(Endpoint, String)>) -> (Option<Endpoint>, String)
 /// with more running actors.
 pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
     let stale = shared.cfg.poll_interval * 3;
-    let subnets = local_subnets();
+    let local = local_nets();
     let daemons = shared.daemons.lock().unwrap();
     // Every node any watched daemon can describe, so an agent's node_ip
     // resolves to that node's own ranked addresses.
@@ -577,7 +577,7 @@ pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
                 .filter(|a| a["state"].as_str() == Some("running"))
                 .count();
             let resolve = |a: &Value, svc: &str| {
-                endpoint_of(a, svc, &nodes, &shared.cfg.allowed_sources, &subnets)
+                endpoint_of(a, svc, &nodes, &shared.cfg.allowed_sources, &local)
             };
             // Only the rank running the API server announces "openai". If
             // several ever do, the one whose best candidate sorts first
@@ -1350,7 +1350,8 @@ async fn udp_listener(shared: Arc<Shared>) {
         // discovery closed over a subnet the operator has no reason to be
         // thinking about, and say nothing about why.
         let src_ip = src.ip().to_string();
-        if !source_allowed(&shared.cfg, &src_ip) {
+        let local = local_nets();
+        if !shared.cfg.allowed_sources.permits(&src_ip, &local) {
             // Named once per source. A dropped announcement is otherwise an
             // empty cluster with no stated cause.
             if warned.insert(src_ip.clone()) {
@@ -1358,7 +1359,7 @@ async fn udp_listener(shared: Arc<Shared>) {
                     "announce_source_not_allowed",
                     &[
                         ("src", src_ip.clone()),
-                        ("allowed_sources", shared.cfg.allowed_sources.join(",")),
+                        ("allowed_sources", shared.cfg.allowed_sources.to_string()),
                     ],
                 );
             }
@@ -1376,12 +1377,7 @@ async fn udp_listener(shared: Arc<Shared>) {
             .filter_map(|a| a.as_str())
             .map(str::to_string)
             .collect();
-        let pick = announce_address(
-            &ranked,
-            &src_ip,
-            &shared.cfg.allowed_sources,
-            &local_subnets(),
-        );
+        let pick = announce_address(&ranked, &src_ip, &shared.cfg.allowed_sources, &local);
         if pick != src_ip && noted.insert(src_ip.clone()) {
             log(
                 "announce_preferred_addr",
@@ -1421,39 +1417,13 @@ async fn udp_listener(shared: Arc<Shared>) {
         if !watched {
             let others: Vec<String> = ranked
                 .iter()
-                .filter(|a| prefix_allowed(&shared.cfg.allowed_sources, a))
+                .filter(|a| shared.cfg.allowed_sources.permits(a, &local))
                 .map(|a| format!("{a}:{http_port}"))
                 .chain(std::iter::once(format!("{src_ip}:{http_port}")))
                 .collect();
             ensure_watched(&shared, target, others);
         }
     }
-}
-
-/// This box's IPv4 networks, as (network, mask). An address inside one of
-/// these is on a wire we are attached to, which is the closest thing to
-/// proof of reachability available without dialling it.
-fn local_subnets() -> Vec<(u32, u32)> {
-    let Ok(ifaces) = getifaddrs::InterfaceFilter::new().v4().get() else {
-        return Vec::new();
-    };
-    ifaces
-        .filter_map(|i| match (i.address.ip_addr(), i.address.netmask()) {
-            (Some(IpAddr::V4(a)), Some(IpAddr::V4(m))) => {
-                let (a, m) = (u32::from(a), u32::from(m));
-                Some((a & m, m))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn on_local_subnet(ip: &str, subnets: &[(u32, u32)]) -> bool {
-    let Ok(v4) = ip.parse::<Ipv4Addr>() else {
-        return false;
-    };
-    let a = u32::from(v4);
-    subnets.iter().any(|(net, mask)| a & mask == *net)
 }
 
 /// Which address to watch for a node that just announced itself.
@@ -1467,16 +1437,11 @@ fn on_local_subnet(ip: &str, subnets: &[(u32, u32)]) -> bool {
 /// The address the announcement calls its own is not consulted. Nothing acts
 /// on it, so gating it would fail discovery closed over a subnet that decides
 /// nothing.
-fn announce_address(
-    ranked: &[String],
-    src_ip: &str,
-    allowed: &[String],
-    subnets: &[(u32, u32)],
-) -> String {
+fn announce_address(ranked: &[String], src_ip: &str, allowed: &Allow, local: &[Net]) -> String {
     ranked
         .iter()
-        .filter(|a| prefix_allowed(allowed, a))
-        .find(|a| on_local_subnet(a, subnets))
+        .filter(|a| allowed.permits(a, local))
+        .find(|a| on_local_net(a, local))
         .cloned()
         .unwrap_or_else(|| src_ip.to_string())
 }
@@ -1488,7 +1453,7 @@ fn announce_address(
 /// itself. An address on one of our own subnets beats that order outright,
 /// since the pair's cluster identity is a subnet a LAN-only box cannot route
 /// to.
-fn peer_addresses(p: &Value, subnets: &[(u32, u32)]) -> (Option<String>, Vec<String>) {
+fn peer_addresses(p: &Value, local: &[Net]) -> (Option<String>, Vec<String>) {
     let mut cands: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     let mut push = |v: Option<&str>| {
@@ -1509,7 +1474,7 @@ fn peer_addresses(p: &Value, subnets: &[(u32, u32)]) -> (Option<String>, Vec<Str
     cands.sort_by_key(lo);
     let best = cands
         .iter()
-        .find(|c| on_local_subnet(c, subnets) && !lo(c))
+        .find(|c| on_local_net(c, local) && !lo(c))
         .or_else(|| cands.iter().find(|c| !lo(c)))
         .or_else(|| cands.first())
         .cloned();
@@ -1526,7 +1491,7 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) -> Option<String> {
                 // Membership follows the mesh: every peer entry carries its
                 // HTTP address (PeerHello inbound, PeerHelloOk outbound), so
                 // one seed daemon reveals the rest.
-                let subnets = local_subnets();
+                let local = local_nets();
                 for (id, p) in snap["peers"].as_object().into_iter().flatten() {
                     let Some(port) = p["http_port"].as_u64() else {
                         continue;
@@ -1536,7 +1501,7 @@ async fn poll_status(shared: &Arc<Shared>, addr: &str) -> Option<String> {
                     }
                     // A node already watched learns this as another
                     // address. An unwatched one gets a watch.
-                    let (best, all) = peer_addresses(p, &subnets);
+                    let (best, all) = peer_addresses(p, &local);
                     let mut nodes = shared.nodes.lock().unwrap();
                     match nodes.get_mut(id) {
                         Some(w) => {
@@ -1833,20 +1798,12 @@ async fn read_json(
     serde_json::from_slice(&body).map_err(|e| e.to_string())
 }
 
-fn source_allowed(cfg: &Config, addr: &str) -> bool {
-    prefix_allowed(&cfg.allowed_sources, addr)
-}
-
-fn prefix_allowed(allowed: &[String], addr: &str) -> bool {
-    allowed.iter().any(|p| addr.starts_with(p))
-}
-
 async fn handle(
     shared: Arc<Shared>,
     peer_ip: String,
     req: Request<hyper::body::Incoming>,
 ) -> Response<BoxedBody> {
-    if !source_allowed(&shared.cfg, &peer_ip) {
+    if !shared.cfg.allowed_sources.permits_now(&peer_ip) {
         return json_response(
             StatusCode::FORBIDDEN,
             &json!({"error": "source address is not in ALLOWED_SOURCES"}),
@@ -1914,6 +1871,7 @@ async fn main() {
         &[
             ("port", shared.cfg.port.to_string()),
             ("daemons", shared.cfg.daemons.join(",")),
+            ("allowed_sources", shared.cfg.allowed_sources.to_string()),
         ],
     );
     for d in shared.cfg.daemons.clone() {
@@ -1961,11 +1919,10 @@ mod tests {
     use super::*;
 
     /// 10.0.0.0/24 and 192.168.1.0/24, as a two-homed box would report them.
-    fn subnets() -> Vec<(u32, u32)> {
-        let mask = u32::from(Ipv4Addr::new(255, 255, 255, 0));
+    fn subnets() -> Vec<Net> {
         vec![
-            (u32::from(Ipv4Addr::new(10, 0, 0, 0)), mask),
-            (u32::from(Ipv4Addr::new(192, 168, 1, 0)), mask),
+            "10.0.0.0/24".parse().unwrap(),
+            "192.168.1.0/24".parse().unwrap(),
         ]
     }
 
@@ -2067,7 +2024,7 @@ mod tests {
     /// the operator had no reason to list. The source address decides.
     #[test]
     fn an_unlisted_identity_subnet_does_not_block_discovery() {
-        let allowed = vec!["192.168.1.".to_string()];
+        let allowed = Allow::parse("192.168.1.0/24");
         let subnets = subnets();
         // Nothing advertised is both allowed and local, so the source stands.
         assert_eq!(
@@ -2081,7 +2038,7 @@ mod tests {
     #[test]
     fn an_advertised_candidate_is_still_gated() {
         let subnets = subnets();
-        let allowed = vec!["10.0.0.".to_string()];
+        let allowed = Allow::parse("10.0.0.0/24");
         assert_eq!(
             announce_address(&["10.0.0.7".into()], "10.0.0.1", &allowed, &subnets),
             "10.0.0.7",
@@ -2141,10 +2098,10 @@ mod tests {
     #[test]
     fn subnet_membership() {
         let s = subnets();
-        assert!(on_local_subnet("10.0.0.7", &s));
-        assert!(on_local_subnet("192.168.1.13", &s));
-        assert!(!on_local_subnet("10.100.0.1", &s));
-        assert!(!on_local_subnet("not-an-ip", &s));
+        assert!(on_local_net("10.0.0.7", &s));
+        assert!(on_local_net("192.168.1.13", &s));
+        assert!(!on_local_net("10.100.0.1", &s));
+        assert!(!on_local_net("not-an-ip", &s));
     }
 
     /// The reported failure: the peer calls itself by an address on a subnet
@@ -2306,10 +2263,10 @@ mod tests {
     /// connect to it.
     #[test]
     fn an_advertised_address_is_still_a_claim() {
-        let allowed = vec!["127.".to_string()];
-        assert!(prefix_allowed(&allowed, "127.0.0.1"));
-        assert!(!prefix_allowed(&allowed, "192.168.1.109"));
-        assert!(!prefix_allowed(&allowed, "203.0.113.7"));
+        let allowed = Allow::parse("127.0.0.0/8");
+        assert!(allowed.permits("127.0.0.1", &[]));
+        assert!(!allowed.permits("192.168.1.109", &[]));
+        assert!(!allowed.permits("203.0.113.7", &[]));
     }
 
     /// A port announcement is resolved against the announcing node's own
@@ -2330,7 +2287,7 @@ mod tests {
             "services": {},
             "services_ports": {"openai": {"port": 8000, "path": "/v1"}},
         });
-        let allowed = vec!["10.".to_string(), "192.168.1.".to_string()];
+        let allowed = Allow::parse("10.0.0.0/8, 192.168.1.0/24");
         let ep = endpoint_of(&agent, "openai", &nodes, &allowed, &subnets()).unwrap();
         assert_eq!(
             ep.candidates,
@@ -2357,7 +2314,7 @@ mod tests {
             &agent,
             "openai",
             &HashMap::new(),
-            &["10.".to_string()],
+            &Allow::parse("10.0.0.0/8"),
             &subnets(),
         )
         .unwrap();
@@ -2380,7 +2337,14 @@ mod tests {
             "services": {},
             "services_ports": {"openai": {"port": 8000, "path": "/v1"}},
         });
-        let ep = endpoint_of(&agent, "openai", &nodes, &["172.".to_string()], &subnets()).unwrap();
+        let ep = endpoint_of(
+            &agent,
+            "openai",
+            &nodes,
+            &Allow::parse("172.16.0.0/12"),
+            &subnets(),
+        )
+        .unwrap();
         assert!(ep.candidates.is_empty(), "{:?}", ep.candidates);
         assert!(ep.announced.contains("port 8000/v1"), "{}", ep.announced);
     }

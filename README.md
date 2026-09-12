@@ -1,19 +1,20 @@
 # mentat
 
-mentat replaces Ray's control plane for vLLM multi-node serving. It has three
-parts: a daemon that places actors and watches their liveness, a router that
-puts one OpenAI-compatible endpoint in front of every model, and a pure-Python
-package that installs as `ray` and implements the surface vLLM's Ray executor
-uses.
+mentat replaces Ray's control plane for vLLM multi-node serving. It has
+three parts: a daemon that places actors and watches their liveness, a
+router that puts one OpenAI-compatible endpoint in front of every model, and
+a pure-Python package that installs as `ray` and implements the surface
+vLLM's Ray executor uses.
 
-There is no object store, memory monitor, raylet or dashboard. Per-token work
-is unchanged: vLLM's workers exchange data over its own MessageQueue and NCCL,
-and after boot the only recurring Ray call is `ray.wait` every 5 seconds.
+There is no object store, memory monitor, raylet or dashboard. Per-token
+work is unchanged: vLLM's workers exchange data over its own MessageQueue
+and NCCL, and after boot the only recurring Ray call is `ray.wait` every 5
+seconds.
 
 Registration retries forever, so daemons and containers can start in any
 order. One `MENTAT_PEERS` entry that reaches any live daemon joins the whole
-mesh, and a container needs no address of its own: the daemon files it under
-the box it connected from. Both binaries are static executables.
+mesh, and a container does not need an address of its own: the daemon files
+it under the box it connected from. Both binaries are static executables.
 
 ## Components
 
@@ -42,8 +43,8 @@ cargo install mentatd mentatd-serve
 pip wheel --no-deps -w dist ./python
 ```
 
-The wheel is not on PyPI. The published artifacts image carries both
-binaries and the wheel:
+The wheel is not on PyPI. The published artifacts image has both binaries
+and the wheel:
 
 ```
 docker pull mmastrac/mentat-artifacts:0.8.0
@@ -94,8 +95,8 @@ mentatd status
 ```
 
 [mentatd.yaml](mentatd.yaml) and [mentatd-serve.yaml](mentatd-serve.yaml)
-are compose files for the daemon and the router. Both need
-`network_mode: host`.
+are compose files for the daemon and the router. Both need `network_mode:
+host`.
 
 ## Documentation
 
