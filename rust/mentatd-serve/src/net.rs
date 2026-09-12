@@ -274,8 +274,8 @@ mod tests {
         assert!(!a.permits_now("203.0.113.7"));
     }
 
-    /// The pre-CIDR form still means what it did. `127.` is a prefix, not
-    /// an address, and matching it as one would allow nothing.
+    /// The pre-CIDR form still means what it did. `127.` is a prefix.
+    /// Matching it as an address would allow nothing.
     #[test]
     fn a_text_prefix_still_matches_as_text() {
         let a = Allow::parse("127.,10.100.0.");

@@ -294,7 +294,7 @@ fn try_connect(
         }
     };
     if peer_id == my_id {
-        // The seed list includes ourselves; harmless, just don't peer.
+        // The seed list includes ourselves. Harmless, so just don't peer.
         return Ok(None);
     }
 
@@ -921,7 +921,7 @@ fn probe_peer(
                 }
             }
             // One line per transition. The table is read from /status, and
-            // a 15 s cadence times four pairs would otherwise be the whole
+            // a 15 s interval times four pairs would otherwise be the whole
             // log.
             if was != cell.ok {
                 log(

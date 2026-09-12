@@ -26,5 +26,5 @@ class GetTimeoutError(RayError, TimeoutError):
 
 
 class RayChannelError(RayError):
-    # Compiled-DAG surface; import-only for us (the V2 executor never uses it).
+    # Compiled-DAG surface. Import-only here: the V2 executor never uses it.
     pass

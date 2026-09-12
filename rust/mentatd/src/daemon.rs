@@ -1,6 +1,7 @@
 //! mentatd: the cluster daemon. Accepts client (Python shim / CLI) and agent
 //! connections on the control port. In this phase there is one daemon and it
-//! is its own head; the mesh/election layer slots in above these handlers.
+//! is its own head. The mesh and election layer slots in above these
+//! handlers.
 
 use std::collections::BTreeMap;
 use std::io::{BufReader, Write};
@@ -42,7 +43,7 @@ pub fn default_node_ip() -> String {
             return ip.to_string();
         }
     }
-    // The address we'd use to reach the world; loopback for dev boxes.
+    // The address we'd use to reach the world. Loopback on dev boxes.
     local_ip_toward("8.8.8.8:53").unwrap_or_else(|| "127.0.0.1".to_string())
 }
 

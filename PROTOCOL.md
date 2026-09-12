@@ -407,8 +407,8 @@ tries the higher-ranked ones.
 
 ## Placement
 
-A placement group reserves whole devices. Memory plays no part in
-placement in 1.0, and a `uma: true` device is one device like any other. The
+A placement group reserves whole devices. Placement ignores memory in 0.99,
+and a `uma: true` device is one device like any other. The
 bundles of one placement group go on GPUs of one vendor because no
 collective spans vendors: a claim set's `vendor` pins which, and an
 unclaimed placement group uses the first vendor that fits.

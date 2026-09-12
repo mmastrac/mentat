@@ -19,8 +19,8 @@ import urllib.request
 TEST_SECRET = "test-secret"
 
 #: The machine probe as it sits in the tree. An installed mentat finds it
-#: beside the binary; a test runs out of cargo's target dir, which has no
-#: such sibling.
+#: beside the binary. A test runs out of cargo's target dir, where there is
+#: no such sibling.
 MACHINE_PROBE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "scripts",
@@ -154,7 +154,7 @@ class Cluster:
             "MENTAT_SOCK_DIR": self.tmp,
             "MENTAT_PYTHON": sys.executable,
             "PYTHONPATH": os.pathsep.join([PYTHON_PKG, HERE]),
-            # The actor host needs these too; it inherits the agent env.
+            # The actor host needs these too, and inherits the agent env.
             "MENTAT_GCS_ADDRESS": self.address,
             # Service announcements (MENTAT_OPENAI_API and friends) ride in
             # here, the same way the entrypoints export them before ray start.

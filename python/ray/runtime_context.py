@@ -29,7 +29,7 @@ class RuntimeContext:
         if addr:
             return addr
         if _client.GLOBAL.initialized:
-            # Ray names this the GCS address; the wire calls it what it is.
+            # Ray calls this the GCS address. The wire calls it what it is.
             return _client.GLOBAL.hello.get("control_addr")
         return _client.default_address()
 

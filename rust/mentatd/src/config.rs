@@ -22,8 +22,8 @@ pub struct Cfg {
     pub pg_pending_timeout_ms: u64,
     /// MENTAT_AGENT_DEGRADED_AFTER_MS, default 30_000. An agent whose daemon
     /// link EOFs is held in a grace window instead of its actors being marked
-    /// dead; after this long still disconnected, the agent is marked degraded
-    /// (event + log, calls keep being held).
+    /// dead. After this long still disconnected, the agent is marked
+    /// degraded (event and log, calls keep being held).
     pub agent_degraded_after_ms: u64,
     /// MENTAT_AGENT_DEAD_AFTER_MS, default 60_000. The give-up threshold: an
     /// agent disconnected this long has its actors marked dead, which
@@ -43,8 +43,8 @@ pub struct Cfg {
     /// the mesh analog of the agent degrade window.
     pub peer_stale_after_ms: u64,
     /// MENTAT_PEER_DEAD_AFTER_MS, default 60_000. A silent mesh peer is
-    /// declared gone (node_leave, link closed) after this long; the connector
-    /// keeps re-dialing it.
+    /// declared gone (node_leave, link closed) after this long. The
+    /// connector keeps re-dialing it.
     pub peer_dead_after_ms: u64,
     /// MENTAT_ELECTION_HOLD_DOWN_MS, default 5_000. How long a head candidate
     /// must be stable before the designation changes, so a flapping link
@@ -75,7 +75,7 @@ pub struct Cfg {
     /// MENTAT_HOST_CONNECT_TIMEOUT_MS, default 60_000. How long the agent
     /// waits for a freshly spawned actor host to connect to its unix socket.
     /// The host connects before importing anything heavy, so this covers
-    /// process start only, not vLLM import.
+    /// process start alone. vLLM import falls outside it.
     pub host_connect_timeout_ms: u64,
     /// MENTAT_SLOW_CALL_WARN_MS, default 15_000. A non-run() call pending
     /// longer than this gets one call_pending_long warning (queued behind a
@@ -85,7 +85,7 @@ pub struct Cfg {
     /// pings the daemon so a dead daemon is noticed within seconds.
     pub agent_ping_interval_ms: u64,
     /// MENTAT_PEER_STATUS_INTERVAL_MS, default 2_000. How often each daemon
-    /// pushes its snapshot to mesh peers; doubles as the peer heartbeat that
+    /// pushes its snapshot to mesh peers. It doubles as the peer heartbeat
     /// feeds the staleness windows above, so keep it several times smaller
     /// than MENTAT_PEER_STALE_AFTER_MS.
     pub peer_status_interval_ms: u64,

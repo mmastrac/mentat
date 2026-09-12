@@ -39,7 +39,8 @@ struct HostActor {
     /// Calls that arrived before the host connected, drained in arrival
     /// order at connect time -- actor calls are ordered in real ray.
     queued_calls: Vec<(String, String, Vec<u8>)>,
-    /// A kill that arrived before the pid was known; honored right after fork.
+    /// A kill that arrived before the pid was known. Honored right after
+    /// the fork.
     kill_requested: bool,
 }
 
@@ -1014,7 +1015,7 @@ fn kill_actor_process(shared: &Arc<AgentShared>, actor_id: &str) {
         let mut actors = shared.actors.lock().unwrap();
         match actors.get_mut(actor_id) {
             Some(a) if a.pid == 0 => {
-                // Fork hasn't happened yet; the spawn thread honors this
+                // Fork hasn't happened yet. The spawn thread honors this
                 // right after it learns the pid.
                 a.kill_requested = true;
                 log("actor_kill_deferred", &[("actor", actor_id.to_string())]);
@@ -1032,7 +1033,7 @@ fn kill_actor_process(shared: &Arc<AgentShared>, actor_id: &str) {
         &[("actor", actor_id.to_string()), ("pid", pid.to_string())],
     );
     unsafe {
-        // Whole process group; the reaper reports the exit.
+        // Whole process group. The reaper reports the exit.
         libc::kill(-(pid as i32), libc::SIGKILL);
         libc::kill(pid as i32, libc::SIGKILL);
     }

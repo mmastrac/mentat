@@ -44,7 +44,7 @@ class FakeWorker:
         raise ValueError(msg)
 
     def block_forever(self):
-        # Mirrors RayWorkerProc.run(): never returns; the ref is a liveness
+        # Mirrors RayWorkerProc.run(): never returns. The ref is a liveness
         # sentinel only.
         while True:
             time.sleep(3600)

@@ -58,8 +58,8 @@ enum Cmd {
     },
     /// ray-compatible: register this container's GPUs with the local daemon.
     Start {
-        /// Accepted for ray CLI compatibility; head/worker is no longer a
-        /// distinction mentat needs.
+        /// Accepted for ray CLI compatibility. mentat does not distinguish
+        /// a head from a worker.
         #[arg(long)]
         head: bool,
         /// Run the agent in the foreground (workers `exec` this).

@@ -66,7 +66,7 @@ pub fn start(shared: SharedRef) {
         Ok(None) => {
             // Every announcement is signed, so a daemon with no key has
             // nothing to send. Reporting it at boot beats a router that
-            // watches an empty cluster and never reports why.
+            // watches an empty cluster with the reason unstated.
             log(
                 "announce_off",
                 &[("why", "no MENTAT_SECRET or MENTAT_SECRET_FILE".to_string())],
@@ -334,7 +334,7 @@ fn broadcast_targets(port: u16) -> Vec<String> {
 
 /// Every address this node listens on, for consumers that cannot reach the
 /// one it calls itself. A listener should still prefer the address a packet
-/// actually arrived from; this list is what to fall back to.
+/// actually arrived from. This list is what to fall back to.
 /// Every IPv4 address this box listens on, whatever the announce settings
 /// select. `local_addrs` is the announced subset and reports a different
 /// question: this one is "is that host me".

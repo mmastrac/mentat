@@ -19,7 +19,7 @@ pub type RefId = String;
 pub type NodeId = String;
 
 /// A cloneable, lock-per-write handle to one peer's socket. Reads happen only
-/// on that connection's own reader thread; writes can come from anywhere.
+/// on that connection's own reader thread. Writes come from anywhere.
 #[derive(Clone)]
 pub struct FrameWriter {
     inner: Arc<Mutex<TcpStream>>,
@@ -125,7 +125,8 @@ pub struct AgentInfo {
     /// out. None while connected. `lost_at_ms` is cleared at give-up, since
     /// it drives the degrade window, and this one is not.
     pub gone_since_ms: Option<u64>,
-    /// Registration order; placement uses it for deterministic bundle order.
+    /// Registration order. Placement uses it for a deterministic bundle
+    /// order.
     pub seq: u64,
 }
 
@@ -537,8 +538,8 @@ pub fn new_pg_id() -> String {
 
 pub fn random_hex_id() -> String {
     let mut buf = [0u8; 16];
-    // /dev/urandom exists on both macOS and Linux; failure here means the OS
-    // is broken enough that aborting is correct.
+    // /dev/urandom exists on both macOS and Linux. A failure here means the
+    // OS is broken enough that aborting is correct.
     let mut f = std::fs::File::open("/dev/urandom").expect("open /dev/urandom");
     std::io::Read::read_exact(&mut f, &mut buf).expect("read /dev/urandom");
     buf.iter().map(|b| format!("{b:02x}")).collect()

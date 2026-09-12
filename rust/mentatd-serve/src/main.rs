@@ -568,7 +568,8 @@ pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
             continue;
         };
         for (name, g) in snap["groups"].as_object().into_iter().flatten() {
-            // Every collection is keyed by id, so a row is a value here.
+            // Every collection uses the id as its key, so a row is a value
+            // here.
             let agents: Vec<&Value> = g["agents"]
                 .as_object()
                 .into_iter()

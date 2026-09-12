@@ -118,8 +118,8 @@ class Connection:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         self.sock = sock
         self._req = 0
-        # A refused hello is the daemon's answer, not a transport failure:
-        # a second driver session in one group is rejected here.
+        # A refused hello is the daemon's reply. A second driver session in
+        # one group is rejected here.
         self.hello = _checked(
             self._exchange(
                 {
@@ -250,7 +250,7 @@ def ensure_init(address=None, runtime_env=None):
         GLOBAL.group = default_group()
         GLOBAL.runtime_env = runtime_env
         # An actor host's connections must never register a driver session:
-        # its lifecycle belongs to the agent, not to the group's driver.
+        # the agent owns its lifecycle.
         GLOBAL.session = Connection(
             addr,
             GLOBAL.client_id,

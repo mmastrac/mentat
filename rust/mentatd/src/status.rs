@@ -90,7 +90,7 @@ pub fn pg_row(p: &crate::state::PgInfo) -> Value {
     })
 }
 
-/// A claim's row: what it holds, not the whole view. The addresses and
+/// A claim's row: what it holds. The addresses and
 /// interfaces behind `sets` come back from `claim`, which is too large to
 /// push on every peer_status interval.
 pub fn claim_row(c: &crate::state::ClaimInfo) -> Value {
@@ -208,7 +208,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
         .peers
         .values()
         .map(|p| {
-            // Only a summary of the peer's groups; the full detail lives on
+            // Only a summary of the peer's groups. The full detail is on
             // that daemon's own /status.
             let peer_groups: Value = p.last_status["groups"]
                 .as_object()
@@ -290,7 +290,7 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
 }
 
 /// Render a snapshot for terminals. `scoped` mirrors whether the query was
-/// group-scoped; only then is the ray-compatible GPU line printed.
+/// group-scoped. Only then does it print the ray-compatible GPU line.
 pub fn render(data: &Value, scoped: bool) -> String {
     let mut out = String::new();
     let empty = serde_json::Map::new();

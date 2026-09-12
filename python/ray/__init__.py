@@ -24,7 +24,7 @@ from ray.exceptions import (
 )
 from ray.runtime_context import get_runtime_context  # noqa: F401
 
-# vLLM version-checks ray; the wire-compatible lie is deliberate and the
+# vLLM version-checks ray. The wire-compatible lie is deliberate, and the
 # init banner in _client.py reports what this is.
 __version__ = "2.57.0"
 
@@ -133,7 +133,7 @@ def cluster_resources():
 
 
 def available_resources():
-    # Sum of the per-node view; not on vLLM's audited path but harmless.
+    # Sum of the per-node view. Off vLLM's audited path, and harmless.
     from ray._private.state import available_resources_per_node
 
     total = {}

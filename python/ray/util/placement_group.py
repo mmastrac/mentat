@@ -76,7 +76,7 @@ def placement_group_table(pg):
         {"t": "pg_table", "pg_id": pg.id}, retry=True, expect="pg_table_ok"
     )
     table = resp["table"]
-    # JSON forces string keys; ray's table uses ints and vLLM indexes with
+    # JSON forces string keys. Ray's table uses ints and vLLM indexes with
     # ints, so convert here.
     table["bundles"] = {int(k): v for k, v in table.get("bundles", {}).items()}
     table["bundles_to_node_id"] = {
@@ -91,6 +91,6 @@ def remove_placement_group(pg):
 
 def get_current_placement_group():
     # Only actors scheduled with placement_group_capture_child_tasks would
-    # have one; vLLM's driver never does, and the audit confirms only the
+    # have one. vLLM's driver never does, and the audit confirms only the
     # None path is exercised.
     return None

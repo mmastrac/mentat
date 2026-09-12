@@ -31,8 +31,8 @@ state = {}
 
 def t00_unimplemented_surface_probes_cleanly():
     # torch.compile's inductor probes ray.torch with hasattr during the GLM
-    # boot; real ray (which does not have ray.torch either) raises AttributeError, so
-    # the probe returns False and moves on. The tripwire raising
+    # boot. Real ray does not have ray.torch either, and raises
+    # AttributeError, so the probe returns False and moves on. The tripwire raising
     # NotImplementedError instead crashed rank compilation at 90% of a
     # 10-minute weight load on first pair deployment.
     assert not hasattr(ray, "torch")

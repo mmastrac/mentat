@@ -107,7 +107,7 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 /// survive a JSON round trip. Integers and strings do. `f64` does not:
 /// serde_json writes 1787862155.6581013 and reads it back as
 /// 1787862155.658101, which changes the bytes and fails the signature for
-/// some values and not others. Keep floats out of anything signed.
+/// some values. Keep floats out of anything signed.
 fn canonical(payload: &Value) -> String {
     payload.to_string()
 }
@@ -174,8 +174,8 @@ pub fn now_s() -> f64 {
 /// A per-process identifier, so a restarted daemon's sequence numbers can
 /// start over without the listener reading them as replay.
 pub fn boot_id() -> String {
-    // read_exact, never fs::read: /dev/urandom does not end, so reading to
-    // EOF never returns.
+    // read_exact rather than fs::read. /dev/urandom does not end, so
+    // reading to EOF never returns.
     let mut buf = [0u8; 8];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;
@@ -183,7 +183,8 @@ pub fn boot_id() -> String {
             return hex(&buf);
         }
     }
-    // Last resort: unique per process on one box, which is all this needs.
+    // Last resort: unique per process on a single box, which is all this
+    // needs.
     format!("{:x}{:x}", std::process::id(), now_s() as u64)
 }
 

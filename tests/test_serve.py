@@ -764,7 +764,7 @@ def t10_udp_announce_replaces_the_seed_list():
                 daemons = json.load(r)["daemons"]
         except OSError:
             return False
-        # Keyed by port, not by address: with the default allowlist the
+        # Keyed by port rather than address. With the default allowlist the
         # router watches whichever address the daemon ranked first, which
         # on a box with a LAN link is not the loopback the packet came in
         # on.

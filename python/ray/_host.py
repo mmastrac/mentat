@@ -72,8 +72,9 @@ def _watch_agent(agent_pid):
             )
             os._exit(1)
         # Reparenting means the agent died mid-wait. Compare against the
-        # agent's pid, not literal 1: in a worker container the entrypoint
-        # exec's the agent, so the agent IS pid 1 and ppid==1 is the healthy
+        # agent's pid rather than literal 1. In a worker container the
+        # entrypoint exec's the agent, so the agent is pid 1 and ppid==1 is
+        # the healthy
         # state -- a ppid==1 check killed every TP1 rank 5 s after spawn on
         # first deployment.
         if os.getppid() != agent_pid:
