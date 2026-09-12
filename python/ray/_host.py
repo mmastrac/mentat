@@ -104,6 +104,16 @@ def main():
     if header.get("t") != "ctor":
         print(f"mentat host: expected ctor, got {header}", file=sys.stderr, flush=True)
         return 1
+    # This shim ships in the model image and the agent in the daemon's, so
+    # the two upgrade apart. A payload from another major unpickles wrong.
+    offered = header.get("proto", "")
+    if offered.split(".")[0] != PROTO.split(".")[0]:
+        print(
+            f"mentat host: agent proto {offered!r}, this host {PROTO}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
 
     import pickle
 

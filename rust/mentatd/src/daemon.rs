@@ -883,6 +883,20 @@ fn handle_client_msg(
         } => {
             let mut st = shared.st.lock().unwrap();
             let group = client_group(&st, client_id);
+            // Placement packs: it fills one agent before moving to the next,
+            // inside one island. A caller requesting a spread gets a pack, so
+            // the difference is logged rather than left silent. See "Placement"
+            // in PROTOCOL.md.
+            if !strategy.is_empty() && !strategy.contains("PACK") {
+                log(
+                    "pg_strategy_ignored",
+                    &[
+                        ("group", group.clone()),
+                        ("strategy", strategy.clone()),
+                        ("using", "PACK".to_string()),
+                    ],
+                );
+            }
             let pg_id = crate::state::new_pg_id();
             let n = bundles.len();
             st.pgs.insert(
@@ -1443,15 +1457,12 @@ fn create_actor(
         );
     }
 
-    let gcs = st.control_addr.clone();
     let send_res = agent_writer.send(
         Msg::ActorSpawn {
             actor_id: actor_id.clone(),
             name,
             env: spawn_env,
             gpu_ids: gpu_ids.clone(),
-            node_id: node_id.clone(),
-            control_addr: gcs,
             owner: client_id.to_string(),
         },
         0,

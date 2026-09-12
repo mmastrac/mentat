@@ -989,7 +989,6 @@ fn probe_pair(
         Msg::Probe {
             proto: crate::proto::proto(),
             node_id: my_id.to_string(),
-            local_addr: local.to_string(),
         },
         1,
         &[],

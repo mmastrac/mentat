@@ -1321,14 +1321,14 @@ async fn udp_listener(shared: Arc<Shared>) {
             continue;
         };
         let offered = v["proto"].as_str().unwrap_or_default();
-        if !proto_major_matches(offered) {
+        if !mentat_common::proto::major_matches(offered) {
             if warned.insert(format!("proto:{}", src.ip())) {
                 log(
                     "announce_proto_mismatch",
                     &[
                         ("src", src.ip().to_string()),
                         ("offered", offered.to_string()),
-                        ("here", PROTO.to_string()),
+                        ("here", mentat_common::proto::PROTO.to_string()),
                     ],
                 );
             }
@@ -1875,22 +1875,6 @@ async fn probe_candidates(
 // ---------------------------------------------------------------------------
 // HTTP plumbing shared by the modules
 // ---------------------------------------------------------------------------
-
-/// The wire version this router uses. A daemon of another major is
-/// dropped: its snapshot would be read with the wrong shapes.
-pub const PROTO: &str = "0.99";
-
-fn proto_major_matches(peer: &str) -> bool {
-    fn major(v: &str) -> Option<&str> {
-        let (maj, rest) = v.split_once('.')?;
-        rest.parse::<u32>().ok()?;
-        Some(maj)
-    }
-    match (major(PROTO), major(peer)) {
-        (Some(a), Some(b)) => a == b,
-        _ => false,
-    }
-}
 
 pub fn full_body(bytes: impl Into<Bytes>) -> BoxedBody {
     Full::new(bytes.into()).map_err(|e| match e {}).boxed()

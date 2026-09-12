@@ -21,6 +21,8 @@ use serde_json::Value;
 
 /// Cap on each length prefix. A corrupt length would otherwise size an
 /// allocation straight off the wire.
+/// Hard cap on a frame's header and payload, each. A corrupt length prefix
+/// then fails the read instead of allocating whatever it claimed.
 const MAX_FRAME: u32 = 256 * 1024 * 1024;
 
 /// One frame header: a correlation id and the message.
@@ -35,41 +37,8 @@ pub struct Frame {
     pub msg: Msg,
 }
 
-/// The wire version this build uses, `major.minor`.
-///
-/// 0.99 is the 1.0 candidate: the shapes are 1.0's and the number moves when
-/// the spec is accepted. rust/mentatd-serve, python/ray/_client.py, _host.py
-/// and register.py each hold their own copy of this string.
-pub const PROTO: &str = "0.99";
+pub use mentat_common::proto::{major_matches, proto, PROTO};
 
-/// Whether a peer's `proto` shares this build's major.
-///
-/// A major bump changes a field's type or meaning, so the link is refused. A
-/// minor difference is compatible both ways, since a peer sends only what the
-/// minor its counterpart announced defines. Returns false for a version with
-/// no dot, or with a minor that is not a plain number.
-pub fn major_matches(peer: &str) -> bool {
-    fn major(v: &str) -> Option<&str> {
-        let (maj, rest) = v.split_once('.')?;
-        rest.parse::<u32>().ok()?;
-        Some(maj)
-    }
-    match (major(PROTO), major(peer)) {
-        (Some(a), Some(b)) => a == b,
-        _ => false,
-    }
-}
-
-/// `PROTO` as a `String`, for the message fields that hold one.
-pub fn proto() -> String {
-    PROTO.to_string()
-}
-
-/// Every message on every link.
-///
-/// Each variant belongs to one link: client, agent, mesh peer, or the actor
-/// host's unix socket. A receiver acts on a variant only on that variant's
-/// own link.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Msg {
@@ -262,10 +231,11 @@ pub enum Msg {
     ActorSpawn {
         actor_id: String,
         name: String,
+        /// The actor process's environment. `MENTAT_NODE_ID` and
+        /// `MENTAT_GCS_ADDRESS` reach the process here, so the frame does not
+        /// repeat them as fields of its own.
         env: BTreeMap<String, String>,
         gpu_ids: Vec<u32>,
-        node_id: String,
-        control_addr: String,
         /// The `client_id` that owns the actor. The agent reports it again in
         /// `resume`, which is how a restarted daemon learns who owns what.
         owner: String,
@@ -358,8 +328,6 @@ pub enum Msg {
         proto: String,
         /// The prober's node id, so a mistargeted probe is visible.
         node_id: String,
-        /// The address the prober bound locally.
-        local_addr: String,
     },
     /// The reply to `probe`. The prober checks `node_id`, since both fabrics are
     /// numbered out of one subnet and an address that replies is no evidence
@@ -378,6 +346,10 @@ pub enum Msg {
     // ---- actor host (python) <-> agent, over the per-actor unix socket ----
     /// The actor process announcing it is ready for `ctor`. The socket is per
     /// actor, so connecting is the identification.
+    ///
+    /// The shim ships in the model image and the agent in the daemon's, so
+    /// the two are versioned apart and the major is checked here as on every
+    /// other link.
     HostHello { proto: String },
     /// Construct the actor. The payload is a pickled (class, args, kwargs).
     Ctor { proto: String },
@@ -633,12 +605,4 @@ mod tests {
         assert!(read_frame(&mut cur).is_err());
     }
 
-    #[test]
-    fn a_major_mismatch_is_refused() {
-        assert!(major_matches(PROTO));
-        assert!(major_matches("0.1"));
-        assert!(!major_matches("1.0"));
-        assert!(!major_matches("nonsense"));
-        assert!(!major_matches("1"));
-    }
 }

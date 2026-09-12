@@ -148,6 +148,7 @@ A node row, with the daemon's own node always present:
 | Field | Value |
 | --- | --- |
 | `bundles` | Whole GPUs per bundle |
+| `strategy` | Recorded and echoed by `pg_table`. Placement packs, and logs `pg_strategy_ignored` for anything else |
 | `num_gpus` | A whole number |
 | `claim` | A claim this placement group sits inside, or empty |
 | `table` | Ray's: `placement_group_id`, `name`, `strategy`, `state`, `bundles` (index string to `{"GPU": n}`), `bundles_to_node_id`, `stats` |
@@ -230,7 +231,7 @@ spilling outside it would split ranks that agreed on one view.
 | --- | --- | --- |
 | Agent → daemon | `agent_register` | `proto`, `agent_id`, `group`, `node_ip`, `container`, `pid`, `machine`, `services`, `resume`, `unacked_refs` |
 | Daemon → agent | `agent_register_ok` | `proto`, `node_id` |
-| Daemon → agent | `actor_spawn` | `actor_id`, `name`, `env`, `gpu_ids`, `node_id`, `control_addr`, `owner`. Payload: pickled `(cls, args, kwargs)` |
+| Daemon → agent | `actor_spawn` | `actor_id`, `name`, `env`, `gpu_ids`, `owner`. Payload: pickled `(cls, args, kwargs)`. `MENTAT_NODE_ID` and `MENTAT_GCS_ADDRESS` reach the process through `env` |
 | Agent → daemon | `actor_spawn_result` | `actor_id`, `ok`, `error`, `pid` (0 when the failure came before the fork) |
 | Daemon → agent | `actor_dispatch` | `actor_id`, `ref_id`, `method`. Payload: pickled `(args, kwargs)` |
 | Agent → daemon | `actor_result` | `ref_id`, `ok`, `error`. Payload: pickled result or exception |
@@ -290,7 +291,7 @@ selection").
 | `peer_hello_ok` | The same fields, for the accepter |
 | `peer_status` | `snapshot`, pushed every `MENTAT_PEER_STATUS_INTERVAL_MS`. A peer is alive while its pushes arrive |
 | `peer_event` | `event`, one replicated event |
-| `probe` | `proto`, `node_id`, `local_addr`. First frame of its own connection |
+| `probe` | `proto`, `node_id`. First frame of its own connection |
 | `probe_ok` | `proto`, `node_id` of the responder |
 
 One link per `node_id`: when two exist both ends keep the one dialed by the
@@ -329,7 +330,7 @@ The socket is per actor, so the process identifies itself by connecting.
 
 | Message | Fields |
 | --- | --- |
-| `host_hello` | `proto`. The process is ready for `ctor` |
+| `host_hello` | `proto`. The process is ready for `ctor`. The shim ships in the model image and the agent in the daemon's, so both ends check the major here |
 | `ctor` | `proto`. Payload: pickled `(cls, args, kwargs)` |
 | `ctor_ok` / `ctor_err` | `ctor_err` sends `error`, the exception's repr, with the pickled exception |
 | `host_call` | `ref_id`, `method`. Payload: pickled `(args, kwargs)` |

@@ -882,7 +882,30 @@ fn spawn_actor(
     let mut host_reader = BufReader::new(host_stream);
 
     match read_frame(&mut host_reader) {
-        Ok(Some((f, _))) if matches!(f.msg, Msg::HostHello { .. }) => {}
+        // The shim ships in the model image and this agent in the daemon's,
+        // so the two upgrade apart. An actor of another major would unpickle
+        // a payload it reads differently.
+        Ok(Some((f, _))) => match f.msg {
+            Msg::HostHello { proto } if crate::proto::major_matches(&proto) => {}
+            Msg::HostHello { proto } => {
+                log(
+                    "actor_host_proto_mismatch",
+                    &[
+                        ("actor", actor_id.clone()),
+                        ("proto", proto),
+                        ("here", crate::proto::PROTO.to_string()),
+                    ],
+                );
+                return;
+            }
+            other => {
+                log(
+                    "actor_host_bad_hello",
+                    &[("actor", actor_id.clone()), ("got", format!("{other:?}"))],
+                );
+                return;
+            }
+        },
         other => {
             log(
                 "actor_host_bad_hello",
