@@ -1,15 +1,19 @@
 //! Zero-config discovery: mentatd announces its addresses over UDP so
 //! mentatd-serve does not need a daemon list.
 //!
-//! With MENTAT_SECRET set, datagrams are HMAC-SHA256 signed and hold a
-//! timestamp and per-boot sequence number, matching spark-agent's mesh
-//! discovery so one key serves both. Without it they go out unsigned, as
-//! version 1, and a listener holding a key refuses them on version alone.
+//! Every datagram is HMAC-SHA256 signed and holds a timestamp and a per-boot
+//! sequence number, matching spark-agent's mesh discovery so one key serves
+//! both. A daemon with no key does not announce at all.
 //!
 //! Signing raises the floor rather than closing the hole. The control port
 //! still accepts unauthenticated connections from the same network, so a
 //! listener keeps treating an announcement as a hint -- an address to watch
 //! -- and verifies everything it claims over TCP.
+//!
+//! Daemons send and do not listen. A daemon finds its mesh through
+//! MENTAT_PEERS and the peer tables its peers publish, so one seed reaching
+//! any live daemon joins the whole mesh. Only the router has no such path in,
+//! which is what these datagrams are for.
 
 use std::collections::BTreeMap;
 use std::net::UdpSocket;
