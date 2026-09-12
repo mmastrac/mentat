@@ -1,20 +1,25 @@
 # mentat
 
-mentat replaces Ray's control plane for vLLM multi-node serving. It has
-three parts: a daemon that places actors and watches their liveness, a
-router that puts one OpenAI-compatible endpoint in front of every model, and
-a pure-Python package that installs as `ray` and implements the surface
+mentat is a self-organizing cluster manager for small numbers of nodes. It can either provide its own standalong cluster, or replace an existing one (like Ray) with a much lighter-weight manager.
+
+It has three components: 
+
+ - a daemon that places actors and watches their liveness,
+ - an HTTP/MCP router that puts one OpenAI-compatible endpoint in front of every model; and
+ - a pure-Python package that installs as `ray` and implements the surface
 vLLM's Ray executor uses.
 
+mentat is designed to build the cluster with no configuation. Registration retries forever, so daemons and containers can start in any
+order. UDP can be used to locate peers, or `MENTAT_PEERS` can bootstrap it. Containers automatically use the local daemon's address. All binaries are static executables.
+
+## Ray Compatibility
+
+mentat specifically omits most of Ray's functionality:
+
 There is no object store, memory monitor, raylet or dashboard. Per-token
-work is unchanged: vLLM's workers exchange data over its own MessageQueue
+work is unchanged: in the case of vLLM, its workers exchange data over its own MessageQueue
 and NCCL, and after boot the only recurring Ray call is `ray.wait` every 5
 seconds.
-
-Registration retries forever, so daemons and containers can start in any
-order. One `MENTAT_PEERS` entry that reaches any live daemon joins the whole
-mesh, and a container does not need an address of its own: the daemon files
-it under the box it connected from. Both binaries are static executables.
 
 ## Components
 

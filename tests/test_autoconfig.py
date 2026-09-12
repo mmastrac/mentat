@@ -22,9 +22,15 @@ sys.path.insert(0, HERE)
 import mentat_testlib as tl  # noqa: E402
 from mentat_testlib import run_ok  # noqa: E402
 
-# The ports a daemon binds with no flags, and the announcement port beside
-# them. A container reaching 127.0.0.1:6379 is reaching its own box's daemon.
-CONTROL, HTTP, ANNOUNCE = 6379, 6380, 6382
+# The control and HTTP ports a daemon binds with no flags, which is what a
+# container reaching 127.0.0.1:6379 relies on.
+#
+# The announcement port is NOT the default here. A test daemon must never
+# join, or be heard by, a real cluster on the same LAN, and this suite now
+# listens as well as sends. The suite picks a free port for it instead, since
+# what is under test is that no address is configured, not which port the
+# datagram uses.
+CONTROL, HTTP = 6379, 6380
 
 #: Every address variable a deployment could set. The point of the suite is
 #: that none of them is in the environment.
@@ -41,6 +47,14 @@ ADDRESS_VARS = [
 ]
 
 state = {}
+
+
+def free_udp_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 def port_free(p):
@@ -63,16 +77,20 @@ def clean_env(**extra):
 
 
 def setup():
-    for p in (CONTROL, HTTP, ANNOUNCE):
+    for p in (CONTROL, HTTP):
         if not port_free(p):
             print(f"port {p} is in use; skipping (these are the defaults under test)")
             raise SystemExit(0)
     tl.build_binary()
     tmp = tempfile.mkdtemp(prefix="mentat-auto-")
     # No --node-ip, no --port, no --peers: every flag left at its default.
+    announce = free_udp_port()
     daemon = subprocess.Popen(
         [tl.BINARY, "daemon", "--head-json", os.path.join(tmp, "head.json")],
-        env=clean_env(MENTAT_SECRET=tl.TEST_SECRET),
+        env=clean_env(
+            MENTAT_SECRET=tl.TEST_SECRET,
+            MENTAT_ANNOUNCE_PORT=str(announce),
+        ),
     )
     tl._children.append(daemon)
     deadline = time.time() + 15
@@ -84,7 +102,7 @@ def setup():
             time.sleep(0.05)
     else:
         raise TimeoutError("daemon never bound the default port")
-    state.update(tmp=tmp, daemon=daemon)
+    state.update(tmp=tmp, daemon=daemon, announce=announce)
 
 
 def status(group=None):
@@ -210,7 +228,81 @@ print(json.dumps({
     assert out["actor_gcs"].endswith(f":{CONTROL}"), out
 
 
-def t04_the_router_with_no_seed_list_finds_the_daemon():
+def t04_two_daemons_mesh_with_no_seed_list():
+    """MENTAT_PEERS empty on both. Each finds the other by announcement.
+
+    A node id is the hash of the node's address, so two daemons on one box
+    need two addresses to be two nodes. MENTAT_TEST_NET supplies them and
+    maps each onto a loopback port, the same way the topology suite builds a
+    cluster that a single box has no cabling for.
+    """
+    from test_topology import TestNet
+
+    tmp = tempfile.mkdtemp(prefix="mentat-mesh-")
+    net = TestNet(os.path.join(tmp, "net.json"))
+    boxes = {"a": "192.168.9.1", "b": "192.168.9.2"}
+    ports = {n: (tl.free_port(), tl.free_port(), free_udp_port()) for n in boxes}
+    for name, ip in boxes.items():
+        net.addrs[ip] = f"127.0.0.1:{ports[name][0]}"
+    net.write()
+
+    procs = {}
+    for name, ip in boxes.items():
+        ctl, http, udp = ports[name]
+        other = next(u for n, (_, _, u) in ports.items() if n != name)
+        env = clean_env(
+            MENTAT_SECRET=tl.TEST_SECRET,
+            MENTAT_ANNOUNCE_PORT=str(udp),
+            MENTAT_ANNOUNCE_INTERVAL_S="1",
+            MENTAT_ELECTION_HOLD_DOWN_MS="500",
+            MENTAT_TEST_NET=net.path,
+        )
+        # Set after the strip, which clears every address variable. Loopback
+        # does not broadcast, so the peer's listener is addressed directly.
+        # The datagram is the one a broadcast would deliver.
+        env["MENTAT_ANNOUNCE_ADDR"] = f"127.0.0.1:{other}"
+        p = subprocess.Popen(
+            [
+                tl.BINARY, "daemon",
+                "--port", str(ctl),
+                "--http-port", str(http),
+                "--node-ip", ip,
+                "--head-json", os.path.join(tmp, f"head-{name}.json"),
+            ],
+            env=env,
+        )
+        tl._children.append(p)
+        procs[name] = p
+
+    def peers_of(http_port):
+        import urllib.request
+
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{http_port}/status", timeout=3
+        ) as r:
+            snap = json.load(r)
+        return {k for k, v in snap.get("peers", {}).items() if v.get("alive")}
+
+    try:
+        deadline = time.time() + 40
+        while time.time() < deadline:
+            try:
+                if peers_of(ports["a"][1]) and peers_of(ports["b"][1]):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.5)
+        else:
+            raise TimeoutError("daemons never found each other without a seed list")
+        for name, (_, http, _) in ports.items():
+            assert peers_of(http), f"{name} sees no peer"
+    finally:
+        # These bind ports the later tests want, so they go whatever happened.
+        for p in procs.values():
+            p.terminate()
+
+
+def t05_the_router_with_no_seed_list_finds_the_daemon():
     """MENTAT_DAEMONS empty. The only way in is the UDP announcement."""
     tl.build_serve()
     port = tl.free_port()
@@ -219,6 +311,7 @@ def t04_the_router_with_no_seed_list_finds_the_daemon():
         POLL_INTERVAL_S="1",
         PROBE_INTERVAL_S="0.5",
         MENTAT_SECRET=tl.TEST_SECRET,
+        MENTAT_ANNOUNCE_PORT=str(state["announce"]),
         ALLOWED_SOURCES="local",
     )
     env["MENTAT_DAEMONS"] = ""

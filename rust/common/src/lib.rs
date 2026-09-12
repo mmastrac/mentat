@@ -6,3 +6,4 @@
 pub mod logfmt;
 pub mod proto;
 pub mod secret;
+pub mod udp;

@@ -88,7 +88,7 @@ pub fn run(opts: DaemonOpts) -> std::io::Result<()> {
     crate::http::serve(shared.clone(), opts.http_port);
     crate::mesh::start(shared.clone(), opts.peers, opts.port, opts.http_port);
     crate::island::start(shared.clone());
-    crate::announce::start(shared.clone());
+    crate::announce::start(shared.clone(), opts.port, opts.http_port);
 
     // Lifecycle sweeper: slow-call warnings, the pending-pg timeout, the
     // agent degrade/give-up windows and the dead-actor sweep. A single

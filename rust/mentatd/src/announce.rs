@@ -1,5 +1,6 @@
-//! Zero-config discovery: mentatd announces its addresses over UDP so
-//! mentatd-serve does not need a daemon list.
+//! Zero-config discovery: a daemon announces its addresses over UDP, and
+//! both the router and the other daemons listen. A cluster on one broadcast
+//! domain therefore needs neither a daemon list nor a seed list.
 //!
 //! Every datagram is HMAC-SHA256 signed and holds a timestamp and a per-boot
 //! sequence number, matching spark-agent's mesh discovery so one key serves
@@ -10,10 +11,9 @@
 //! listener keeps treating an announcement as a hint -- an address to watch
 //! -- and verifies everything it claims over TCP.
 //!
-//! Daemons send and do not listen. A daemon finds its mesh through
-//! MENTAT_PEERS and the peer tables its peers publish, so one seed reaching
-//! any live daemon joins the whole mesh. Only the router has no such path in,
-//! which is what these datagrams are for.
+//! The two listeners want different things from one. The router adds a watch
+//! and reads /status. A daemon dials, and `peer_hello` settles the rest, so a
+//! seeded mesh and a discovered one converge on the same links.
 
 use std::collections::BTreeMap;
 use std::net::UdpSocket;
@@ -29,7 +29,7 @@ use mentat_common::secret;
 
 pub const DEFAULT_PORT: u16 = 6382;
 
-pub fn start(shared: SharedRef) {
+pub fn start(shared: SharedRef, control_port: u16, http_port: u16) {
     let port: u16 = std::env::var("MENTAT_ANNOUNCE_PORT")
         .ok()
         .and_then(|s| s.trim().parse().ok())
@@ -83,6 +83,10 @@ pub fn start(shared: SharedRef) {
             std::process::exit(1);
         }
     };
+    {
+        let (shared, key) = (shared.clone(), key.clone());
+        std::thread::spawn(move || listen(shared, port, key, control_port, http_port));
+    }
     std::thread::spawn(move || run(shared, port, interval, extra, key));
 }
 
@@ -149,6 +153,107 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
             let _ = sock.send_to(payload.as_bytes(), target.as_str());
         }
         std::thread::sleep(interval);
+    }
+}
+
+/// Join the mesh from what other daemons announce.
+///
+/// A daemon reaches the whole mesh through one `MENTAT_PEERS` entry, since
+/// every peer publishes its own table. This covers the case before that: a
+/// box with an empty seed list joins by being on the same broadcast domain.
+///
+/// An announcement is a hint, as it is for the router. It produces one dial,
+/// and `peer_hello` then settles identity, version and which side owns the
+/// link. Only a holder of the key can put a datagram in front of this, and a
+/// foreign `universe` is dropped before the key is consulted.
+fn listen(shared: SharedRef, port: u16, key: Vec<u8>, control_port: u16, http_port: u16) {
+    let sock = match mentat_common::udp::bind_shared(port) {
+        Ok(s) => s,
+        Err(e) => {
+            log(
+                "announce_listen_failed",
+                &[("port", port.to_string()), ("error", e.to_string())],
+            );
+            return;
+        }
+    };
+    log("announce_listen", &[("port", port.to_string())]);
+    let universe = secret::universe();
+    let my_id = shared.st.lock().unwrap().node_id.clone();
+    // node_id -> (boot_id, last accepted seq), which bounds replay within
+    // one boot.
+    let mut seen: std::collections::HashMap<String, (String, u64)> =
+        std::collections::HashMap::new();
+    let mut warned: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut buf = [0u8; 1400];
+    loop {
+        let Ok((n, src)) = sock.recv_from(&mut buf) else {
+            continue;
+        };
+        // Another cluster on this broadcast domain is not a misconfiguration,
+        // so it is dropped before the key is consulted and before anything
+        // is logged.
+        match secret::peek_universe(&buf[..n]) {
+            Some(u) if u != universe => continue,
+            _ => {}
+        }
+        let Some(v) = secret::verify(&buf[..n], &key) else {
+            if warned.insert(src.ip().to_string()) {
+                log(
+                    "announce_rejected",
+                    &[
+                        ("src", src.ip().to_string()),
+                        ("why", "bad signature or unsigned".to_string()),
+                    ],
+                );
+            }
+            continue;
+        };
+        let offered = v["proto"].as_str().unwrap_or_default();
+        if !crate::proto::major_matches(offered) {
+            if warned.insert(format!("proto:{}", src.ip())) {
+                log(
+                    "announce_proto_mismatch",
+                    &[
+                        ("src", src.ip().to_string()),
+                        ("offered", offered.to_string()),
+                        ("here", crate::proto::PROTO.to_string()),
+                    ],
+                );
+            }
+            continue;
+        }
+        let Some(t) = v["t"].as_u64() else { continue };
+        if !secret::fresh(t as f64, secret::now_s()) {
+            continue;
+        }
+        let node = v["node_id"].as_str().unwrap_or_default().to_string();
+        let boot = v["boot_id"].as_str().unwrap_or_default().to_string();
+        let seq = v["seq"].as_u64().unwrap_or(0);
+        // Every daemon hears its own broadcasts.
+        if node.is_empty() || boot.is_empty() || node == my_id {
+            continue;
+        }
+        match seen.get(&node) {
+            Some((b, last)) if *b == boot && seq <= *last => continue,
+            _ => seen.insert(node.clone(), (boot, seq)),
+        };
+        let Some(control) = v["control"].as_str().filter(|c| !c.is_empty()) else {
+            continue;
+        };
+        // A live link already covers this node. Dialing again would race the
+        // one that exists, and register_peer would close one of the two.
+        if shared
+            .st
+            .lock()
+            .unwrap()
+            .peers
+            .get(&node)
+            .is_some_and(|p| p.alive)
+        {
+            continue;
+        }
+        crate::mesh::dial(&shared, control.to_string(), control_port, http_port, true);
     }
 }
 

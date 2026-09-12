@@ -1241,7 +1241,13 @@ async fn udp_listener(shared: Arc<Shared>) {
     if port == 0 {
         return;
     }
-    let sock = match tokio::net::UdpSocket::bind(("0.0.0.0", port)).await {
+    // Shared, because a box that hosts a model and the router runs both with
+    // host networking and both want these broadcasts.
+    let sock = match mentat_common::udp::bind_shared(port)
+        .and_then(|s| {
+            s.set_nonblocking(true)?;
+            tokio::net::UdpSocket::from_std(s)
+        }) {
         Ok(s) => s,
         Err(e) => {
             log(

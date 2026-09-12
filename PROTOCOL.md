@@ -371,8 +371,11 @@ one without logging, since another cluster on the same broadcast domain is
 expected. It then verifies the signature, logging a bad one once per source,
 and checks `proto`, `t` and `seq`. The source address, and each advertised
 address before it is chosen, must pass `ALLOWED_SOURCES`; a rejection is
-logged once. An announcement is a hint: it adds one address to watch, and
-every field is re-read over TCP and probed before it affects routing.
+logged once. An announcement is a hint. For the router it adds one address to
+watch; for a daemon it produces one dial, and `peer_hello` then settles
+identity, version and link ownership. Every field is re-read over TCP and
+probed before it affects routing, so an empty `MENTAT_PEERS` joins a daemon
+by putting it on the same broadcast domain.
 
 ## Address selection
 

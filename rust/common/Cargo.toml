@@ -9,5 +9,6 @@ repository.workspace = true
 
 [dependencies]
 serde_json.workspace = true
+libc = "0.2"
 hmac.workspace = true
 sha2.workspace = true

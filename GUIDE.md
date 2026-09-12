@@ -51,12 +51,16 @@ other rank. `RAY_ADDRESS` can name any daemon, and its default of
 
 Each daemon dials the addresses in `MENTAT_PEERS` and every daemon those
 peers publish in their status pushes, so one entry that reaches any live
-daemon joins the whole mesh. A peer is dialed by its seed address first and
-then by every other address it announces, on the same port, so a pair seeded
-over a fabric address stays linked over the LAN while the cable is out. A
-peer's address list is refreshed from its status pushes, so a renumbered or
-newly cabled link reaches the probes and the islands without a relink. Two
-daemons that dial each other at once keep the link the lower node id dialed.
+daemon joins the whole mesh. A daemon also listens for the announcements
+other daemons broadcast, so an empty `MENTAT_PEERS` joins by being on the
+same broadcast domain. An announcement only produces a dial: identity,
+version and link ownership are settled over TCP as for a seeded peer. A peer
+is dialed by its seed address first and then by every other address it
+announces, on the same port, so a pair seeded over a fabric address stays
+linked over the LAN while the cable is out. A peer's address list is
+refreshed from its status pushes, so a renumbered or newly cabled link
+reaches the probes and the islands without a relink. Two daemons that dial
+each other at once keep the link the lower node id dialed.
 
 ### Placement
 

@@ -43,7 +43,17 @@ pub fn start(shared: SharedRef, seeds: Vec<String>, control_port: u16, http_port
 
 /// Start a connector for one control address, unless one is already
 /// running for it.
-fn dial(shared: &SharedRef, target: String, control_port: u16, http_port: u16, discovered: bool) {
+/// Dial one control address, unless a dial to it is already in flight.
+///
+/// `discovered` marks a target that came from somewhere other than the seed
+/// list: a peer's published table, or an announcement.
+pub fn dial(
+    shared: &SharedRef,
+    target: String,
+    control_port: u16,
+    http_port: u16,
+    discovered: bool,
+) {
     if !shared.st.lock().unwrap().dialing.insert(target.clone()) {
         return;
     }
