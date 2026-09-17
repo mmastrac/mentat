@@ -174,6 +174,15 @@ pub fn peek_universe(raw: &[u8]) -> Option<String> {
     Some(payload.get("universe")?.as_str()?.to_string())
 }
 
+/// The universe an announcement belongs to, with a missing field read as
+/// `default`.
+///
+/// A daemon with no MENTAT_UNIVERSE uses `default`, so a datagram that names
+/// none belongs to the same cluster it does.
+pub fn claimed_universe(raw: &[u8]) -> String {
+    peek_universe(raw).unwrap_or_else(|| "default".to_string())
+}
+
 /// Whether `t` sits inside the accepted window around now.
 pub fn fresh(t: f64, now: f64) -> bool {
     (now - t).abs() <= CLOCK_SKEW_S

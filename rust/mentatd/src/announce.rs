@@ -190,12 +190,24 @@ fn listen(shared: SharedRef, port: u16, key: Vec<u8>, control_port: u16, http_po
         let Ok((n, src)) = sock.recv_from(&mut buf) else {
             continue;
         };
+        // A datagram that filled the buffer was cut to fit, and the rest of
+        // it is gone. Verifying the fragment would report a bad signature
+        // for what is really an oversized sender.
+        if n == buf.len() {
+            if warned.insert(src.ip().to_string()) {
+                log(
+                    "announce_oversize",
+                    &[("src", src.ip().to_string()), ("cap", n.to_string())],
+                );
+            }
+            continue;
+        }
         // Another cluster on this broadcast domain is not a misconfiguration,
         // so it is dropped before the key is consulted and before anything
-        // is logged.
-        match secret::peek_universe(&buf[..n]) {
-            Some(u) if u != universe => continue,
-            _ => {}
+        // is logged. A datagram with no universe reads as "default", the
+        // same value a daemon uses when MENTAT_UNIVERSE is unset.
+        if secret::claimed_universe(&buf[..n]) != universe {
+            continue;
         }
         let Some(v) = secret::verify(&buf[..n], &key) else {
             if warned.insert(src.ip().to_string()) {
@@ -225,6 +237,20 @@ fn listen(shared: SharedRef, port: u16, key: Vec<u8>, control_port: u16, http_po
         }
         let Some(t) = v["t"].as_u64() else { continue };
         if !secret::fresh(t as f64, secret::now_s()) {
+            // A signed datagram outside the window is this cluster's, so
+            // the clocks have drifted. Dropping it without a line leaves an
+            // empty mesh with no stated cause.
+            if warned.insert(format!("t:{}", src.ip())) {
+                log(
+                    "announce_stale",
+                    &[
+                        ("src", src.ip().to_string()),
+                        ("t", t.to_string()),
+                        ("now", (secret::now_s() as u64).to_string()),
+                        ("window_s", secret::CLOCK_SKEW_S.to_string()),
+                    ],
+                );
+            }
             continue;
         }
         let node = v["node_id"].as_str().unwrap_or_default().to_string();

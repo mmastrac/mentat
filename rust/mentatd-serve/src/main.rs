@@ -1299,12 +1299,23 @@ async fn udp_listener(shared: Arc<Shared>) {
         let Ok((n, src)) = sock.recv_from(&mut buf).await else {
             continue;
         };
+        // A datagram that filled the buffer was cut to fit. Verifying the
+        // fragment would report a bad signature for an oversized sender.
+        if n == buf.len() {
+            if warned.insert(src.ip().to_string()) {
+                log(
+                    "announce_oversize",
+                    &[("src", src.ip().to_string()), ("cap", n.to_string())],
+                );
+            }
+            continue;
+        }
         // Another cluster on this broadcast domain is not a misconfiguration,
         // so it is dropped before the key is consulted and before anything is
-        // logged. An announcement with no universe predates the field.
-        match secret::peek_universe(&buf[..n]) {
-            Some(u) if u != universe => continue,
-            _ => {}
+        // logged. A datagram with no universe reads as "default", the same
+        // value a router uses when MENTAT_UNIVERSE is unset.
+        if secret::claimed_universe(&buf[..n]) != universe {
+            continue;
         }
         let Some(v) = secret::verify(&buf[..n], &key) else {
             // A wrong key and a stripped signature look the same from here,
@@ -1336,6 +1347,20 @@ async fn udp_listener(shared: Arc<Shared>) {
         }
         let Some(t) = v["t"].as_u64() else { continue };
         if !secret::fresh(t as f64, secret::now_s()) {
+            // The signature passed, so this is one of ours with a drifted
+            // clock. Dropping it silently leaves an empty cluster with no
+            // stated cause.
+            if warned.insert(format!("t:{}", src.ip())) {
+                log(
+                    "announce_stale",
+                    &[
+                        ("src", src.ip().to_string()),
+                        ("t", t.to_string()),
+                        ("now", (secret::now_s() as u64).to_string()),
+                        ("window_s", secret::CLOCK_SKEW_S.to_string()),
+                    ],
+                );
+            }
             continue;
         }
         let node = v["node_id"].as_str().unwrap_or_default().to_string();

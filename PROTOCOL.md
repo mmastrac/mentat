@@ -425,16 +425,25 @@ accepted for the same `boot_id`, and a restart issues a new `boot_id` and
 restarts `seq`.
 
 The datagram is at most 1400 bytes, one Ethernet frame. A sender over that
-logs `announce_too_large` and sends nothing until it fits. The listener
-reads a buffer of at least that size and drops anything longer.
+logs `announce_too_large` and sends nothing until it fits. A listener reads
+into a buffer of that size and drops a datagram that fills it, logging
+`announce_oversize` once per source, since what arrived is a fragment whose
+signature could not verify anyway.
 
 The receiver reads `universe` first, without verifying, and drops a foreign
 one without logging, since another cluster on the same broadcast domain is
-expected. It then verifies the signature, logging a bad one once per source,
-and checks `proto`, `t` and `seq`. The source address, and each advertised
-address before it is chosen, must pass `ALLOWED_SOURCES`, and a rejection is
-logged once. An announcement is a hint. For the router it adds one address
-to watch. For a daemon it produces one dial from which `peer_hello` settles
+expected. A datagram naming no universe reads as `default`, which is the
+value a process uses when `MENTAT_UNIVERSE` is unset. It then verifies the
+signature, logging a bad one once per source, and checks `proto`, `t` and
+`seq`. A signed datagram outside the `t` window logs `announce_stale` once
+per source, because the signature places it in this cluster and a drifted
+clock is worth reporting. The router also requires the source address, and
+each advertised address before it is chosen, to pass its `ALLOWED_SOURCES`,
+logging a rejection once. The daemon's listener has no such list and dials
+what a signed datagram names.
+
+An announcement is a hint. For the router it adds one address to watch. For
+a daemon it produces one dial from which `peer_hello` settles
 identity, version and link ownership. Every field is
 re-read over TCP and probed before it affects routing, so an empty
 `MENTAT_PEERS` joins a daemon by putting it on the same broadcast domain.
@@ -458,8 +467,10 @@ A consumer picks one address per node: the highest-ranked entry in `addrs`
 on one of its own subnets, then the source address of a datagram it
 received, which is proof of reach, then `link_ip`, the rest of `addrs` and
 `node_ip`. One watch per `node_id`. A node with two links broadcasts on
-both, the datagrams differing only in source address, and the unwatched one
-is kept as an alternate for when the watched one stops replying.
+both with one `seq`, so a receiver keeps the first datagram of a round and
+drops the rest as replay. The alternates come from `addrs`, which is why a
+node ranks every address it holds rather than relying on the datagram that
+arrived.
 
 A service with an empty `host` resolves against its node's `addrs`. The
 agent joins its node by matching its `node_ip` against `node_ip`, `link_ip`
