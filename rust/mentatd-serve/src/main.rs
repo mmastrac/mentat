@@ -594,13 +594,12 @@ pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
                 agents
                     .iter()
                     .filter_map(|a| {
-                        resolve(a, "openai")
-                            .map(|e| {
-                                let p = a["services"]["openai"]["provider"]
-                                    .as_str()
-                                    .unwrap_or_default();
-                                (e, p.to_string())
-                            })
+                        resolve(a, "openai").map(|e| {
+                            let p = a["services"]["openai"]["provider"]
+                                .as_str()
+                                .unwrap_or_default();
+                            (e, p.to_string())
+                        })
                     })
                     .collect(),
             );
@@ -609,11 +608,7 @@ pub fn announced_groups(shared: &Shared) -> BTreeMap<String, GroupEntry> {
             // to report -- then the same order.
             let mcp = agents
                 .iter()
-                .filter_map(|a| {
-                    resolve(a, "mcp").map(|m| {
-                        (a["services"]["openai"].is_null(), m)
-                    })
-                })
+                .filter_map(|a| resolve(a, "mcp").map(|m| (a["services"]["openai"].is_null(), m)))
                 .min_by(|x, y| (x.0, x.1.best()).cmp(&(y.0, y.1.best())))
                 .map(|(_, m)| m);
             let entry = GroupEntry {
@@ -1243,11 +1238,10 @@ async fn udp_listener(shared: Arc<Shared>) {
     }
     // Shared, because a box that hosts a model and the router runs both with
     // host networking and both want these broadcasts.
-    let sock = match mentat_common::udp::bind_shared(port)
-        .and_then(|s| {
-            s.set_nonblocking(true)?;
-            tokio::net::UdpSocket::from_std(s)
-        }) {
+    let sock = match mentat_common::udp::bind_shared(port).and_then(|s| {
+        s.set_nonblocking(true)?;
+        tokio::net::UdpSocket::from_std(s)
+    }) {
         Ok(s) => s,
         Err(e) => {
             log(
