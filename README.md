@@ -55,13 +55,13 @@ The wheel is not on PyPI. The published artifacts image has both binaries
 and the wheel:
 
 ```
-docker pull mmastrac/mentat-artifacts:0.10.0
+docker pull mmastrac/mentat-artifacts:0.11.0
 ```
 
 Building every image locally:
 
 ```
-VERSION=0.10.0 ./build.sh
+VERSION=0.11.0 ./build.sh
 ```
 
 This produces `mentat-artifacts:<ver>` (both binaries and the wheel, for
@@ -79,11 +79,11 @@ MENTAT_NODE_IP=10.0.0.1 MENTAT_PEERS=10.0.0.2:6379 mentatd daemon
 The model image replaces Ray with the shim:
 
 ```dockerfile
-COPY --from=mmastrac/mentat-artifacts:0.10.0 /out/mentatd /usr/local/bin/mentatd
-COPY --from=mmastrac/mentat-artifacts:0.10.0 /out/mentatd-0.10.0-py3-none-any.whl /tmp/
+COPY --from=mmastrac/mentat-artifacts:0.11.0 /out/mentatd /usr/local/bin/mentatd
+COPY --from=mmastrac/mentat-artifacts:0.11.0 /out/mentatd-0.11.0-py3-none-any.whl /tmp/
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
- && pip install --no-deps /tmp/mentatd-0.10.0-py3-none-any.whl
+ && pip install --no-deps /tmp/mentatd-0.11.0-py3-none-any.whl
 ```
 
 The entrypoint exports the group before `ray start`. The daemon on the box
