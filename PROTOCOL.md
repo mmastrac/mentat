@@ -352,8 +352,18 @@ signed:
  "sig": "<hex>"}
 ```
 
-`sig` is HMAC-SHA256 over the payload's compact JSON with sorted keys, keyed
-by `MENTAT_SECRET_FILE`'s contents or else `MENTAT_SECRET`. A named file
+`sig` is HMAC-SHA256 over the payload in canonical form, keyed by
+`MENTAT_SECRET_FILE`'s contents or else `MENTAT_SECRET`. Canonical form is
+the payload as JSON with object keys sorted at every depth, no whitespace,
+`,` and `:` as separators, and non-ASCII left as UTF-8 rather than escaped
+to `\uXXXX`. Signing this payload with the key `k`:
+
+```json
+{"a":1,"b":[2,{"c":3,"d":4}],"universe":"kü"}
+```
+
+gives `ec381f4b20bc7eb6b1f18c7f15b06a5c7c60aca04b4ffcba2c1910ac6262ed39`.
+An implementation that reproduces that hex agrees with this one. A named file
 that cannot be read, or reads empty, is fatal at boot. Without a key the
 daemon does not announce and the router does not listen; each logs that at
 boot. The verifier re-serializes the payload it parsed, so every value must

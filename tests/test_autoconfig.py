@@ -119,6 +119,20 @@ def status(group=None):
         return json.load(r)
 
 
+def t00_the_signing_vector_matches_the_rust_one():
+    """The canonical form, pinned on both sides. secret.rs asserts the same
+    payload and signature, so a change to either signer fails here.
+
+    Nested objects sort, and the non-ASCII key stays raw UTF-8.
+    """
+    env = json.loads(
+        tl.sign_announcement({"universe": "k\u00fc", "b": [2, {"d": 4, "c": 3}], "a": 1}, "k")
+    )
+    assert env["sig"] == (
+        "ec381f4b20bc7eb6b1f18c7f15b06a5c7c60aca04b4ffcba2c1910ac6262ed39"
+    ), env["sig"]
+
+
 def t01_a_daemon_with_no_flags_names_itself():
     """`mentatd daemon` with no arguments settles on an identity and a head.
 
@@ -316,25 +330,22 @@ def t05_a_foreign_universe_and_a_wrong_key_are_both_refused():
     routine, so the drop is silent. A matching universe with a bad signature
     is an intruder, so the drop is logged.
     """
-    import hashlib
-    import hmac as _hmac
-
     def signed(universe, key, node):
-        payload = {
-            "proto": "0.99",
-            "node_id": node,
-            "universe": universe,
-            "control": "10.9.9.9:6379",
-            "http": "10.9.9.9:6380",
-            "addrs": ["10.9.9.9"],
-            "addr_tags": {},
-            "boot_id": "deadbeefdeadbeef",
-            "seq": 1,
-            "t": int(time.time()),
-        }
-        canon = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        sig = _hmac.new(key.encode(), canon.encode(), hashlib.sha256).hexdigest()
-        return json.dumps({"p": payload, "sig": sig}).encode()
+        return tl.sign_announcement(
+            {
+                "proto": "0.99",
+                "node_id": node,
+                "universe": universe,
+                "control": "10.9.9.9:6379",
+                "http": "10.9.9.9:6380",
+                "addrs": ["10.9.9.9"],
+                "addr_tags": {},
+                "boot_id": "deadbeefdeadbeef",
+                "seq": 1,
+                "t": int(time.time()),
+            },
+            key,
+        )
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     before = len(state["daemon_log"]())

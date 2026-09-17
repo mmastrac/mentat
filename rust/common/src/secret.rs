@@ -3,11 +3,9 @@
 //!
 //! The scheme is spark-agent's mesh discovery, so one key serves both while
 //! the fleet migrates: envelope `{"p": <payload>, "sig": <hex>}`, signature
-//! over the payload's compact JSON with sorted keys. serde_json emits exactly
-//! that for a `Value`, since its map is a BTreeMap and `to_string` adds no
-//! whitespace. Both sides must serialize identically or every signature
-//! fails, which is why the canonical form is one function rather than a
-//! convention.
+//! over the payload in the form `canonical` defines. Both sides must
+//! serialize identically or every signature fails, so that form is one
+//! function and one pinned test vector.
 
 use hmac::{Hmac, Mac};
 use serde_json::Value;
@@ -101,7 +99,12 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// The bytes a signature covers.
+/// The bytes a signature covers: compact JSON, object keys in byte order,
+/// non-ASCII as raw UTF-8. PROTOCOL.md carries the same definition.
+///
+/// Sorting explicitly keeps the bytes the same if a dependency turns on
+/// serde_json's `preserve_order`, which would otherwise re-sign every
+/// announcement differently.
 ///
 /// The verifier re-serializes a payload it parsed, so every value in it must
 /// survive a JSON round trip. Integers and strings do. `f64` does not:
@@ -109,7 +112,23 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 /// 1787862155.658101, which changes the bytes and fails the signature for
 /// some values. Keep floats out of anything signed.
 fn canonical(payload: &Value) -> String {
-    payload.to_string()
+    sorted(payload).to_string()
+}
+
+fn sorted(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            Value::Object(
+                keys.into_iter()
+                    .map(|k| (k.clone(), sorted(&m[k])))
+                    .collect(),
+            )
+        }
+        Value::Array(a) => Value::Array(a.iter().map(sorted).collect()),
+        _ => v.clone(),
+    }
 }
 
 /// Wrap `payload` in a signed envelope, ready to send.
@@ -219,6 +238,26 @@ mod tests {
         assert_eq!(verify(b"{\"http\":\"x\"}", b"k"), None);
         assert_eq!(verify(b"not json", b"k"), None);
         assert_eq!(verify(b"{\"p\":{},\"sig\":\"zz\"}", b"k"), None);
+    }
+
+    /// The canonical form, byte for byte, with the signature over it. Any
+    /// change here invalidates every deployed key. If this fails, fix the
+    /// change. tests/test_autoconfig.py pins the same vector from Python.
+    ///
+    /// Nested objects sort too, and non-ASCII stays raw UTF-8. Python's
+    /// `json.dumps` escapes it to `\u00fc` unless told `ensure_ascii=False`.
+    #[test]
+    fn canonical_form_is_pinned() {
+        let v = serde_json::json!({"universe": "k\u{fc}", "b": [2, {"d": 4, "c": 3}], "a": 1});
+        assert_eq!(
+            canonical(&v),
+            "{\"a\":1,\"b\":[2,{\"c\":3,\"d\":4}],\"universe\":\"k\u{fc}\"}"
+        );
+        let env: Value = serde_json::from_str(&sign(&v, b"k")).unwrap();
+        assert_eq!(
+            env["sig"].as_str().unwrap(),
+            "ec381f4b20bc7eb6b1f18c7f15b06a5c7c60aca04b4ffcba2c1910ac6262ed39"
+        );
     }
 
     /// Key order in the source JSON must not change the signature, or two

@@ -2,6 +2,8 @@
 start daemons/agents as subprocesses with fake GPUs, clean them up."""
 
 import atexit
+import hashlib
+import hmac
 import json
 import os
 import random
@@ -22,6 +24,20 @@ TEST_SECRET = "test-secret"
 #: key, so a test daemon and a production one on the same LAN drop each
 #: other's announcements silently.
 TEST_UNIVERSE = "mentat-test"
+
+def sign_announcement(payload, key):
+    """A signed envelope in the form rust/common/src/secret.rs defines:
+    compact JSON, object keys in byte order, non-ASCII as raw UTF-8.
+
+    The default `json.dumps` writes a non-ASCII character as \\u00fc, which
+    signs different bytes than the Rust side covers.
+    """
+    canon = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    sig = hmac.new(key.encode(), canon.encode("utf-8"), hashlib.sha256).hexdigest()
+    return json.dumps({"p": payload, "sig": sig}).encode()
+
 
 #: The machine probe as it sits in the tree. An installed mentat finds it
 #: beside the binary. A test runs out of cargo's target dir, where there is
