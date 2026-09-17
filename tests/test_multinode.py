@@ -306,6 +306,27 @@ def t07_a_lost_peer_is_marked_then_forgotten():
     assert victim_id not in watcher.status_json()["peers"]
 
 
+def t08_the_snapshot_states_the_stream_position():
+    """A consumer that re-reads /status resumes the stream from `seq`.
+
+    Without it a poll drops the position and the next event costs another
+    poll. `boot_id` tells a restart, whose `seq` counts from 1 again, from a
+    gap.
+    """
+    d1 = state["d1"]
+    snap = d1.status_json()
+    assert isinstance(snap.get("seq"), int), snap.get("seq")
+    assert snap.get("boot_id"), snap.get("boot_id")
+
+    stream = tl.EventStream(d1.http_port)
+    first = json.loads(stream.frame(5)[1])
+    stream.close()
+    assert first["type"] == "snapshot"
+    # The /events anchor and the one inside the snapshot are one number.
+    assert first["seq"] == first["data"]["seq"], (first["seq"], first["data"]["seq"])
+    assert first["data"]["boot_id"] == snap["boot_id"]
+
+
 def main():
     tests = [
         t01_workers_first_then_head,
@@ -316,6 +337,7 @@ def main():
         t05_group_survived_head_change,
         t06_peer_staleness_and_recovery,
         t07_a_lost_peer_is_marked_then_forgotten,
+        t08_the_snapshot_states_the_stream_position,
     ]
     try:
         for t in tests:

@@ -357,6 +357,10 @@ pub struct State {
     pub next_ref: u64,
     pub counters: Counters,
     pub next_event_seq: u64,
+    /// This process's identifier, in the snapshot and in every announcement.
+    /// Event `seq` restarts with the process, so a consumer reads a new
+    /// `boot_id` as the restart rather than as a gap.
+    pub boot_id: String,
     /// Live WebSocket subscribers get every new event pushed.
     pub event_subs: Vec<std::sync::mpsc::Sender<String>>,
 }
@@ -402,6 +406,7 @@ impl State {
             next_ref: 1,
             counters: Counters::default(),
             next_event_seq: 1,
+            boot_id: mentat_common::secret::boot_id(),
             event_subs: Vec::new(),
         }
     }

@@ -502,6 +502,7 @@ the same object. `?group=` on `/status` and `group` on `status` scope it.
 ```json
 {"proto": "0.99", "node_id": "...", "node_ip": "10.0.0.1", "hostname": "n1",
  "control_addr": "10.0.0.1:6379", "head_node_id": "...", "head_generation": 3,
+ "seq": 41, "boot_id": "6d6474919bbe7beb",
  "addrs": [...], "addr_tags": {...}, "addr_ifaces": {...},
  "islands": [{"nodes": ["..."], "addrs": {"<node_id>": "10.0.0.1"}}],
  "peers": {"<node_id>": {
@@ -602,6 +603,14 @@ the snapshot on a gap, since a missed event leaves the view wrong. Counters
 move without events, so a consumer reading them re-reads on an interval too.
 The first `/events` frame is a snapshot registered under the subscription's
 lock, so nothing falls between it and the first event.
+
+Every snapshot holds the `seq` it reflects, so a consumer that re-reads one
+resumes the stream from there instead of starting over, and an event at or
+below that `seq` is already in the view. `seq` counts from 1 per daemon
+process, so a restart hands out numbers a consumer has already applied: the
+snapshot's `boot_id` changes with the process, which tells a restart from a
+gap. A consumer holding events from an older `boot_id` starts again from the
+new snapshot.
 
 Each daemon replicates its own events to every live peer in `peer_event`,
 and delivers a peer's event to its own subscribers without re-forwarding it.

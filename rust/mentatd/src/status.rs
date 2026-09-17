@@ -254,6 +254,11 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
         "control_addr": st.control_addr,
         "head_node_id": st.head_node_id,
         "head_generation": st.head_generation,
+        // What the stream this snapshot came from has already delivered.
+        // A consumer that re-reads resumes from here rather than replaying,
+        // and a `boot_id` it has not seen means the counter restarted.
+        "seq": st.next_event_seq - 1,
+        "boot_id": st.boot_id,
         // Derived from probes rather than configuration: these are the sets a
         // multi-bundle placement group may be placed inside.
         "islands": st.fabrics.islands.iter().map(|i| json!({

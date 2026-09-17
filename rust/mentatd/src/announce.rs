@@ -110,7 +110,7 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
             ("extra", extra.join(",")),
         ],
     );
-    let boot_id = secret::boot_id();
+    let boot_id = shared.st.lock().unwrap().boot_id.clone();
     let universe = secret::universe();
     let seq = AtomicU64::new(0);
     loop {

@@ -1005,7 +1005,7 @@ async fn watch_daemon(shared: Arc<Shared>, mut addr: String, others: Vec<String>
                                     break;
                                 }
                                 last_full = Instant::now();
-                                last_seq = None;
+                                last_seq = anchored_seq(&shared, &addr);
                             }
                             let frame = match es.next(shared.cfg.poll_interval).await {
                                 Ok(Some(f)) => f,
@@ -1029,7 +1029,7 @@ async fn watch_daemon(shared: Arc<Shared>, mut addr: String, others: Vec<String>
                                         break;
                                     }
                                     last_full = Instant::now();
-                                    last_seq = None;
+                                    last_seq = anchored_seq(&shared, &addr);
                                 }
                             }
                         }
@@ -1499,6 +1499,16 @@ fn peer_addresses(p: &Value, local: &[Net]) -> (Option<String>, Vec<String>) {
     (best, cands)
 }
 
+/// The event number the daemon's last polled snapshot reflects.
+///
+/// A snapshot states what the stream has already delivered, so a poll
+/// resumes the stream from here. Without it every poll drops the position
+/// and the next event costs another poll.
+fn anchored_seq(shared: &Arc<Shared>, addr: &str) -> Option<u64> {
+    let d = shared.daemons.lock().unwrap();
+    d.get(addr)?.status.as_ref()?["seq"].as_u64()
+}
+
 /// What one /events frame did to the stored view.
 enum Applied {
     /// The view moved. Readers should wake.
@@ -1546,6 +1556,9 @@ fn apply_frame(
     };
     match *last_seq {
         Some(prev) if seq == prev + 1 => {}
+        // The snapshot anchored past this one, so the change is already in
+        // the view. A stream with a backlog delivers these after a poll.
+        Some(prev) if seq <= prev => return Applied::Skip,
         Some(prev) => {
             log(
                 "daemon_events_gap",
