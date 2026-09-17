@@ -208,8 +208,9 @@ pub struct ClaimInfo {
     pub shape: serde_json::Value,
     /// The answer, returned verbatim to every later holder.
     pub view: serde_json::Value,
-    /// Bumped on each solve, so a holder can tell one answer from another
-    /// across a head change.
+    /// Bumped on each solve. The counter belongs to one head and restarts
+    /// with it, so `claim_ok` reports the head beside it and a holder
+    /// compares the pair.
     pub generation: u64,
     pub holders: std::collections::BTreeSet<ClientId>,
 }

@@ -213,7 +213,11 @@ pub enum Msg {
     /// tell one solve from another, and `view` is the solved topology.
     ClaimOk {
         name: String,
+        /// Counts the solves this head has done. It restarts with the head,
+        /// so a holder compares it against `head_node_id` and not alone.
         generation: u64,
+        /// The head that solved this claim.
+        head_node_id: String,
         view: serde_json::Value,
     },
     PgCreateOk {

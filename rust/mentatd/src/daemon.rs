@@ -1014,6 +1014,7 @@ fn handle_client_msg(
                     Msg::ClaimOk {
                         name,
                         generation,
+                        head_node_id: st.head_node_id.clone(),
                         view,
                     },
                     Vec::new(),
@@ -2817,8 +2818,42 @@ fn agent_conn(
 
 #[cfg(test)]
 mod tests {
-    use super::{misfiled, sweep_history};
+    use super::{claim, misfiled, sweep_history};
     use crate::state::{ActorInfo, ActorState, ClientInfo, State};
+
+    /// A second holder spells the shape its own way and joins the claim it
+    /// already holds. Going through `claim` covers the comparison the
+    /// daemon makes, which `canonical` alone does not.
+    #[test]
+    fn a_second_holder_may_spell_the_shape_differently() {
+        let mut st = State::new("10.0.0.1".into(), "box".into(), "10.0.0.1:6379".into());
+        st.head_node_id = st.node_id.clone();
+
+        let ints = serde_json::json!({"sets": [{"name": "s", "bundles": [1]}]});
+        let floats = serde_json::json!({"sets": [{"name": "s", "bundles": [1.0]}]});
+        let count = serde_json::json!({"sets": [{"name": "s", "bundles": 1}]});
+
+        // Solved already, since solving one needs a cluster to solve it on.
+        st.claims.insert(
+            ("grp".into(), "fence".into()),
+            crate::state::ClaimInfo {
+                shape: crate::claim::canonical(&ints),
+                view: serde_json::json!({"sets": {}}),
+                generation: 7,
+                holders: ["c1".to_string()].into_iter().collect(),
+            },
+        );
+
+        for (who, shape) in [("c2", &floats), ("c3", &count)] {
+            let (g, _) = claim(&mut st, who, "grp", "fence", shape)
+                .unwrap_or_else(|e| panic!("{who}: {e:?}"));
+            assert_eq!(g, 7, "a repeat claim returns the answer already solved");
+        }
+
+        // A different request under the same name is still refused.
+        let wider = serde_json::json!({"sets": [{"name": "s", "bundles": [2]}]});
+        assert!(claim(&mut st, "c4", "grp", "fence", &wider).is_err());
+    }
 
     fn state_with(owner: &str, at_ms: u64) -> State {
         let mut st = State::new("10.0.0.1".into(), "box".into(), "10.0.0.1:6379".into());
