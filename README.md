@@ -1,25 +1,28 @@
 # mentat
 
-mentat is a self-organizing cluster manager for small numbers of nodes. It can either provide its own standalone cluster, or replace an existing one (like Ray) with a much lighter-weight manager.
+mentat is a self-organizing cluster manager for a small number of nodes. It
+provides a standalone cluster or replaces an existing one such as Ray with a
+lighter manager.
 
-It has three components: 
+Its components:
 
- - a daemon that places actors and watches their liveness,
- - an HTTP/MCP router that puts one OpenAI-compatible endpoint in front of every model; and
+ - a daemon that places actors and watches their liveness
+ - an HTTP/MCP router that puts one OpenAI-compatible endpoint in front of
+   every model
  - a pure-Python package that installs as `ray` and implements the surface
-vLLM's Ray executor uses.
+   vLLM's Ray executor uses
 
-mentat is designed to build the cluster with no configuration. Registration retries forever, so daemons and containers can start in any
-order. UDP can be used to locate peers, or `MENTAT_PEERS` can bootstrap it. Containers automatically use the local daemon's address. All binaries are static executables.
+mentat builds the cluster with no configuration. Registration retries
+forever, so daemons and containers start in any order. UDP locates peers, or
+`MENTAT_PEERS` bootstraps the mesh. Containers use the local daemon's
+address. All binaries are static executables.
 
-## Ray Compatibility
+## Ray compatibility
 
-mentat specifically omits most of Ray's functionality:
-
-There is no object store, memory monitor, raylet or dashboard. Per-token
-work is unchanged: in the case of vLLM, its workers exchange data over its own MessageQueue
-and NCCL, and after boot the only recurring Ray call is `ray.wait` every 5
-seconds.
+mentat omits most of Ray. There is no object store, memory monitor, raylet
+or dashboard. Per-token work is unchanged. vLLM's workers exchange data over
+its own MessageQueue and NCCL, and after boot the only recurring Ray call is
+`ray.wait` every 5 seconds.
 
 ## Components
 
@@ -55,7 +58,7 @@ and the wheel:
 docker pull mmastrac/mentat-artifacts:0.10.0
 ```
 
-To build every image locally:
+Building every image locally:
 
 ```
 VERSION=0.10.0 ./build.sh
@@ -67,13 +70,13 @@ This produces `mentat-artifacts:<ver>` (both binaries and the wheel, for
 
 ## Quick start
 
-Run a daemon on each node, on the host network:
+A daemon runs on each node, on the host network:
 
 ```
 MENTAT_NODE_IP=10.0.0.1 MENTAT_PEERS=10.0.0.2:6379 mentatd daemon
 ```
 
-Replace Ray with the shim in the model image:
+The model image replaces Ray with the shim:
 
 ```dockerfile
 COPY --from=mmastrac/mentat-artifacts:0.10.0 /out/mentatd /usr/local/bin/mentatd
@@ -83,8 +86,8 @@ RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip install --no-deps /tmp/mentatd-0.10.0-py3-none-any.whl
 ```
 
-In the entrypoint, export the group before `ray start`. The daemon on the
-box relays to the head, so no address is needed:
+The entrypoint exports the group before `ray start`. The daemon on the box
+relays to the head, so no address is needed:
 
 ```bash
 export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
@@ -93,7 +96,7 @@ ray start
 vllm serve ... --distributed-executor-backend ray -tp 2
 ```
 
-Inspect the cluster from any node:
+Cluster state, from any node:
 
 ```
 mentatd status

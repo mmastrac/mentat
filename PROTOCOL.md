@@ -3,49 +3,48 @@
 Client (Python shim or CLI), agent and mesh links run on TCP 6379. The host
 link, agent to actor process, runs on a unix socket. All four share one framing
 and one message set. Discovery is a UDP datagram on port 6382. HTTP is 6380
-(daemon) and 6381 (router). `GUIDE.md` and `GUIDE-SERVE.md` cover the
-variables named here.
+(daemon) and 6381 (router). `GUIDE.md` and `GUIDE-SERVE.md` define the
+environment variables.
 
 ## Version
 
-The version is `major.minor`, matching `[0-9]+\.[0-9]+` exactly, with the
-major compared as a number so leading zeros make no difference. Anything
-else is refused, since a peer that cannot state its version cannot be held
-to one. This document describes `0.99`, the 1.0 candidate: the shapes here
-are 1.0's and the number moves once the spec is accepted.
+The version is `major.minor` and matches `[0-9]+\.[0-9]+` exactly. The
+major is compared as a number, so leading zeros make no difference. Any
+other form is refused. `0.99` is the 1.0 candidate. Its shapes are 1.0's,
+and the number changes once the spec is accepted.
 
 Both opening frames of every link set `"proto"`: `hello`/`hello_ok`,
 `agent_register`/`agent_register_ok`, `peer_hello`/`peer_hello_ok`,
-`probe`/`probe_ok` and `host_hello`/`ctor`. So do the snapshot and the
-announcement payload.
+`probe`/`probe_ok` and `host_hello`/`ctor`. The snapshot and the
+announcement payload also set it.
 
 A minor bump may add an optional field with a default, a message type, an
-event kind, a snapshot key or a metric. The receiver absorbs the difference:
-an unknown field is dropped in parsing, and an unknown event kind still
-applies its patch. A sender always sends its own current shape, since
-nothing records a counterpart's minor. Any other change is major.
+event kind, a snapshot key or a metric. A receiver drops an unknown field in
+parsing and applies the patch of an unknown event kind. A sender sends its
+own current shape. Nothing records a counterpart's minor. Any other change
+is major.
 
-`err` holds `error` for a person, whose wording is free to change, and an
-optional `code` a program matches on. A receiver with no name for a `code`
-treats the refusal as one carrying none. The codes are `no_head`,
-`proto_mismatch` (with the refusing side's `proto`), `duplicate_session`,
-`bad_first_frame`, `agent_refused`, `unknown_message` and `unknown_ref`. A
-minor bump may add one.
+`err` holds `error`, free text for a person, and an optional `code` for a
+program to match on. The wording of `error` may change. A receiver treats an
+unknown `code` as an absent one. The codes are `no_head`, `proto_mismatch`
+(with the refusing side's `proto`), `duplicate_session`, `bad_first_frame`,
+`agent_refused`, `unknown_message` and `unknown_ref`. A minor bump may add
+one.
 
-`ref_get_ok.status` is a closed set, since the shim raises on a value it
-does not know, so adding one there is major. Actor `state`
-(`spawning`, `running`, `dead`) and placement group `state` (`PENDING`,
-`CREATED`, `REMOVED`, Ray's words) stay open: a receiver matches the value
-it wants and passes the rest through, so a minor bump may add one.
+`ref_get_ok.status` is a closed set. The shim raises on an unknown value, so
+adding one is major. Actor `state` (`spawning`, `running`, `dead`) and
+placement group `state` (`PENDING`, `CREATED`, `REMOVED`, Ray's words) are
+open sets. A receiver matches the values it wants and passes the rest
+through, so a minor bump may add one.
 
 On a major mismatch the accepter returns `err` with its own `proto` and
 closes. The dialer closes on a mismatched reply. A mesh peer of another
-major is left out of election and is redialed at the normal interval.
-An announcement of another major is dropped, logged once per source. An
+major is left out of election and redialed at the normal interval. An
+announcement of another major is dropped and logged once per source. An
 unparseable frame closes the link. An unknown message type keeps the link
-open, and what the receiver does with it follows the link: the client link
-replies `err` naming the type, while the agent, mesh and host links log it
-and read on, because a pushed frame correlates with no request.
+open. The client link replies `err` that quotes the type. The agent, mesh
+and host links log it and read on. A pushed frame does not belong to a
+request.
 
 ## Framing
 
@@ -53,9 +52,10 @@ and read on, because a pushed frame correlates with no request.
 u32le header_len | u32le payload_len | header (JSON) | payload (opaque)
 ```
 
-Each length is capped at 256 MiB, and a larger value closes the link. EOF at a
-frame boundary is a clean close. The payload is Python pickle bytes, passed
-through untouched. Most are empty. The header is a JSON object:
+Each length is capped at 256 MiB. A larger value closes the link. EOF at a
+frame boundary is a clean close. The payload is Python pickle bytes and
+passes through untouched. Most payloads are empty. The header is a JSON
+object:
 
 ```json
 {"req": 41, "t": "call", "actor_id": "a1", "method": "run"}
@@ -64,7 +64,7 @@ through untouched. Most are empty. The header is a JSON object:
 
 `t` selects the message. `req` correlates a response with its request.
 Unsolicited messages use 0, as does an omitted `req`. Request `x` gets
-`x_ok`, or `ok` when it does not have a result, or `err`. A message uses its
+`x_ok`, or `ok` for a request without a result, or `err`. A message uses its
 subject's prefix: `pg_` placement group, `actor_`, `agent_`, `peer_` mesh
 peer, `host_` actor host, `claim_`, `ref_` object ref. The rest are bare:
 `hello` opens a link, and `nodes`, `resources`, `available` and `status`
@@ -75,67 +75,66 @@ integer.
 
 A field written `name?` may be left out. A receiver that does not find one
 uses the empty value for its type: `""`, `[]`, `{}`, `false`, `0`, or
-`null` where the field is nullable. Every other field is required, and a
-later minor version may add optional fields but never require an existing
-one.
+`null` where the field is nullable. Every other field is required. A later
+minor version may add optional fields. It may not make an existing field
+required.
 
 ## Connection start
 
 The first frame identifies the link: `hello` (client), `agent_register`
 (agent), `peer_hello` (mesh), `probe` (one connection per probe) or
-`host_hello` (host). Anything else gets `err` and closed.
+`host_hello` (host). Any other first frame gets `err` and the link closes.
 
 A non-head daemon relays a `hello` or `agent_register` connection to the
-head: it sends the first frame there and pipes bytes both ways until either
-side closes. A frame with an empty `node_ip` gets the relaying daemon's
-first, so the head files the client under the box it is on. The relay fills
-it only when the connection came from loopback or one of its own addresses,
-since any other source is a box that states its own address. The connection
-waits for the first election, and gets `err` after thirty seconds without a
-head.
+head. It sends the first frame there and pipes bytes both ways until either
+side closes. When the first frame has an empty `node_ip` and the connection
+came from loopback or one of the relaying daemon's own addresses, the relay
+fills `node_ip` with its own before forwarding. The head then files the
+client under the box it is on. A connection from any other source is a box
+that states its own address. A connection that arrives before the first
+election waits for it, and gets `err` after thirty seconds without a head.
 
 ## Groups
 
 A group is one model deployment: a driver and the agents holding its GPUs,
-all naming the same `MENTAT_GROUP`. The name is an opaque string. A group
-exists while any agent, actor or client names it, and does not need
-creating.
+all with the same `MENTAT_GROUP` value. The name is an opaque string. A
+group exists while any agent, actor or client refers to it. Nothing creates
+a group.
 
-Group scoping keeps two models on one node from counting each other's GPUs.
+Group scope keeps two models on one node from counting each other's GPUs.
 `nodes`, `resources`, `available` and placement report for the sending
 client's group, from its `hello`. `status` and `actor_stop` accept a group as
-an argument, since an operator reads from outside any one deployment. The
-snapshot files agents, actors and placement groups under `groups`.
+an argument, for an operator outside any one deployment. The snapshot files
+agents, actors and placement groups under `groups`.
 
-One driver holds a group: a `hello` with `session: true` is refused when
-that group already has a session.
+One driver holds a group. A `hello` with `session: true` is refused when the
+group already has a session.
 
 ## Ids
 
-The daemon mints an id for every actor and placement group, and a ref for
-every result that is not ready yet. Each has a one-letter type prefix, so
-a holder can tell what it has and the daemon dispatches without guessing.
+The daemon issues an id for every actor and placement group, and a ref for
+every result that is not ready yet. Each has a one-letter type prefix. The
+prefix tells a holder what it has and tells the daemon where to dispatch.
 
-| Id | Shape | Minted by |
+| Id | Shape | Issued by |
 | --- | --- | --- |
 | Actor | `a:<32 hex>` | `actor_create` |
 | Placement group | `p:<32 hex>` | `pg_create` |
 | Call ref | its actor's id and a counter: `a:<32 hex>:<n>` | `actor_call` |
 
 A ref is a handle to a result that does not exist yet. `actor_call` returns
-one at once and the value arrives later, so `ref_get` fetches it and
-`ref_wait` reports which of several are ready. A call ref embeds its actor,
-which is how one actor's death resolves every ref outstanding against it.
+one at once. `ref_get` fetches the value once it arrives, and `ref_wait`
+reports which of several refs are ready. A call ref embeds its actor's id,
+so one actor's death resolves every ref outstanding against it.
 
 `ref_get` and `ref_wait` accept a call ref or a placement group id. A
-placement group resolves once it reaches `CREATED`, so a driver waits on the
-id `pg_create` returned and does not need a separate handle. A placement
-group that was removed resolves as `actor_died`, with `pending_reason` as
-the reason.
+placement group resolves once it reaches `CREATED`. A driver waits on the id
+`pg_create` returned, without a separate handle. A removed placement group
+resolves as `actor_died`, with `pending_reason` as the reason.
 
-Node, agent and client ids are plain strings, and so is a claim name. A
-holder never resolves one: they are keys in the snapshot and fields in
-`hello` and `agent_register`.
+Node, agent and client ids are plain strings, and so is a claim name. They
+are keys in the snapshot and fields in `hello` and `agent_register`. A
+holder never resolves one.
 
 ## Client link
 
@@ -149,29 +148,30 @@ holder never resolves one: they are keys in the snapshot and fields in
 | `pg_table` | `pg_id` | `pg_table_ok`: `table` |
 | `pg_remove` | `pg_id` | `ok` |
 | `actor_create` | `name`, `num_gpus`, `pg_id`, `bundle_index`, `env`. Payload: pickled `(cls, args, kwargs)` | `actor_create_ok`: `actor_id`, `node_id`, `gpu_ids` |
-| `actor_call` | `actor_id`, `method`. Payload: pickled `(args, kwargs)` | `actor_call_ok`: `ref_id`, resolved later by `ref_get` (see "Ids") |
+| `actor_call` | `actor_id`, `method`. Payload: pickled `(args, kwargs)` | `actor_call_ok`: `ref_id`. `ref_get` resolves it later (see "Ids") |
 | `actor_kill` | `actor_id` | `ok` |
 | `ref_get` | `ref_id`, `timeout_ms?` | `ref_get_ok`: `status`, `reason?`. Payload: the pickled result |
 | `ref_wait` | `ref_ids`, `num_returns`, `timeout_ms?` | `ref_wait_ok`: `ready` |
 | `status` | `group?` | `status_ok`: `snapshot` |
 | `actor_stop` | `group?` or `all?`, exactly one | `ok` |
-| `claim` | `name`, `shape` | `claim_ok`: `name`, `generation`, `view` |
+| `claim` | `name`, `shape` | `claim_ok`: `name`, `generation`, `head_node_id`, `view` |
 
 `kind` labels the connection for an operator: `driver` for a shim outside an
 actor, `actor` for a shim inside one, `thread` for a shim's extra per-thread
 connection, `cli` for a `mentatd` subcommand. The daemon stores it, logs it
-and reports it under `clients`. No daemon behaviour depends on the value, so
-a minor version may add one and a reader treats an unknown value as text.
+and reports it under `clients`. No daemon behaviour depends on the value. A
+minor version may add one, and a reader treats an unknown value as text.
 
-Exactly one connection per driver sets `session: true`, and a second in one
+Exactly one connection per driver sets `session: true`. A second in one
 group is refused. An `actor`, `thread` or `cli` connection sets it false.
-`node_ip` is empty from the client. The session's EOF starts a reap: after
+`node_ip` is empty from the client. The session's EOF starts a reap. After
 `MENTAT_SESSION_REAP_GRACE_MS` the daemon kills the driver's actors, removes
 its placement groups and drops its claims. The client id is dropped at once,
-so a driver restarting inside the grace opens its session without waiting. A
-non-head daemon skips the reap, leaving the session to the new head.
+so a driver that restarts inside the grace opens its session without
+waiting. A non-head daemon skips the reap and leaves the session to the new
+head.
 
-A node row, with the daemon's own node always present:
+A node row. The daemon's own node is always present:
 
 ```json
 {"NodeID": "...", "NodeManagerAddress": "10.0.0.1", "Alive": true,
@@ -181,36 +181,35 @@ A node row, with the daemon's own node always present:
 
 | Field | Value |
 | --- | --- |
-| `bundles` | Whole GPUs per bundle. A fraction is refused. A repeat claim under one name sends an equal shape or is refused, comparing whole numbers by value, so `1` and `1.0` are the same shape |
-| `strategy` | Recorded and echoed by `pg_table`. Placement packs, and logs `pg_strategy_ignored` for anything else |
+| `bundles` | Whole GPUs per bundle. A fraction is refused. A repeat claim under one name must send an equal shape or is refused. Whole numbers compare by value, so `1` and `1.0` are the same shape |
+| `strategy` | Recorded. `pg_table` echoes it. Placement packs and logs `pg_strategy_ignored` for any other value |
 | `num_gpus` | A whole number |
 | `claim` | A claim this placement group sits inside, or empty |
 | `table` | Ray's: `placement_group_id`, `name`, `strategy`, `state`, `bundles` (index string to `{"GPU": n}`), `bundles_to_node_id`, `stats` |
 | `state` | `PENDING`, `CREATED` or `REMOVED` |
 | `timeout_ms?` | Null blocks, 0 polls. Omitted is null, so a caller that leaves it out waits forever |
 | `ref_get_ok.status` | `ok`, `error`, `actor_died` or `timeout`, with `reason` filled for `actor_died` |
-| An unknown `ref_id` | `ref_get` returns `err`. `ref_wait` counts it ready, since a ref the daemon never held is one it will never resolve |
+| An unknown `ref_id` | `ref_get` returns `err`. `ref_wait` counts it ready, since the daemon will never resolve a ref it never held |
 
 `actor_stop` kills one group's actors, or every group's with `all`. The
 agents stay registered and the driver reconnects, so the group continues. A
 request with neither, or both, is refused and lists the groups that exist.
 
-`all` must be spelled because the binary is also installed as `ray`. Under Ray,
-`ray stop` stops the local node's processes. Here it reaches every group the
-daemon knows, so an entrypoint running it as cleanup fails until someone
-sets a scope.
+`all` must be spelled out because the binary is also installed as `ray`.
+Under Ray, `ray stop` stops the local node's processes. Under mentat it
+reaches every group the daemon knows. An entrypoint that runs it as cleanup
+fails until it sets a scope.
 
 ## Claims
 
 A claim reserves nodes and links under a name. `claim` matches a shape
-against the probed topology and replies with the set it chose. The name
-holds the reservation: every holder gets the view the first claim produced,
-so ranks starting independently agree without a coordinator.
+against the probed topology and returns the set it chose. The name holds the
+reservation. Every holder gets the view the first claim produced, so ranks
+that start independently agree without a coordinator.
 
-A name belongs to the claiming client's group, so two groups picking one
-name hold two claims. A claim chooses nodes and the placement groups inside
-it reserve the GPUs, so two groups may claim one node and compete for its
-devices.
+A name belongs to the claiming client's group. Two groups that pick one name
+hold two claims. A claim chooses nodes, and the placement groups inside it
+reserve the GPUs. Two groups may claim one node and compete for its devices.
 
 ```json
 {"t": "claim", "name": "myjob", "shape": {
@@ -226,7 +225,8 @@ devices.
 | `vendor` | Pins the set to one GPU vendor. Without it the daemon picks one |
 
 ```json
-{"t": "claim_ok", "name": "myjob", "generation": 3, "view": {
+{"t": "claim_ok", "name": "myjob", "generation": 3, "head_node_id": "...",
+ "view": {
   "sets": {"tp0": [{"node": "...", "host": "n1", "vendor": "nvidia",
                     "bind": "10.0.0.1", "iface": "enp1s0f0np0",
                     "tags": ["connectx", "rdma"]}]},
@@ -243,22 +243,22 @@ devices.
 | `iface` | Null for an address from `MENTAT_ANNOUNCE_ADDRS` |
 | `rtt_ms` | The round trip a probe observed |
 
-A claim on a name held for a different shape is refused: re-solving would
-move nodes under whoever claimed first. Only the head solves a claim, since
-two daemons solving one name against their own views could each hand out a
-placement, so a claim sent elsewhere is refused with the head's address.
+A claim on a name held for a different shape is refused. Re-solving would
+move nodes under the first claimant. Only the head solves a claim. A claim
+sent to any other daemon is refused with the head's address. Two daemons
+solving one name against their own views could each hand out a placement.
 
-Each session sending `claim` joins the holder set, and the claim ends when
-the last holder's session is reaped. Reaping is the only release. The reap
+Each session that sends `claim` joins the holder set. The claim ends when
+the last holder's session is reaped. The reap is the only release. The reap
 grace applies, so a claim lasts `MENTAT_SESSION_REAP_GRACE_MS` past its
 driver, and a restart inside that window under the same name gets the view
-it had. A session cut by a head change keeps its claim: the holder re-sends
-`claim` to the new head, rebuilding the table there. Only sessions hold a
-claim, so a node leaving the mesh does not end one.
+it had. A session cut by a head change keeps its claim. The holder re-sends
+`claim` to the new head, which rebuilds the table there. Only sessions hold
+a claim. A node that leaves the mesh does not end one.
 
 `pg_create` with `claim` set places among the nodes the claim chose. A
-placement group requesting more than its claim holds stays pending, since
-spilling outside it would split ranks that agreed on one view.
+placement group that requests more than its claim holds stays pending.
+Spilling outside the claim would split ranks that agreed on one view.
 
 ## Agent link
 
@@ -273,7 +273,7 @@ spilling outside it would split ranks that agreed on one view.
 | Agent → daemon | `actor_exit` | `actor_id`, `exit_code?`, `signal?`, each nullable |
 | Daemon → agent | `actor_kill` | `actor_id`. The client message, forwarded unchanged |
 | Agent → daemon | `service_note` | `service`, `note`. Empty `note` clears |
-| Agent → daemon | `ping` | Sent every `MENTAT_AGENT_PING_INTERVAL_MS`, and the daemon replies `pong` on the same `req`, which is 0. The send fails once the daemon is gone. The daemon learns of a lost agent from EOF and does not send `ping` |
+| Agent → daemon | `ping` | Sent every `MENTAT_AGENT_PING_INTERVAL_MS`. The daemon replies `pong` on the same `req`, which is 0. The send fails once the daemon is gone. The daemon learns of a lost agent from EOF and does not send `ping` |
 
 ```json
 {"t": "agent_register", "proto": "0.99", "agent_id": "g1", "group": "glm",
@@ -293,7 +293,7 @@ spilling outside it would split ranks that agreed on one view.
 | Field | Value |
 | --- | --- |
 | `actor_result.error?` | Set, with an empty payload, when mentat itself failed. Only a Python failure has an exception to pickle |
-| `resume` | Actors alive across a reconnect, each with its `owner?`, so a daemon that lost its state rebuilds who owns what |
+| `resume` | Actors alive across a reconnect, each with its `owner?`, so a daemon that lost its state rebuilds ownership |
 | `unacked_refs` | Ref ids whose results are buffered agent-side and follow the register. The daemon holds them pending until they arrive |
 
 | Field | Value |
@@ -308,15 +308,15 @@ spilling outside it would split ranks that agreed on one view.
 A UMA device's `memory` is that pool, the same figure as the machine's, so
 adding the two counts it twice.
 
-`services` maps a service name to where it listens. The consumer forms
-`http://<host>:<port><path>`, resolving an empty `host` itself (see "Address
-selection").
+`services` maps a service name to its listen address. The consumer forms
+`http://<host>:<port><path>` and resolves an empty `host` itself (see
+"Address selection").
 
 | Field | Value |
 | --- | --- |
 | `host?`, `port`, `path?` | From `MENTAT_<NAME>_API`: `8000/v1` and `http://0.0.0.0:8000/v1` give an empty `host`, `http://10.0.0.1:8000/v1` sets it, any other value is an error at start |
-| `provider?` | From `MENTAT_MODEL_PROVIDER`, the label for what serves the endpoint. The daemon stores and forwards it unread |
-| `note?` | What the agent found after announcing, such as its server binding one address. A failed probe quotes it |
+| `provider?` | From `MENTAT_MODEL_PROVIDER`, the label for the engine behind the endpoint. The daemon stores and forwards it unread |
+| `note?` | The agent's finding after announcing, such as its server binding one address. A failed probe quotes it |
 
 ## Mesh link
 
@@ -329,17 +329,17 @@ selection").
 | `probe` | `proto`, `node_id`. First frame of its own connection |
 | `probe_ok` | `proto`, `node_id` of the responder |
 
-One link per `node_id`: when two exist both ends keep the one dialed by the
-lower node id. A daemon dials `MENTAT_PEERS` and every control address its
-live peers publish under `peers`. A peer unreachable at its seed address is
-dialed at each address it last announced, on the seed's port. `addrs`,
-`addr_tags` and `addr_ifaces` come from the hello and refresh on every
-status push.
+One link per `node_id`. When a second link exists, both ends keep the one
+the lower node id dialed. A daemon dials `MENTAT_PEERS` and every control
+address its live peers publish under `peers`. A peer unreachable at its seed
+address is dialed at each address it last announced, on the seed's port.
+`addrs`, `addr_tags` and `addr_ifaces` come from the hello and refresh on
+every status push.
 
 ### The snapshot as a mesh message
 
-`peer_status` pushes a whole snapshot, and the receiver reads these keys out
-of it as protocol input:
+`peer_status` pushes a whole snapshot. The receiver reads these keys from it
+as protocol input:
 
 | Key | Read for |
 | --- | --- |
@@ -350,35 +350,37 @@ of it as protocol input:
 | `peers/<node_id>/probes/<local>/<remote>/ok`, `rtt_ms` | The link topology a claim is solved against, and island membership |
 | `groups/<group>/gpus_total`, `gpus_used` | The per-group summary in a peer row |
 
-Every other key is output for the HTTP readers. Reshaping one of these is a
-mesh change and a major bump, whatever it does to `/status`.
+Every other key is output for the HTTP readers. A change to the shape of a
+key in the table is a mesh change and a major bump, whatever it does to
+`/status`.
 
-A settled head stays head while alive. A daemon with no head uses the one
-its live peers publish in `head_node_id`, or the lowest live node id if none
-is published. Two settled heads that meet resolve to the lower. Every change
-waits `MENTAT_ELECTION_HOLD_DOWN_MS`. A daemon that stops being head closes
-its agent and driver links so both re-register.
+A settled head stays head while alive. A daemon without a head uses the one
+its live peers publish in `head_node_id`. When none is published it uses the
+lowest live node id. Two settled heads that meet resolve to the lower. Every
+change waits `MENTAT_ELECTION_HOLD_DOWN_MS`. A daemon that stops being head
+closes its agent and driver links so both re-register.
 
 ### Probes
 
 The prober binds one of its own addresses, connects to one of the peer's at
 the peer's control port, sends `probe`, reads `probe_ok` and closes. Success
-requires the expected `node_id` in the reply: both fabrics in a multi-pair
-cluster may share a subnet, so an address replying does not prove the
-intended node did. Binding the local address makes the result describe the
-cabling. Without it the result reports the routing table's preference.
+requires the expected `node_id` in the reply. Both fabrics in a multi-pair
+cluster may share a subnet, so a reply from an address does not prove the
+intended node sent it. Binding the local address makes the result describe
+the cabling. An unbound probe reports the routing table's preference.
 
 Each daemon probes every (own address × peer address) pair once per
 `MENTAT_PROBE_INTERVAL_MS`, times out at `MENTAT_PROBE_TIMEOUT_MS`, and
 probes peers in parallel. Results appear per peer under `probes` in the
-snapshot, and an entry exists once the pair has been tried. A row whose
-local address this box has lost, or whose remote address the peer stopped
+snapshot. An entry exists once the pair has been tried. A row whose local
+address the daemon has lost, or whose remote address the peer stopped
 listing, is dropped after the round.
 
 ## Host link
 
-Over a unix socket in `MENTAT_SOCK_DIR`, between agent and actor process.
-The socket is per actor, so the process identifies itself by connecting.
+The host link runs over a unix socket in `MENTAT_SOCK_DIR`, between agent
+and actor process. The socket is per actor, so the process identifies itself
+by connecting.
 
 | Message | Fields |
 | --- | --- |
@@ -390,11 +392,11 @@ The socket is per actor, so the process identifies itself by connecting.
 
 ## Announcement datagram
 
-UDP, port 6382, broadcast on every selected interface plus any
-`MENTAT_ANNOUNCE_ADDR` unicast target. The daemon sends and the router
-listens. Interface selection, address ranking and tags come from
-`MENTAT_ANNOUNCE_IFACES` and `MENTAT_ANNOUNCE_ADDRS`. Every announcement is
-signed:
+The announcement is a UDP datagram to port 6382, broadcast on every selected
+interface plus any `MENTAT_ANNOUNCE_ADDR` unicast target. The daemon sends.
+Both the daemon and the router listen. Interface selection, address ranking
+and tags come from `MENTAT_ANNOUNCE_IFACES` and `MENTAT_ANNOUNCE_ADDRS`.
+Every announcement is signed:
 
 ```json
 {"p": {"proto": "0.99", "node_id": "...", "universe": "default",
@@ -415,104 +417,105 @@ payload with the key `k`:
 ```
 
 gives `ec381f4b20bc7eb6b1f18c7f15b06a5c7c60aca04b4ffcba2c1910ac6262ed39`.
-An implementation that reproduces that hex agrees with this one. A named file
-that cannot be read, or reads empty, is fatal at boot. Without a key the
-daemon does not announce and the router does not listen. Each logs that at
-boot. The verifier re-serializes the payload it parsed, so every value must
-survive a JSON round trip: integers and strings only. `t` is integer
-seconds, within 30 s of the receiver's clock. `seq` must exceed the last
-accepted for the same `boot_id`, and a restart issues a new `boot_id` and
-restarts `seq`.
+An implementation that reproduces that hex agrees with this one. A file
+given in `MENTAT_SECRET_FILE` that cannot be read, or reads empty, is fatal
+at boot. Without a key the daemon does not announce and the router does not
+listen. Each logs that at boot. The verifier re-serializes the payload it
+parsed, so every value must survive a JSON round trip. Values are integers
+and strings only. `t` is integer seconds, within 30 s of the receiver's
+clock. `seq` must exceed the last accepted for the same `boot_id`. A restart
+issues a new `boot_id` and restarts `seq`.
 
 The datagram is at most 1400 bytes, one Ethernet frame. A sender over that
 logs `announce_too_large` and sends nothing until it fits. A listener reads
-into a buffer of that size and drops a datagram that fills it, logging
-`announce_oversize` once per source, since what arrived is a fragment whose
-signature could not verify anyway.
+into a buffer one byte longer, so a datagram at the cap arrives whole. A
+read that fills the buffer came from a sender over the cap. The listener
+drops it and logs `announce_oversize` once per source. That check runs
+before the `universe` read, because a truncated payload parses as nothing.
 
-The receiver reads `universe` first, without verifying, and drops a foreign
-one without logging, since another cluster on the same broadcast domain is
-expected. A datagram naming no universe reads as `default`, which is the
-value a process uses when `MENTAT_UNIVERSE` is unset. It then verifies the
-signature, logging a bad one once per source, and checks `proto`, `t` and
-`seq`. A signed datagram outside the `t` window logs `announce_stale` once
-per source, because the signature places it in this cluster and a drifted
+The receiver reads `universe` next, before verifying. A foreign universe is
+dropped without a log line. Another cluster on the same broadcast domain is
+expected. A datagram without `universe` reads as `default`, the value a
+process uses when `MENTAT_UNIVERSE` is unset. The receiver then verifies the
+signature and logs a bad one once per source. It then checks `proto`, `t`
+and `seq`. A signed datagram outside the `t` window logs `announce_stale`
+once per source. The signature places it in this cluster, and a drifted
 clock is worth reporting. The router also requires the source address, and
-each advertised address before it is chosen, to pass its `ALLOWED_SOURCES`,
-logging a rejection once. The daemon's listener has no such list and dials
-what a signed datagram names.
+each advertised address before it is chosen, to pass `ALLOWED_SOURCES`. It
+logs a rejection once. The daemon's listener does not apply an allowlist. It
+dials the address in a signed datagram.
 
 An announcement is a hint. For the router it adds one address to watch. For
-a daemon it produces one dial from which `peer_hello` settles
-identity, version and link ownership. Every field is
-re-read over TCP and probed before it affects routing, so an empty
-`MENTAT_PEERS` joins a daemon by putting it on the same broadcast domain.
+a daemon it produces one dial. `peer_hello` on that dial settles identity,
+version and link ownership. Every field is re-read over TCP and
+probed before it affects routing. A daemon with an empty `MENTAT_PEERS`
+joins by being on the same broadcast domain.
 
 ## Address selection
 
 | Field | Value |
 | --- | --- |
-| `node_ip` | What the node calls itself, which fixes the subnet the cluster talks on. A host off that subnet may not reach it |
+| `node_ip` | The node's own identity address. It fixes the subnet the cluster uses. A host off that subnet may not reach it |
 | `link_ip` | The address a mesh link uses: the socket peer address inbound, the dialed address outbound |
-| `addrs` | Every address the node listens on, most preferred first, since only the node can rank its own links |
+| `addrs` | Every address the node listens on, most preferred first. Only the node can rank its own links |
 | `addr_tags` | Each address to its operator tags |
 | `addr_ifaces` | Each address to the interface it sits on. Addresses from `MENTAT_ANNOUNCE_ADDRS` are absent |
 
-One tag is interpreted: `rdma` means the operator cabled this address into a
-fabric, and placement acts on it once a probe over it has succeeded. A rank
-binds an interface and only the node knows which, which `addr_ifaces`
-supplies.
+`rdma` is the one interpreted tag. It means the operator cabled this address
+into a fabric. Placement acts on it once a probe over it has succeeded. A
+rank binds an interface, and only the node knows which one. `addr_ifaces`
+supplies it.
 
-A consumer picks one address per node: the highest-ranked entry in `addrs`
-on one of its own subnets, then the source address of a datagram it
-received, which is proof of reach, then `link_ip`, the rest of `addrs` and
-`node_ip`. One watch per `node_id`. A node with two links broadcasts on
-both with one `seq`, so a receiver keeps the first datagram of a round and
-drops the rest as replay. The alternates come from `addrs`, which is why a
-node ranks every address it holds rather than relying on the datagram that
-arrived.
+A consumer picks one address per node, in this order: the highest-ranked
+entry in `addrs` on one of its own subnets, then the source address of a
+datagram it received (proof of reach), then `link_ip`, the rest of `addrs`
+and `node_ip`. There is one watch per `node_id`. A node with two links
+broadcasts on both with one `seq`. A receiver keeps the first datagram of a
+round and drops the rest as replay. The alternates come from `addrs`, so a
+node ranks every address it holds. The datagram that arrived does not supply
+them.
 
 A service with an empty `host` resolves against its node's `addrs`. The
 agent joins its node by matching its `node_ip` against `node_ip`, `link_ip`
 and every entry of `addrs`, so a node's daemon and its containers must agree
-on `MENTAT_NODE_IP`. Every candidate passes the consumer's
-`ALLOWED_SOURCES`. A service with a `host` is used as written, because the
-operator named it. Candidates on the consumer's own subnets sort first,
-keeping the node's order within each half. The consumer probes in order,
-keeps whichever replies, falls through when it stops, and periodically re-
-tries the higher-ranked ones.
+on `MENTAT_NODE_IP`. Every candidate is checked against the consumer's
+`ALLOWED_SOURCES`. A service with a `host` is used as written. The operator
+chose it. Candidates on the consumer's own subnets sort first. The node's
+order holds within each half. The consumer probes in order, keeps the first
+that replies, falls through when it stops replying, and periodically
+re-tries the higher-ranked ones.
 
 ## Placement
 
-A placement group reserves whole devices. Placement ignores memory in 0.99,
-and a `uma: true` device is one device like any other. The
-bundles of one placement group go on GPUs of one vendor because no
-collective spans vendors: a claim set's `vendor` pins which, and an
-unclaimed placement group uses the first vendor that fits.
+A placement group reserves whole devices. Placement ignores memory in 0.99.
+A `uma: true` device is one device like any other. The bundles of one
+placement group go on GPUs of one vendor. A collective cannot span vendors.
+A claim set's `vendor` pins the vendor. An unclaimed placement group
+uses the first vendor that fits.
 
-A placement group of more than one bundle goes inside one fabric island: a
-set of nodes that all reach each other over addresses tagged `rdma`, with a
-successful probe behind every pair. Each daemon derives islands from its own
-probe table and the tables peers publish in `peer_status`, pruning each
-connected component least-connected node first until every member reaches
-every other. Soft consistency is enough, since the daemon a driver reached
-decides its placement groups. Membership commits after
-`MENTAT_ISLAND_HOLD_DOWN_MS` of stability, so a flapping cable cannot send
-consecutive placements to different islands. The vertices are addresses,
-since a rank binds one address every other rank must reach: a node with two
-fabric ports on separate links joins through whichever reaches all of the
-island, or through neither.
+A placement group of more than one bundle goes inside one fabric island. An
+island is a set of nodes that all reach each other over addresses tagged
+`rdma`, with a successful probe behind every pair. Each daemon derives
+islands from its own probe table and the tables peers publish in
+`peer_status`. It prunes each connected component, least-connected node
+first, until every member reaches every other. Soft consistency is enough,
+because the daemon a driver reached decides its placement groups. Membership
+commits after `MENTAT_ISLAND_HOLD_DOWN_MS` of stability, so a cable that
+flaps cannot send consecutive placements to different islands. The vertices
+are addresses, because a rank binds one address that every other rank must
+reach. A node with two fabric ports on separate links joins through
+whichever port reaches all of the island, or through neither.
 
-A placement group of one bundle is unconstrained, and so is one whose group
-does not have an alive agent on a node tagged `rdma`.
-`MENTAT_ISLAND_PLACEMENT=off` disables the constraint daemon-wide. A node
-belongs to its island or stands as an island of one, so a placement group
-that fits on a single node stays off the fabric. Candidate islands are those
-with enough free GPUs of one vendor: the driver's island first, then the
-smallest sufficient one. One that fits nowhere stays `PENDING`, with
-`pending_reason` giving the constraint and what the best island offered, and
-fails the same way at `MENTAT_PG_PENDING_TIMEOUT_MS`. Each rank is spawned
-with `MENTAT_FABRIC_IP` set to its node's address on the island.
+A placement group of one bundle is unconstrained. So is one whose group
+lacks an alive agent on a node tagged `rdma`. `MENTAT_ISLAND_PLACEMENT=off`
+disables the constraint daemon-wide. A node belongs to its island or is an
+island of one, so a placement group that fits on a single node stays off the
+fabric. Candidate islands are those with enough free GPUs of one vendor. The
+driver's island is tried first, then the smallest sufficient one. A placement
+group that fits nowhere stays `PENDING`. `pending_reason` gives the
+constraint and what the best island offered. It fails the same way at
+`MENTAT_PG_PENDING_TIMEOUT_MS`. Each rank is spawned with `MENTAT_FABRIC_IP`
+set to its node's address on the island.
 
 ## Snapshot
 
@@ -553,8 +556,8 @@ the same object. `?group=` on `/status` and `group` on `status` scope it.
               "agents_registered": 0, "relayed": 0}}
 ```
 
-Every collection is keyed by id, which the row itself omits, so an event can
-address one row by path.
+Each collection's key is the id. The row itself omits it. An event addresses
+one row by path.
 
 | Field | Value |
 | --- | --- |
@@ -563,17 +566,17 @@ address one row by path.
 | `gpus_total`, `gpus_used` | Devices across the group's alive agents |
 | actor `state` | `spawning`, `running` or `dead`, with `reason` filled for `dead` |
 | `clients` | The connections this daemon serves. `session` marks the one whose EOF reaps the group |
-| `claims` | Filled by the head alone, so empty elsewhere |
+| `claims` | Filled on the head only. Empty elsewhere |
 | `sets` | Each set's node count |
 
-The addresses and interfaces behind `sets` are in the view `claim` returns,
-too large to push on an interval.
+The addresses and interfaces behind `sets` are in the view `claim` returns.
+That view is too large to push on an interval.
 
 ## Events
 
-An event is a change to the snapshot. `patch` lists paths into it and the
-values to store there, so an event borrows its shapes: each value is the row
-"Snapshot" defines for that path.
+An event is a change to the snapshot. `patch` lists paths into the snapshot
+and the values to store there. Each value is the row "Snapshot" defines for
+that path.
 
 ```json
 {"type": "actor_running", "seq": 12, "ts_ms": 1787862155000, "node": "...",
@@ -584,18 +587,18 @@ values to store there, so an event borrows its shapes: each value is the row
 
 | Field | Value |
 | --- | --- |
-| `at` | An array of keys rather than a joined string, since a group name and an id are opaque and either may hold any character |
+| `at` | An array of keys. A group name and an id are opaque, and either may hold any character |
 | `value` | The whole row, so applying one is a replace and a reader holds either the old row or the new. Absent removes the path |
 | `why` | Optional free text for a log |
 
-`patch` may be empty. `driver_gone_reaping` sends none, since
-`driver_disconnected` already removed the client row and each actor's own
+`patch` may be empty. `driver_gone_reaping` sends an empty one.
+`driver_disconnected` already removed the client row, and each actor's own
 event follows.
 
-A program reads the row rather than `why`: `gone_since_ms` gives the figure
-`agent_degraded` describes in words.
+A program reads the row. `why` is for a log. `gone_since_ms` gives the
+figure `agent_degraded` describes in words.
 
-Paths below are written with `/` for reading. Each is the array of its keys.
+The paths below are written with `/`. Each is the array of its keys.
 
 | Event | Path |
 | --- | --- |
@@ -611,39 +614,37 @@ Paths below are written with `/` for reading. Each is the array of its keys.
 
 `history_swept` and `head_moved` each hold every row they changed, so a
 single event may mix removals and sets across several groups. A group's
-`gpus_total` and `gpus_used` are sums over its agent rows, so no event
-patches them directly. `gpus_free` on an agent row counts the devices no
-placement group holds, and `pg_ready` and `pg_removed` therefore include
-every agent row they moved.
+`gpus_total` and `gpus_used` are sums over its agent rows. No event patches
+them directly. `gpus_free` on an agent row counts the devices no placement
+group holds, so `pg_ready` and `pg_removed` include every agent row they
+moved.
 
-An entry removes its path when the daemon has dropped the row, and sets a
-whole row otherwise. A row that the daemon keeps in a terminal state is set,
-so `node_leave` leaves the peer in place with `alive` false and
-`dead_since_ms` filled, and `pg_removed` leaves the group `REMOVED`.
-`peer_forgotten` and `history_swept` remove those paths once the daemon
-forgets them, so a consumer applying events and one re-reading the snapshot
-hold the same tables.
+An entry removes its path when the daemon has dropped the row. Otherwise it
+sets a whole row. A row that the daemon keeps in a terminal state is set.
+`node_leave` leaves the peer in place with `alive` false and `dead_since_ms`
+filled, and `pg_removed` leaves the group `REMOVED`. `peer_forgotten` and
+`history_swept` remove those paths once the daemon forgets them. A consumer
+that applies events and one that re-reads the snapshot hold the same tables.
 
-A consumer applies events in `seq` order per originating `node` and re-reads
-the snapshot on a gap, since a missed event leaves the view wrong. Counters
-move without events, so a consumer reading them re-reads on an interval too.
-The first `/events` frame is a snapshot registered under the subscription's
-lock, so nothing falls between it and the first event.
+A consumer applies events in `seq` order per originating `node`. On a gap it
+re-reads the snapshot, because a missed event leaves the view wrong.
+Counters move without events, so a consumer that reads them re-reads on an
+interval too. The first `/events` frame is a snapshot registered under the
+subscription's lock. Nothing falls between it and the first event.
 
-Every snapshot holds the `seq` it reflects, so a consumer that re-reads one
-resumes the stream from there instead of starting over, and an event at or
-below that `seq` is already in the view. `seq` counts from 1 per daemon
-process, so a restart hands out numbers a consumer has already applied: the
-snapshot's `boot_id` changes with the process, which tells a restart from a
-gap. A consumer holding events from an older `boot_id` starts again from the
-new snapshot.
+Every snapshot holds the `seq` it reflects. A consumer that re-reads one
+resumes the stream from that `seq`. An event at or below it is already in
+the view. `seq` counts from 1 per daemon process, so a restart hands out
+numbers a consumer has already applied. The snapshot's `boot_id` changes
+with the process, which tells a restart from a gap. A consumer holding
+events from an older `boot_id` starts again from the new snapshot.
 
-Each daemon replicates its own events to every live peer in `peer_event`,
-and delivers a peer's event to its own subscribers without re-forwarding it.
-A replicated event describes the originating node's snapshot, while a
-receiving daemon's snapshot summarises its peers rather than holding their
-rows. A consumer therefore applies only events whose `node` is the daemon it
-is reading, reading every other node from that node's own stream.
+Each daemon replicates its own events to every live peer in `peer_event`.
+It delivers a peer's event to its own subscribers without re-forwarding it.
+A replicated event describes the originating node's snapshot. A receiving
+daemon's snapshot summarises its peers and does not hold their rows. A
+consumer therefore applies only events whose `node` is the daemon it is
+reading. It reads every other node from that node's own stream.
 
 ## HTTP
 
@@ -679,10 +680,10 @@ Router, port 6381:
 | `/status.json`, `/healthz`, `/` | Route table, per-group health and selected endpoint, `uptime_s` |
 | `/stats.json` | Per-model engine and router counters |
 
-A `/v1` request naming a known but ungated model returns 503 with the gate
-it failed. An unknown name returns 404. Bodies over 128 MiB are refused.
+A `/v1` request for a known but ungated model returns 503 with the gate it
+failed. An unknown model name returns 404. Bodies over 128 MiB are refused.
 Each group in `/status.json` has `openai` (the candidate routed to),
 `openai_candidates` (every candidate, best first), and `openai_note` and
 `provider` from the service entry. The `ray` shim reports Ray version
 `2.57.0` because vLLM checks it. That number is the version of the Ray API
-the shim emulates, and is unrelated to `proto`.
+the shim emulates. It is unrelated to `proto`.

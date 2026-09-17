@@ -19,20 +19,20 @@ python3 tests/test_topology.py    # two cabled pairs plus a LAN-only box over ME
 cargo test --workspace            # from rust/: framing, WS handshake, status-line grep contract
 ```
 
-Run from the repo root, one suite at a time: they pick free ports and
-collide when run together. Each suite builds what it needs from the
-`rust/` workspace unless `MENTAT_TEST_BINARY` or `MENTAT_SERVE_TEST_BINARY`
-points at a binary.
+Suites run from the repo root, one at a time. They pick free ports and
+collide when run together. Each suite builds what it needs from the `rust/`
+workspace unless `MENTAT_TEST_BINARY` or `MENTAT_SERVE_TEST_BINARY` points
+at a binary.
 
-`test_topology.py` runs on a pretend network. `MENTAT_TEST_NET` names a
-JSON file mapping pretend addresses onto real loopback ports and listing
+`test_topology.py` runs on a pretend network. `MENTAT_TEST_NET` points at a
+JSON file that maps pretend addresses onto real loopback ports and lists
 which pairs have a cable, which addresses are down, and what each node
 announces. Both binaries read it when set and dial as written otherwise.
 `rust/mentatd/src/testnet.rs` documents the file.
 
-`test_vllm_shape.py` replays `RayExecutorV2` call for call, so a drifted shim
-fails there instead of in a model container.
+`test_vllm_shape.py` replays `RayExecutorV2` call for call, so a drifted
+shim fails in the suite. A model container never sees it.
 
-Re-audit on a base-image change: `grep -rn 'ray\.'
-<site-packages>/vllm/v1/executor/`. The audit holds only for the vLLM it ran
-against.
+The audit command for a base-image change: `grep -rn 'ray\.'
+<site-packages>/vllm/v1/executor/`. The audit holds only for the vLLM it
+ran against.
