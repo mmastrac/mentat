@@ -25,6 +25,63 @@ TEST_SECRET = "test-secret"
 #: other's announcements silently.
 TEST_UNIVERSE = "mentat-test"
 
+class EventStream:
+    """A /events subscription, as a consumer applying patches sees it.
+
+    The endpoint is a websocket, so the frames are decoded by hand.
+    """
+
+    def __init__(self, http_port, timeout=5):
+        self.sock = socket.create_connection(("127.0.0.1", http_port), timeout=timeout)
+        self.sock.sendall(
+            b"GET /events HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\n"
+            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            b"Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += self.sock.recv(1024)
+        self.data = bytearray(buf.split(b"\r\n\r\n", 1)[1])
+
+    def frame(self, timeout):
+        """The next frame as (opcode, payload). Raises on close or timeout."""
+        self.sock.settimeout(timeout)
+
+        def need(n):
+            while len(self.data) < n:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError("ws closed")
+                self.data.extend(chunk)
+
+        need(2)
+        opcode = self.data[0] & 0x0F
+        ln = self.data[1] & 0x7F
+        off = 2
+        if ln == 126:
+            need(4)
+            ln = int.from_bytes(self.data[2:4], "big")
+            off = 4
+        need(off + ln)
+        payload = bytes(self.data[off : off + ln])
+        del self.data[: off + ln]
+        return opcode, payload
+
+    def events(self, deadline):
+        """Every text frame until `deadline`, decoded."""
+        while time.time() < deadline:
+            try:
+                opcode, payload = self.frame(max(0.5, deadline - time.time()))
+            except (TimeoutError, socket.timeout):
+                continue
+            if opcode == 1:
+                yield json.loads(payload)
+
+    def close(self):
+        self.sock.close()
+
+
 def sign_announcement(payload, key):
     """A signed envelope in the form rust/common/src/secret.rs defines:
     compact JSON, object keys in byte order, non-ASCII as raw UTF-8.

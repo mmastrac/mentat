@@ -2673,8 +2673,9 @@ mod tests {
         assert_eq!(v["groups"]["glm"]["actors"]["a:1"]["state"], "running");
     }
 
-    /// An entry with no `value` removes the path, which is how a node_leave
-    /// and a driver_disconnected arrive.
+    /// An entry with no `value` removes the path. The daemon sends one when
+    /// it drops the row itself: `peer_forgotten`, `claim_released`,
+    /// `driver_disconnected`.
     #[test]
     fn a_patch_with_no_value_removes_the_path() {
         let mut v = snap();

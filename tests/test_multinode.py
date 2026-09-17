@@ -15,7 +15,6 @@ itself the test that those knobs work.
 import json
 import os
 import signal
-import socket
 import sys
 import time
 
@@ -181,61 +180,19 @@ def t04_events_stream_carries_head_change():
     # head_change to arrive on a DIFFERENT daemon's stream (replication).
     # The group moves to the new head, d1, through d1's own relay.
     d3 = state["d3"]
-    s = socket.create_connection(("127.0.0.1", d3.http_port), timeout=5)
-    s.sendall(
-        b"GET /events HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
-        b"Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-        b"Sec-WebSocket-Version: 13\r\n\r\n"
-    )
-    buf = b""
-    while b"\r\n\r\n" not in buf:
-        buf += s.recv(1024)
-    _, rest = buf.split(b"\r\n\r\n", 1)
-
-    data = bytearray(rest)
-
-    def read_frame(timeout):
-        s.settimeout(timeout)
-
-        def need(n):
-            while len(data) < n:
-                chunk = s.recv(4096)
-                if not chunk:
-                    raise ConnectionError("ws closed")
-                data.extend(chunk)
-
-        need(2)
-        opcode = data[0] & 0x0F
-        ln = data[1] & 0x7F
-        off = 2
-        if ln == 126:
-            need(4)
-            ln = int.from_bytes(data[2:4], "big")
-            off = 4
-        need(off + ln)
-        payload = bytes(data[off : off + ln])
-        del data[: off + ln]
-        return opcode, payload
-
-    opcode, payload = read_frame(5)
-    assert json.loads(payload)["type"] == "snapshot"
+    stream = tl.EventStream(d3.http_port)
+    assert json.loads(stream.frame(5)[1])["type"] == "snapshot"
 
     state["d2"].kill()
 
-    deadline = time.time() + 30
     seen = set()
-    while time.time() < deadline and not {"node_leave", "head_change"} <= seen:
-        try:
-            opcode, payload = read_frame(max(1.0, deadline - time.time()))
-        except (TimeoutError, socket.timeout):
-            continue
-        if opcode != 1:
-            continue
-        evt = json.loads(payload)
+    for evt in stream.events(time.time() + 30):
         if evt.get("type") in ("node_leave", "head_change"):
             seen.add(evt["type"])
+        if {"node_leave", "head_change"} <= seen:
+            break
+    stream.close()
     assert {"node_leave", "head_change"} <= seen, seen
-    s.close()
 
     d1_id = state["d1_id"]
     wait_for(
@@ -296,6 +253,53 @@ def t06_peer_staleness_and_recovery():
     )
 
 
+def t07_a_lost_peer_is_marked_then_forgotten():
+    """The peer table reads the same whether a consumer applies events or
+    re-reads the snapshot.
+
+    `node_leave` sets the row with `alive` false, and `peer_forgotten`
+    removes the path once the daemon drops it. This starts its own pair of
+    daemons, since the short history window it needs would sweep dead rows
+    that other tests in this file read.
+    """
+    keep_ms = 4000
+    env = {**MESH_ENV, "MENTAT_HISTORY_KEEP_MS": str(keep_ms)}
+    watcher = Daemon("127.0.0.11", env=env).wait_up()
+    victim = Daemon("127.0.0.12", peers=[watcher.address], env=env).wait_up()
+    victim_id = wait_for(
+        lambda: next(iter(watcher.status_json()["peers"]), None),
+        20,
+        "the watcher to see its peer",
+    )
+
+    stream = tl.EventStream(watcher.http_port)
+    assert json.loads(stream.frame(5)[1])["type"] == "snapshot"
+    victim.kill()
+
+    leave, forgotten = None, None
+    deadline = time.time() + keep_ms / 1000 + 25
+    for evt in stream.events(deadline):
+        for entry in evt.get("patch", []):
+            if entry.get("at") != ["peers", victim_id]:
+                continue
+            if evt["type"] == "node_leave":
+                leave = entry
+            elif evt["type"] == "peer_forgotten":
+                forgotten = entry
+        if leave and forgotten:
+            break
+    stream.close()
+
+    assert leave, "no node_leave for the killed peer"
+    assert "value" in leave, f"node_leave must set the row: {leave}"
+    assert leave["value"]["alive"] is False, leave
+    assert leave["value"]["dead_since_ms"], leave
+
+    assert forgotten, f"no peer_forgotten within {keep_ms} ms"
+    assert "value" not in forgotten, f"peer_forgotten must remove: {forgotten}"
+    assert victim_id not in watcher.status_json()["peers"]
+
+
 def main():
     tests = [
         t01_workers_first_then_head,
@@ -305,6 +309,7 @@ def main():
         t04_events_stream_carries_head_change,
         t05_group_survived_head_change,
         t06_peer_staleness_and_recovery,
+        t07_a_lost_peer_is_marked_then_forgotten,
     ]
     try:
         for t in tests:

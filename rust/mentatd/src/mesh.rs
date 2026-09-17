@@ -116,7 +116,10 @@ fn connector(shared: SharedRef, seed: String, control_port: u16, http_port: u16,
             let st = shared.st.lock().unwrap();
             match &known_id {
                 Some(id) => st.peers.get(id).map(|p| p.alive).unwrap_or(false),
-                None => st.peers.values().any(|p| p.alive && format!("{}:{}", p.node_ip, p.control_port) == seed),
+                None => st
+                    .peers
+                    .values()
+                    .any(|p| p.alive && format!("{}:{}", p.node_ip, p.control_port) == seed),
             }
         };
         if covered {
@@ -187,10 +190,9 @@ fn dial_targets(shared: &SharedRef, seed: &str, known_id: Option<&str>) -> Vec<S
     let st = shared.st.lock().unwrap();
     let peer = match known_id {
         Some(id) => st.peers.get(id),
-        None => st
-            .peers
-            .values()
-            .find(|p| format!("{}:{}", p.node_ip, p.control_port) == seed || p.addrs.contains(&host)),
+        None => st.peers.values().find(|p| {
+            format!("{}:{}", p.node_ip, p.control_port) == seed || p.addrs.contains(&host)
+        }),
     };
     if let Some(p) = peer {
         for a in p.addrs.iter().filter(|a| !is_loopback(a)) {
@@ -261,32 +263,10 @@ fn try_connect(
             "peer closed the connection at hello",
         )
     })?;
-    let (
-        peer_id,
-        peer_ip,
-        peer_control,
-        peer_http,
-        peer_addrs,
-        peer_tags,
-        peer_ifaces,
-    ) = match frame.msg {
-        Msg::PeerHelloOk {
-            proto,
-            node_id,
-            node_ip,
-            control_port,
-            http_port,
-            addrs,
-            addr_tags,
-            addr_ifaces,
-        } => {
-            if !crate::proto::major_matches(&proto) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("peer proto {proto}, this daemon {}", crate::proto::PROTO),
-                ));
-            }
-            (
+    let (peer_id, peer_ip, peer_control, peer_http, peer_addrs, peer_tags, peer_ifaces) =
+        match frame.msg {
+            Msg::PeerHelloOk {
+                proto,
                 node_id,
                 node_ip,
                 control_port,
@@ -294,15 +274,30 @@ fn try_connect(
                 addrs,
                 addr_tags,
                 addr_ifaces,
-            )
-        }
-        other => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unexpected peer hello reply: {other:?}"),
-            ))
-        }
-    };
+            } => {
+                if !crate::proto::major_matches(&proto) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("peer proto {proto}, this daemon {}", crate::proto::PROTO),
+                    ));
+                }
+                (
+                    node_id,
+                    node_ip,
+                    control_port,
+                    http_port,
+                    addrs,
+                    addr_tags,
+                    addr_ifaces,
+                )
+            }
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unexpected peer hello reply: {other:?}"),
+                ))
+            }
+        };
     if peer_id == my_id {
         // The seed list includes ourselves. Harmless, so just don't peer.
         return Ok(None);
@@ -629,11 +624,14 @@ fn peer_loop(
             p.alive = false;
             p.dead_since_ms = Some(now_ms_u64());
         }
-        st.emit_patch(
-            "node_leave",
-            vec![crate::state::Patch::remove(&["peers", &peer_id])],
-            "link closed",
-        );
+        let row = st.peers.get(&peer_id).map(crate::status::peer_row);
+        if let Some(row) = row {
+            st.emit_patch(
+                "node_leave",
+                vec![crate::state::Patch::set(&["peers", &peer_id], row)],
+                "link closed",
+            );
+        }
     }
     shared.cv.notify_all();
 }
@@ -711,11 +709,14 @@ fn staleness_sweeper(shared: SharedRef) {
                 "peer_dead",
                 &[("peer", peer.clone()), ("silent_ms", silent.to_string())],
             );
-            st.emit_patch(
-                "node_leave",
-                vec![crate::state::Patch::remove(&["peers", &peer])],
-                "stale",
-            );
+            let row = st.peers.get(&peer).map(crate::status::peer_row);
+            if let Some(row) = row {
+                st.emit_patch(
+                    "node_leave",
+                    vec![crate::state::Patch::set(&["peers", &peer], row)],
+                    "stale",
+                );
+            }
         }
         // A dead row goes after MENTAT_HISTORY_KEEP_MS. Its seed connector
         // keeps dialing, so the box rejoins when it returns.
@@ -729,7 +730,12 @@ fn staleness_sweeper(shared: SharedRef) {
             st.peers.remove(&id);
             log(
                 "peer_forgotten",
-                &[("peer", id), ("kept_ms", keep.to_string())],
+                &[("peer", id.clone()), ("kept_ms", keep.to_string())],
+            );
+            st.emit_patch(
+                "peer_forgotten",
+                vec![crate::state::Patch::remove(&["peers", &id])],
+                &format!("kept {keep} ms"),
             );
         }
         if any_gone {
@@ -829,7 +835,13 @@ fn status_pusher(shared: SharedRef) {
             )
         };
         for w in writers {
-            let _ = w.send(Msg::PeerStatus { snapshot: snap.clone() }, 0, &[]);
+            let _ = w.send(
+                Msg::PeerStatus {
+                    snapshot: snap.clone(),
+                },
+                0,
+                &[],
+            );
         }
     }
 }

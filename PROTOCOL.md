@@ -308,6 +308,21 @@ dialed at each address it last announced, on the seed's port. `addrs`,
 `addr_tags` and `addr_ifaces` come from the hello and refresh on every
 status push.
 
+### The snapshot as a mesh message
+
+`peer_status` pushes a whole snapshot, and the receiver reads these keys out
+of it as protocol input:
+
+| Key | Read for |
+| --- | --- |
+| `head_node_id` | Election |
+| `addrs`, `addr_tags`, `addr_ifaces` | Refreshing the sending peer's own row |
+| `peers/<node_id>/alive`, `node_ip`, `control_port` | Dialing a peer's peers, so one seed address reaches the whole mesh |
+| `groups/<group>/gpus_total`, `gpus_used` | The per-group summary a peer row carries |
+
+Every other key is output for the HTTP readers. Reshaping one of these is a
+mesh change and a major bump, whatever it does to `/status`.
+
 A settled head stays head while alive. A daemon with no head uses the one
 its live peers publish in `head_node_id`, or the lowest live node id if none
 is published. Two settled heads that meet resolve to the lower. Every change
@@ -538,7 +553,7 @@ Paths below are written with `/` for reading. Each is the array of its keys.
 
 | Event | Path |
 | --- | --- |
-| `node_join`, `node_leave` | `peers/<node_id>` |
+| `node_join`, `node_leave`, `peer_forgotten` | `peers/<node_id>` |
 | `head_change` | `head_node_id` and `head_generation` |
 | `islands_changed` | `islands` |
 | `agent_register`, `agent_lost`, `agent_degraded`, `agent_dead` | `groups/<group>/agents/<agent_id>` |
@@ -549,6 +564,13 @@ Paths below are written with `/` for reading. Each is the array of its keys.
 
 An event that empties a group also patches its `gpus_used`, and one changing
 membership patches `gpus_total`, since neither follows from the row alone.
+
+A path is removed only when the daemon drops the row itself, which is
+`peer_forgotten`, `claim_released` and `driver_disconnected`. Every other
+event sets a whole row. `node_leave` therefore leaves the peer in place with
+`alive` false and `dead_since_ms` filled, and `peer_forgotten` removes it
+after `MENTAT_HISTORY_KEEP_MS`, so a consumer applying events and one
+re-reading the snapshot hold the same table.
 
 A consumer applies events in `seq` order per originating `node` and re-reads
 the snapshot on a gap, since a missed event leaves the view wrong. Counters
