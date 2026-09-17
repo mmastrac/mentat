@@ -489,6 +489,14 @@ impl State {
                 }
             }
         }
+        // A live actor holds its devices whatever became of the group that
+        // placed it. An adopted actor outlives its placement group, which a
+        // head change removes, and its ranks are still running.
+        for a in self.actors.values() {
+            if &a.agent == agent_id && !matches!(a.state, ActorState::Dead { .. }) {
+                free.retain(|g| !a.gpu_ids.contains(g));
+            }
+        }
         free
     }
 }

@@ -223,6 +223,17 @@ def t05_group_survived_head_change():
         done, _ = ray.wait(state["run_refs"], num_returns=1, timeout=1)
         assert not done, "no worker may die from a head change"
 
+    # An adopted actor outlives the placement group that placed it, which
+    # the head change removed. Its devices stay reserved, or the next
+    # pg_create places a second rank onto a running one.
+    grp = d1.status_json("m")["groups"]["m"]
+    held = {g for a in grp["actors"].values()
+            if a["state"] == "running" for g in a["gpu_ids"]}
+    assert held, grp["actors"]
+    for aid, agent in grp["agents"].items():
+        clash = held.intersection(agent["gpus_free"])
+        assert not clash, f"{aid} offers {clash}, held by a running actor"
+
 
 def t06_peer_staleness_and_recovery():
     # A wedged (SIGSTOPped) daemon stops pushing status without an EOF. The
