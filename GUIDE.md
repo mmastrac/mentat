@@ -529,11 +529,11 @@ own interfaces. Broadcast still follows the interfaces.
 
 - `MENTAT_SECRET` (default: unset)
 
-HMAC key for announcements. Set the same key on every daemon and router, or
-on none. A keyed listener refuses unsigned announcements. Unset, the mesh
-runs unauthenticated: `announce_signing state=off` is logged at boot and
-`signing` in `/status` reads false. Give mentat a key of its own. A key
-shared with another service is disclosed by whichever of them is weaker.
+HMAC key for announcements, required on every daemon and router in a
+cluster, and the same one. A daemon without it logs `announce_off` and
+announces nothing, and the router exits at boot, so a half-keyed cluster
+looks like an empty one. Give mentat a key of its own. A key shared with
+another service is disclosed by whichever of them is weaker.
 
 - `MENTAT_SECRET_FILE` (default: unset)
 
@@ -762,16 +762,13 @@ The daemon serves these on `--http-port`:
 
 | Path | Returns |
 | --- | --- |
-| `/status` | JSON snapshot: node, `signing`, peers, islands, groups, counters. `?group=NAME` scopes it |
+| `/status` | JSON snapshot: node, peers, islands, groups, clients, claims, counters. `?group=NAME` scopes it |
 | `/metrics` | Prometheus text |
 | `/events` | WebSocket: a snapshot, then one message per event |
 | `/healthz` | `ok` |
 
-`/events` sends the snapshot first, so a late client starts whole. Events:
-`node_join`, `node_leave`, `head_change`, `islands_changed`,
-`agent_register`, `agent_lost`, `agent_degraded`, `agent_dead`,
-`pg_created`, `pg_ready`, `pg_timeout`, `actor_spawning`, `actor_running`,
-`actor_dead`, `driver_connected`, `driver_disconnected`.
+`/events` sends the snapshot first, so a late client starts whole.
+PROTOCOL.md holds the event list and the path each one patches.
 
 ```
 curl -s http://<node>:6380/status | jq .

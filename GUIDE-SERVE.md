@@ -49,7 +49,7 @@ listing as a peer, is forgotten. `/status.json` lists each watch with its
 An announcement is a hint. It adds one address to watch. Every claim in it
 is re-read over TCP and probed before it affects routing. The datagram's
 source address and every address it advertises must match `ALLOWED_SOURCES`.
-With `MENTAT_SECRET` set, unsigned announcements are refused.
+`MENTAT_SECRET` is required, and unsigned announcements are refused.
 
 The group table merges every daemon's view into one entry per group name. A
 view older than three poll intervals is stale. When two daemons disagree

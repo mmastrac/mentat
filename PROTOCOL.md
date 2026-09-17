@@ -75,7 +75,9 @@ The first frame identifies the link: `hello` (client), `agent_register`
 A non-head daemon relays a `hello` or `agent_register` connection to the
 head: it sends the first frame there and pipes bytes both ways until either
 side closes. A frame with an empty `node_ip` gets the relaying daemon's
-first, so the head files the client under the box it is on. The connection
+first, so the head files the client under the box it is on. The relay fills
+it only when the connection came from loopback or one of its own addresses,
+since any other source is a box that states its own address. The connection
 waits for the first election, and gets `err` after thirty seconds without a
 head.
 
@@ -174,6 +176,7 @@ A node row, with the daemon's own node always present:
 | `state` | `PENDING`, `CREATED` or `REMOVED` |
 | `timeout_ms?` | Null blocks, 0 polls. Omitted is null, so a caller that leaves it out waits forever |
 | `ref_get_ok.status` | `ok`, `error`, `actor_died` or `timeout`, with `reason` filled for `actor_died` |
+| An unknown `ref_id` | `ref_get` returns `err`. `ref_wait` counts it ready, since a ref the daemon never held is one it will never resolve |
 
 `actor_stop` kills one group's actors, or every group's with `all`. The
 agents stay registered and the driver reconnects, so the group continues. A
@@ -250,14 +253,14 @@ spilling outside it would split ranks that agreed on one view.
 | --- | --- | --- |
 | Agent → daemon | `agent_register` | `proto`, `agent_id`, `group`, `node_ip`, `container`, `pid`, `machine`, `services?`, `resume?`, `unacked_refs?` |
 | Daemon → agent | `agent_register_ok` | `proto`, `node_id` |
-| Daemon → agent | `actor_spawn` | `actor_id`, `name`, `env`, `gpu_ids`, `owner`. Payload: pickled `(cls, args, kwargs)`. `MENTAT_NODE_ID` and `MENTAT_GCS_ADDRESS` reach the process through `env` |
+| Daemon → agent | `actor_spawn` | `actor_id`, `name`, `env`, `gpu_ids`, `owner`. Payload: pickled `(cls, args, kwargs)`. The daemon adds the actor's own variables to `env`, which GUIDE.md lists under "Actor process" |
 | Agent → daemon | `actor_spawn_result` | `actor_id`, `ok`, `error?`, `pid?` (0 when the failure came before the fork) |
 | Daemon → agent | `actor_dispatch` | `actor_id`, `ref_id`, `method`. Payload: pickled `(args, kwargs)` |
 | Agent → daemon | `actor_result` | `ref_id`, `ok`, `error?`. Payload: pickled result or exception |
 | Agent → daemon | `actor_exit` | `actor_id`, `exit_code?`, `signal?`, each nullable |
 | Daemon → agent | `actor_kill` | `actor_id`. The client message, forwarded unchanged |
 | Agent → daemon | `service_note` | `service`, `note`. Empty `note` clears |
-| Agent → daemon | `ping` | Sent every `MENTAT_AGENT_PING_INTERVAL_MS`, and the daemon replies `pong` on the same `req`. The send fails once the daemon is gone. The daemon learns of a lost agent from EOF and does not send `ping` |
+| Agent → daemon | `ping` | Sent every `MENTAT_AGENT_PING_INTERVAL_MS`, and the daemon replies `pong` on the same `req`, which is 0. The send fails once the daemon is gone. The daemon learns of a lost agent from EOF and does not send `ping` |
 
 ```json
 {"t": "agent_register", "proto": "0.99", "agent_id": "g1", "group": "glm",
@@ -560,6 +563,10 @@ values to store there, so an event borrows its shapes: each value is the row
 | `value` | The whole row, so applying one is a replace and a reader holds either the old row or the new. Absent removes the path |
 | `why` | Optional free text for a log |
 
+`patch` may be empty. `driver_gone_reaping` sends none, since
+`driver_disconnected` already removed the client row and each actor's own
+event follows.
+
 A program reads the row rather than `why`: `gone_since_ms` gives the figure
 `agent_degraded` describes in words.
 
@@ -568,7 +575,7 @@ Paths below are written with `/` for reading. Each is the array of its keys.
 | Event | Path |
 | --- | --- |
 | `node_join`, `node_leave`, `peer_forgotten` | `peers/<node_id>` |
-| `head_change` | `head_node_id` and `head_generation` |
+| `head_change` | `head_node_id` and `head_generation`, which counts this daemon's own head changes and compares only against itself |
 | `islands_changed` | `islands` |
 | `agent_register`, `agent_lost`, `agent_degraded`, `agent_dead` | `groups/<group>/agents/<agent_id>` |
 | `pg_created`, `pg_ready`, `pg_timeout` | `groups/<group>/placement_groups/<pg_id>` |
@@ -580,10 +587,11 @@ An event that empties a group also patches its `gpus_used`, and one changing
 membership patches `gpus_total`, since neither follows from the row alone.
 
 A removal patch comes from `peer_forgotten`, `claim_released` and
-`driver_disconnected` alone. Every other event sets a whole row. `node_leave` therefore leaves the peer in place with
-`alive` false and `dead_since_ms` filled, and `peer_forgotten` removes it
-after `MENTAT_HISTORY_KEEP_MS`, so a consumer applying events and one
-re-reading the snapshot hold the same table.
+`driver_disconnected` alone. Every other event sets a whole row.
+`node_leave` therefore leaves the peer in place with `alive` false and
+`dead_since_ms` filled, and `peer_forgotten` removes it after
+`MENTAT_HISTORY_KEEP_MS`, so a consumer applying events and one re-reading
+the snapshot hold the same table.
 
 A consumer applies events in `seq` order per originating `node` and re-reads
 the snapshot on a gap, since a missed event leaves the view wrong. Counters
