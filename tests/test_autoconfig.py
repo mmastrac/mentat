@@ -151,7 +151,7 @@ def t01_a_daemon_with_no_flags_names_itself():
     assert snap["node_id"], snap
     # A lone daemon elects itself, so the identity it derived is the head.
     assert snap["head_node_id"] == snap["node_id"], snap
-    assert snap["control_addr"].endswith(f":{CONTROL}"), snap
+    assert snap["control_port"] == CONTROL, snap
     # Derived from the route to the world, which is what MENTAT_NODE_IP
     # would otherwise have to supply.
     assert snap["node_ip"] != "127.0.0.1", snap

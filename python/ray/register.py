@@ -120,10 +120,15 @@ def major_matches(peer):
             return None
         if not (head.isascii() and tail.isascii()):
             return None
-        return head.lstrip("0")
+        return head.lstrip("0") or "0"
 
+    # Majors 0 and 1 read each other while 0.99 becomes 1.0. Both ends of a
+    # link check, so this half ships before 1.0 exists. Drop it after 1.0.
+    cutover = {"0", "1"}
     a, b = major(PROTO), major(peer)
-    return a is not None and a == b
+    if a is None or b is None:
+        return False
+    return a == b or {a, b} <= cutover
 
 
 def register_frame(args):

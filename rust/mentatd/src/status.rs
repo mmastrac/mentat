@@ -251,7 +251,9 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
         "addr_tags": crate::announce::local_addr_tags(),
         "addr_ifaces": crate::announce::local_addr_ifaces(),
         "hostname": st.hostname,
-        "control_addr": st.control_addr,
+        // `node_ip` and `control_port`, as every peer row spells it. The
+        // announcement keeps `control` as one string for spark-agent.
+        "control_port": st.control_port,
         "head_node_id": st.head_node_id,
         "head_generation": st.head_generation,
         // What the stream this snapshot came from has already delivered.
@@ -301,8 +303,9 @@ pub fn render(data: &Value, scoped: bool) -> String {
     }
     let is_head = data["head_node_id"] == data["node_id"];
     out.push_str(&format!(
-        "mentat daemon: {} ({}){}\n",
-        data["control_addr"].as_str().unwrap_or("?"),
+        "mentat daemon: {}:{} ({}){}\n",
+        data["node_ip"].as_str().unwrap_or("?"),
+        data["control_port"].as_u64().unwrap_or(0),
         data["hostname"].as_str().unwrap_or("?"),
         if is_head { " [head]" } else { "" },
     ));
@@ -461,7 +464,7 @@ mod tests {
     #[test]
     fn gpu_line_contract() {
         let data = serde_json::json!({
-            "control_addr": "10.100.0.2:6379",
+            "control_port": 6379,
             "hostname": "gx10-n1",
             "groups": {
                 "glm53": {
@@ -489,7 +492,7 @@ mod tests {
 
         // TP=4-shaped totals must survive the same pipeline.
         let data4 = serde_json::json!({
-            "control_addr": "x", "hostname": "y",
+            "control_port": 6379, "hostname": "y",
             "groups": { "g": { "gpus_total": 4.0, "gpus_used": 0.0,
                                 "agents": [], "placement_groups": [], "actors": [] } }
         });

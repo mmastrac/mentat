@@ -13,6 +13,12 @@ major is compared as a number, so leading zeros make no difference. Any
 other form is refused. `0.99` is the 1.0 candidate. Its shapes are 1.0's,
 and the number changes once the spec is accepted.
 
+Majors 0 and 1 accept each other for the one release that spans that
+change, so a cluster upgrades its daemons, agents, routers and images in any
+order. Both ends of a link check, so a 0.99 build reads 1.0 and a 1.0 build
+reads 0.99. The release after 1.0 drops the pair, and a major mismatch is
+refused from then on.
+
 Both opening frames of every link set `"proto"`: `hello`/`hello_ok`,
 `agent_register`/`agent_register_ok`, `peer_hello`/`peer_hello_ok`,
 `probe`/`probe_ok` and `host_hello`/`ctor`. The snapshot and the
@@ -62,9 +68,11 @@ object:
 {"req": 41, "t": "err", "error": "no such actor a1"}
 ```
 
-`t` selects the message. `req` correlates a response with its request.
-Unsolicited messages use 0, as does an omitted `req`. Request `x` gets
-`x_ok`, or `ok` for a request without a result, or `err`. A message uses its
+`t` selects the message. `req` is an unsigned 64-bit integer that
+correlates a response with its request. A client numbers its requests from 1
+on each connection. 0 is reserved for an unsolicited frame, and an omitted
+`req` reads as 0. Request `x` gets `x_ok`, or `ok` for a request without a
+result, or `err`. A message uses its
 subject's prefix: `pg_` placement group, `actor_`, `agent_`, `peer_` mesh
 peer, `host_` actor host, `claim_`, `ref_` object ref. The rest are bare:
 `hello` opens a link, and `nodes`, `resources`, `available` and `status`
@@ -336,6 +344,11 @@ address is dialed at each address it last announced, on the seed's port.
 `addrs`, `addr_tags` and `addr_ifaces` come from the hello and refresh on
 every status push.
 
+`peer_hello` and every snapshot row split an address and a port into
+`node_ip` and `control_port`. The announcement joins them, sending `control`
+and `http` as strings, a form spark-agent's mesh discovery fixes. `hello_ok`
+joins them too, in `control_addr`, which is the address a client dials.
+
 ### The snapshot as a mesh message
 
 `peer_status` pushes a whole snapshot. The receiver reads these keys from it
@@ -422,9 +435,12 @@ given in `MENTAT_SECRET_FILE` that cannot be read, or reads empty, is fatal
 at boot. Without a key the daemon does not announce and the router does not
 listen. Each logs that at boot. The verifier re-serializes the payload it
 parsed, so every value must survive a JSON round trip. Values are integers
-and strings only. `t` is integer seconds, within 30 s of the receiver's
-clock. `seq` must exceed the last accepted for the same `boot_id`. A restart
-issues a new `boot_id` and restarts `seq`.
+and strings only. `t` holds integer seconds here, within 30 s of the
+receiver's clock. The frame header uses the same key for its message
+selector. The two meanings are deliberate: this datagram matches
+spark-agent's mesh discovery so one key serves both clusters, and that
+fixes the key names. `seq` must exceed the last accepted for the same
+`boot_id`. A restart issues a new `boot_id` and restarts `seq`.
 
 The datagram is at most 1400 bytes, one Ethernet frame. A sender over that
 logs `announce_too_large` and sends nothing until it fits. A listener reads
@@ -524,7 +540,7 @@ the same object. `?group=` on `/status` and `group` on `status` scope it.
 
 ```json
 {"proto": "0.99", "node_id": "...", "node_ip": "10.0.0.1", "hostname": "n1",
- "control_addr": "10.0.0.1:6379", "head_node_id": "...", "head_generation": 3,
+ "control_port": 6379, "head_node_id": "...", "head_generation": 3,
  "seq": 41, "boot_id": "6d6474919bbe7beb",
  "addrs": [...], "addr_tags": {...}, "addr_ifaces": {...},
  "islands": [{"nodes": ["..."], "addrs": {"<node_id>": "10.0.0.1"}}],
