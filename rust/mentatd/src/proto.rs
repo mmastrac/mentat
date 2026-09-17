@@ -593,6 +593,23 @@ mod tests {
         assert!(matches!(frame.msg, Msg::Unknown), "{:?}", frame.msg);
     }
 
+    /// A minor bump may add a field. No struct denies unknown fields, so a
+    /// receiver drops one it has no name for and reads the rest.
+    #[test]
+    fn a_field_from_a_later_minor_is_dropped() {
+        let mut buf: Vec<u8> = Vec::new();
+        let header = br#"{"req":9,"t":"actor_kill","actor_id":"a:1","added_in_1_1":true}"#;
+        buf.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(header);
+        let mut cur = std::io::Cursor::new(buf);
+        let (frame, _) = read_frame(&mut cur).unwrap().unwrap();
+        match frame.msg {
+            Msg::ActorKill { actor_id } => assert_eq!(actor_id, "a:1"),
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// A frame that is not JSON still closes the link: nothing can be
     /// replied when the correlation id itself is unreadable.
     #[test]

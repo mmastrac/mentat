@@ -2684,6 +2684,18 @@ mod tests {
         assert!(v["groups"]["glm"]["actors"]["a:1"].is_null());
     }
 
+    /// A minor bump may add an event kind. Applying reads `patch` alone, so
+    /// an older router folds in a kind it has no name for.
+    #[test]
+    fn an_unknown_event_kind_still_applies_its_patch() {
+        let mut v = snap();
+        let ev = json!({"type": "something_from_a_later_minor", "patch": [
+            {"at": ["groups", "glm", "actors", "a:1"], "value": {"state": "running"}},
+        ]});
+        assert!(apply_patch(&mut v, &ev));
+        assert_eq!(v["groups"]["glm"]["actors"]["a:1"]["state"], "running");
+    }
+
     /// The first event for a collection uses a key the snapshot has never
     /// held, so the objects along the way are created.
     #[test]

@@ -8,21 +8,26 @@ variables named here.
 
 ## Version
 
-The version is `major.minor`; this document describes `0.99`, the 1.0
-candidate. The shapes here are 1.0's and the number moves once the spec is
-accepted. Both opening
-frames of every link set `"proto"`: `hello`/`hello_ok`,
+The version is `major.minor`. This document describes `0.99`, the 1.0
+candidate: the shapes here are 1.0's and the number moves once the spec is
+accepted. Both opening frames of every link set `"proto"`: `hello`/`hello_ok`,
 `agent_register`/`agent_register_ok`, `peer_hello`/`peer_hello_ok`,
 `probe`/`probe_ok` and `host_hello`/`ctor`. So do the snapshot and the
 announcement payload.
 
 A minor bump may add an optional field with a default, a message type, an
-event kind, a snapshot key or a metric. A peer sends nothing introduced
-after its counterpart's minor, so a `0.100` daemon behaves as `0.99`
-toward a `0.99` agent. Any other change is major.
+event kind, a snapshot key or a metric. Compatibility rests on the receiver
+ignoring what it does not know: an unknown field is dropped in parsing, and
+an unknown event kind still applies its patch. A sender always sends its own
+current shape, since nothing records a counterpart's minor. Any other change
+is major.
+
+`ref_get_ok.status` is a closed set, since the shim raises on a value it
+does not know, so adding one there is major. Actor and placement group
+`state` hold Ray's vocabulary, which fixes those the same way.
 
 On a major mismatch the accepter returns `err` with its own `proto` and
-closes; the dialer closes on a mismatched reply. A mesh peer of another
+closes. The dialer closes on a mismatched reply. A mesh peer of another
 major is left out of election and is redialed at the normal interval.
 An announcement of another major is dropped, logged once per source. An
 unknown message type gets `err` and the link stays open. An unparseable
@@ -136,9 +141,15 @@ holder never resolves one: they are keys in the snapshot and fields in
 | `actor_stop` | `group?` or `all?`, exactly one | `ok` |
 | `claim` | `name`, `shape` | `claim_ok`: `name`, `generation`, `view` |
 
-`kind` is `driver` or `cli`. Exactly one connection per driver sets
-`session: true`, and a second in one group is refused. `node_ip` is empty
-from the client. The session's EOF starts a reap: after
+`kind` labels the connection for an operator: `driver` for a shim outside an
+actor, `actor` for a shim inside one, `thread` for a shim's extra per-thread
+connection, `cli` for a `mentatd` subcommand. The daemon stores it, logs it
+and reports it under `clients`. No daemon behaviour depends on the value, so
+a minor version may add one and a reader takes an unknown value as text.
+
+Exactly one connection per driver sets `session: true`, and a second in one
+group is refused. An `actor`, `thread` or `cli` connection sets it false.
+`node_ip` is empty from the client. The session's EOF starts a reap: after
 `MENTAT_SESSION_REAP_GRACE_MS` the daemon kills the driver's actors, removes
 its placement groups and drops its claims. The client id is dropped at once,
 so a driver restarting inside the grace opens its session without waiting. A
@@ -402,10 +413,10 @@ The receiver reads `universe` first, without verifying, and drops a foreign
 one without logging, since another cluster on the same broadcast domain is
 expected. It then verifies the signature, logging a bad one once per source,
 and checks `proto`, `t` and `seq`. The source address, and each advertised
-address before it is chosen, must pass `ALLOWED_SOURCES`; a rejection is
-logged once. An announcement is a hint. For the router it adds one address to
-watch; for a daemon it produces one dial, and `peer_hello` then settles
-identity, version and link ownership. Every field is re-read over TCP and
+address before it is chosen, must pass `ALLOWED_SOURCES`, and a rejection is
+logged once. An announcement is a hint. For the router it adds a single
+address to watch. For a daemon it produces a single dial, after which
+`peer_hello` settles identity, version and link ownership. Every field is re-read over TCP and
 probed before it affects routing, so an empty `MENTAT_PEERS` joins a daemon
 by putting it on the same broadcast domain.
 
