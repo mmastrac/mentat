@@ -1,7 +1,7 @@
 # mentat wire protocol 0.99
 
-Client (Python shim or CLI), agent and mesh links run on TCP 6379; the host
-link, agent to actor process, on a unix socket. All four share one framing
+Client (Python shim or CLI), agent and mesh links run on TCP 6379. The host
+link, agent to actor process, runs on a unix socket. All four share one framing
 and one message set. Discovery is a UDP datagram on port 6382. HTTP is 6380
 (daemon) and 6381 (router). `GUIDE.md` and `GUIDE-SERVE.md` cover the
 variables named here.
@@ -39,7 +39,7 @@ frame closes it.
 u32le header_len | u32le payload_len | header (JSON) | payload (opaque)
 ```
 
-Each length is capped at 256 MiB; a larger value closes the link. EOF at a
+Each length is capped at 256 MiB, and a larger value closes the link. EOF at a
 frame boundary is a clean close. The payload is Python pickle bytes, passed
 through untouched. Most are empty. The header is a JSON object:
 
@@ -179,7 +179,7 @@ agents stay registered and the driver reconnects, so the group continues. A
 request with neither, or both, is refused and lists the groups that exist.
 
 `all` must be spelled because the binary is also installed as `ray`. Under Ray,
-`ray stop` stops the local node's processes; here it reaches every group the
+`ray stop` stops the local node's processes. Here it reaches every group the
 daemon knows, so an entrypoint running it as cleanup fails until someone
 sets a scope.
 
@@ -347,7 +347,7 @@ the peer's control port, sends `probe`, reads `probe_ok` and closes. Success
 requires the expected `node_id` in the reply: both fabrics in a multi-pair
 cluster may share a subnet, so an address replying does not prove the
 intended node did. Binding the local address makes the result describe the
-cabling; without it the result reports the routing table's preference.
+cabling. Without it the result reports the routing table's preference.
 
 Each daemon probes every (own address × peer address) pair once per
 `MENTAT_PROBE_INTERVAL_MS`, times out at `MENTAT_PROBE_TIMEOUT_MS`, and
@@ -398,7 +398,7 @@ to `\uXXXX`. Signing this payload with the key `k`:
 gives `ec381f4b20bc7eb6b1f18c7f15b06a5c7c60aca04b4ffcba2c1910ac6262ed39`.
 An implementation that reproduces that hex agrees with this one. A named file
 that cannot be read, or reads empty, is fatal at boot. Without a key the
-daemon does not announce and the router does not listen; each logs that at
+daemon does not announce and the router does not listen. Each logs that at
 boot. The verifier re-serializes the payload it parsed, so every value must
 survive a JSON round trip: integers and strings only. `t` is integer
 seconds, within 30 s of the receiver's clock. `seq` must exceed the last
@@ -416,9 +416,9 @@ and checks `proto`, `t` and `seq`. The source address, and each advertised
 address before it is chosen, must pass `ALLOWED_SOURCES`, and a rejection is
 logged once. An announcement is a hint. For the router it adds a single
 address to watch. For a daemon it produces a single dial, after which
-`peer_hello` settles identity, version and link ownership. Every field is re-read over TCP and
-probed before it affects routing, so an empty `MENTAT_PEERS` joins a daemon
-by putting it on the same broadcast domain.
+`peer_hello` settles identity, version and link ownership. Every field is
+re-read over TCP and probed before it affects routing, so an empty
+`MENTAT_PEERS` joins a daemon by putting it on the same broadcast domain.
 
 ## Address selection
 
@@ -623,7 +623,7 @@ Router, port 6381:
 
 | Path | Returns |
 | --- | --- |
-| `GET /v1`, `/v1/models` | The routable models; the router serves this itself |
+| `GET /v1`, `/v1/models` | The routable models, which the router serves itself |
 | `POST /v1/*` | Routed by request `model`, streamed through |
 | any other POST | Routed by request `model`, for root-level endpoints such as `/tokenize` |
 | `/mcp` | Merged MCP in a flat namespace. `__group` picks the group |
@@ -631,7 +631,7 @@ Router, port 6381:
 | `/stats.json` | Per-model engine and router counters |
 
 A `/v1` request naming a known but ungated model returns 503 with the gate
-it failed; an unknown name returns 404. Bodies over 128 MiB are refused.
+it failed. An unknown name returns 404. Bodies over 128 MiB are refused.
 Each group in `/status.json` has `openai` (the candidate routed to),
 `openai_candidates` (every candidate, best first), and `openai_note` and
 `provider` from the service entry. The `ray` shim reports Ray version
