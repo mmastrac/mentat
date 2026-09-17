@@ -25,6 +25,13 @@ an unknown field is dropped in parsing, and an unknown event kind still
 applies its patch. A sender always sends its own current shape, since
 nothing records a counterpart's minor. Any other change is major.
 
+`err` holds `error` for a person, whose wording is free to change, and an
+optional `code` a program matches on. A receiver with no name for a `code`
+treats the refusal as one carrying none. The codes are `no_head`,
+`proto_mismatch` (with the refusing side's `proto`), `duplicate_session`,
+`bad_first_frame`, `agent_refused`, `unknown_message` and `unknown_ref`. A
+minor bump may add one.
+
 `ref_get_ok.status` is a closed set, since the shim raises on a value it
 does not know, so adding one there is major. Actor `state`
 (`spawning`, `running`, `dead`) and placement group `state` (`PENDING`,
@@ -35,8 +42,10 @@ On a major mismatch the accepter returns `err` with its own `proto` and
 closes. The dialer closes on a mismatched reply. A mesh peer of another
 major is left out of election and is redialed at the normal interval.
 An announcement of another major is dropped, logged once per source. An
-unknown message type gets `err` and the link stays open. An unparseable
-frame closes it.
+unparseable frame closes the link. An unknown message type keeps the link
+open, and what the receiver does with it follows the link: the client link
+replies `err` naming the type, while the agent, mesh and host links log it
+and read on, because a pushed frame correlates with no request.
 
 ## Framing
 
@@ -172,7 +181,7 @@ A node row, with the daemon's own node always present:
 
 | Field | Value |
 | --- | --- |
-| `bundles` | Whole GPUs per bundle |
+| `bundles` | Whole GPUs per bundle. A fraction is refused. A repeat claim under one name sends an equal shape or is refused, comparing whole numbers by value, so `1` and `1.0` are the same shape |
 | `strategy` | Recorded and echoed by `pg_table`. Placement packs, and logs `pg_strategy_ignored` for anything else |
 | `num_gpus` | A whole number |
 | `claim` | A claim this placement group sits inside, or empty |

@@ -533,9 +533,7 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
             }
             Head::None => {
                 let _ = writer.send(
-                    Msg::Err {
-                        error: "no head elected yet, retry".to_string(),
-                    },
+                    Msg::refused("no_head", "no head elected yet, retry"),
                     first.0.req,
                     &[],
                 );
@@ -559,11 +557,12 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
         }
         other => {
             let _ = writer.send(
-                Msg::Err {
-                    error: format!(
+                Msg::refused(
+                    "bad_first_frame",
+                    format!(
                         "first frame must be hello, agent_register, peer_hello or probe, got {other:?}"
                     ),
-                },
+                ),
                 first.0.req,
                 &[],
             );
@@ -771,6 +770,9 @@ fn client_conn(
             let _ = writer.send(
                 Msg::Err {
                     error: format!("proto {} here, {proto} offered", crate::proto::PROTO),
+                    code: "proto_mismatch".into(),
+                    head: String::new(),
+                    proto: crate::proto::PROTO.to_string(),
                 },
                 hello.req,
                 &[],
@@ -786,12 +788,13 @@ fn client_conn(
                 .any(|c| c.group == group && c.has_session && c.id != client_id);
             if dup {
                 let _ = writer.send(
-                    Msg::Err {
-                        error: format!(
+                    Msg::refused(
+                        "duplicate_session",
+                        format!(
                             "group '{group}' already has an active driver session. \
                              Run a second instance under a different MENTAT_GROUP"
                         ),
-                    },
+                    ),
                     hello.req,
                     &[],
                 );
@@ -874,7 +877,8 @@ fn client_conn(
             }
         };
         let req = frame.req;
-        let (resp, resp_payload) = handle_client_msg(&shared, &client_id, frame.msg, payload);
+        let (resp, resp_payload) =
+            handle_client_msg(&shared, &client_id, frame.msg, &frame.unknown_t, payload);
         if writer.send(resp, req, &resp_payload).is_err() {
             break;
         }
@@ -915,6 +919,7 @@ fn handle_client_msg(
     shared: &SharedRef,
     client_id: &str,
     msg: Msg,
+    unknown_t: &str,
     payload: Vec<u8>,
 ) -> (Msg, Vec<u8>) {
     match msg {
@@ -991,7 +996,7 @@ fn handle_client_msg(
                     },
                     Vec::new(),
                 ),
-                Err(error) => (Msg::Err { error }, Vec::new()),
+                Err(error) => (Msg::error(error), Vec::new()),
             }
         }
         Msg::PgCreate {
@@ -1258,6 +1263,12 @@ fn handle_client_msg(
             }
             (Msg::Ok, Vec::new())
         }
+        // `Msg::Unknown` is a unit variant, so the tag the frame kept is the
+        // only thing that reports what was refused.
+        Msg::Unknown => refused(
+            "unknown_message",
+            format!("no such message type {unknown_t:?}"),
+        ),
         other => err(format!("unexpected client message: {other:?}")),
     }
 }
@@ -1313,7 +1324,8 @@ fn claim(
     }
     let key = (group.to_string(), name.to_string());
     if let Some(c) = st.claims.get_mut(&key) {
-        if &c.shape != shape {
+        // Both are canonical, so `[1]` and `[1.0]` match here.
+        if c.shape != crate::claim::canonical(shape) {
             return Err(format!(
                 "claim {name:?} is held for a different shape. Use another name"
             ));
@@ -1330,7 +1342,7 @@ fn claim(
     st.claims.insert(
         key,
         ClaimInfo {
-            shape: shape.clone(),
+            shape: crate::claim::canonical(shape),
             view: view.clone(),
             generation,
             holders: [client_id.to_string()].into_iter().collect(),
@@ -1478,7 +1490,12 @@ fn node_entry(node_id: &str, ip: &str, gpus: f64, cpus: f64, memory: f64) -> Val
 }
 
 fn err(e: String) -> (Msg, Vec<u8>) {
-    (Msg::Err { error: e }, Vec::new())
+    (Msg::error(e), Vec::new())
+}
+
+/// A refusal a program can match on, for the cases a caller acts on.
+fn refused(code: &str, e: String) -> (Msg, Vec<u8>) {
+    (Msg::refused(code, e), Vec::new())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1691,7 +1708,7 @@ fn do_get(shared: &SharedRef, ref_id: &str, timeout_ms: Option<u64>) -> (Msg, Ve
                     Vec::new(),
                 )
             }
-            Res::Unknown => return err(format!("unknown ref {ref_id}")),
+            Res::Unknown => return refused("unknown_ref", format!("unknown ref {ref_id}")),
             Res::Pending => {}
         }
         match deadline {
@@ -2268,6 +2285,9 @@ fn agent_conn(
         let _ = writer.send(
             Msg::Err {
                 error: format!("proto {} here, {proto} offered", crate::proto::PROTO),
+                code: "proto_mismatch".into(),
+                head: String::new(),
+                proto: crate::proto::PROTO.to_string(),
             },
             first.0.req,
             &[],
@@ -2324,9 +2344,7 @@ fn agent_conn(
         // and logs it there, so the operator reading the container's own
         // output sees it however long it has been failing.
         let _ = writer.send(
-            Msg::Err {
-                error: format!("agent {agent_id} {why}"),
-            },
+            Msg::refused("agent_refused", format!("agent {agent_id} {why}")),
             first.0.req,
             &[],
         );

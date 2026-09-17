@@ -34,7 +34,7 @@ impl FrameWriter {
 
     pub fn send(&self, msg: Msg, req: u64, payload: &[u8]) -> std::io::Result<()> {
         let mut s = self.inner.lock().unwrap();
-        write_frame(&mut *s, &Frame { req, msg }, payload)
+        write_frame(&mut *s, &Frame::new(req, msg), payload)
     }
 
     pub fn shutdown(&self) {
@@ -64,7 +64,7 @@ impl UnixFrameWriter {
 
     pub fn send(&self, msg: Msg, req: u64, payload: &[u8]) -> std::io::Result<()> {
         let mut s = self.inner.lock().unwrap();
-        write_frame(&mut *s, &Frame { req, msg }, payload)
+        write_frame(&mut *s, &Frame::new(req, msg), payload)
     }
 }
 

@@ -35,6 +35,44 @@ pub struct Frame {
     pub req: u64,
     #[serde(flatten)]
     pub msg: Msg,
+    /// The `t` of a message this build has no variant for, so a refusal can
+    /// report it. Empty for every message that parsed into a variant, and
+    /// never on the wire: `Msg` is internally tagged, so the tag reaches
+    /// `Unknown` nowhere else.
+    #[serde(skip)]
+    pub unknown_t: String,
+}
+
+impl Msg {
+    /// A refusal with a message for a person and no code.
+    pub fn error(e: impl Into<String>) -> Msg {
+        Msg::Err {
+            error: e.into(),
+            code: String::new(),
+            head: String::new(),
+            proto: String::new(),
+        }
+    }
+
+    /// A refusal a program can match on.
+    pub fn refused(code: &str, e: impl Into<String>) -> Msg {
+        Msg::Err {
+            error: e.into(),
+            code: code.to_string(),
+            head: String::new(),
+            proto: String::new(),
+        }
+    }
+}
+
+impl Frame {
+    pub fn new(req: u64, msg: Msg) -> Self {
+        Frame {
+            req,
+            msg,
+            unknown_t: String::new(),
+        }
+    }
 }
 
 pub use mentat_common::proto::{major_matches, proto, PROTO};
@@ -136,9 +174,23 @@ pub enum Msg {
     /// A request that returns nothing. The Python shim uses it in place of
     /// any expected response type.
     Ok,
-    /// The request failed, or a handshake was refused. `error` reaches the
-    /// caller as the message of its exception.
-    Err { error: String },
+    /// The request failed, or a handshake was refused.
+    ///
+    /// `error` is for a person: it reaches the caller as the message of its
+    /// exception, and its wording is free to change. `code` is what a
+    /// program matches on, and a receiver that has no name for one treats
+    /// the refusal as it would with none.
+    Err {
+        error: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        code: String,
+        /// The head's control address, on `not_head`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        head: String,
+        /// The version the refusing side runs, on `proto_mismatch`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        proto: String,
+    },
     /// The reply to `hello`. `control_addr` is where this daemon accepts control
     /// connections, and the shim passes it to actors as MENTAT_GCS_ADDRESS.
     HelloOk {
@@ -480,7 +532,7 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<(Frame, Vec<u8>)>> {
     r.read_exact(&mut header)?;
     let mut payload = vec![0u8; plen as usize];
     r.read_exact(&mut payload)?;
-    let frame: Frame = serde_json::from_slice(&header).map_err(|e| {
+    let mut frame: Frame = serde_json::from_slice(&header).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -489,6 +541,12 @@ pub fn read_frame<R: Read>(r: &mut R) -> io::Result<Option<(Frame, Vec<u8>)>> {
             ),
         )
     })?;
+    if matches!(frame.msg, Msg::Unknown) {
+        frame.unknown_t = serde_json::from_slice::<serde_json::Value>(&header)
+            .ok()
+            .and_then(|v| v["t"].as_str().map(str::to_string))
+            .unwrap_or_default();
+    }
     Ok(Some((frame, payload)))
 }
 
@@ -519,13 +577,13 @@ mod tests {
     #[test]
     fn roundtrip() {
         let mut buf: Vec<u8> = Vec::new();
-        let f = Frame {
-            req: 7,
-            msg: Msg::ActorCall {
+        let f = Frame::new(
+            7,
+            Msg::ActorCall {
                 actor_id: "a:01".into(),
                 method: "run".into(),
             },
-        };
+        );
         write_frame(&mut buf, &f, b"PAYLOAD").unwrap();
         let mut cur = std::io::Cursor::new(buf);
         let (g, p) = read_frame(&mut cur).unwrap().unwrap();
@@ -544,10 +602,7 @@ mod tests {
     #[test]
     fn eof_mid_frame_is_an_error() {
         let mut buf: Vec<u8> = Vec::new();
-        let f = Frame {
-            req: 1,
-            msg: Msg::Ping,
-        };
+        let f = Frame::new(1, Msg::Ping);
         write_frame(&mut buf, &f, b"").unwrap();
         buf.truncate(buf.len() - 2);
         let mut cur = std::io::Cursor::new(buf);
@@ -591,6 +646,22 @@ mod tests {
         let (frame, _) = read_frame(&mut cur).unwrap().unwrap();
         assert_eq!(frame.req, 3);
         assert!(matches!(frame.msg, Msg::Unknown), "{:?}", frame.msg);
+    }
+
+    /// The tag survives a message this build has no variant for, so a
+    /// refusal reports what it refused. `Msg::Unknown` is a unit variant
+    /// with no fields of its own.
+    #[test]
+    fn an_unknown_message_keeps_its_tag() {
+        let mut buf: Vec<u8> = Vec::new();
+        let header = br#"{"req":3,"t":"added_in_1_1"}"#;
+        buf.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(header);
+        let mut cur = std::io::Cursor::new(buf);
+        let (frame, _) = read_frame(&mut cur).unwrap().unwrap();
+        assert!(matches!(frame.msg, Msg::Unknown));
+        assert_eq!(frame.unknown_t, "added_in_1_1");
     }
 
     /// A minor bump may add a field. Every struct accepts unknown fields,

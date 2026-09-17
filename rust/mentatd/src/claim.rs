@@ -39,6 +39,26 @@ impl Link {
     }
 }
 
+/// A shape with whole numbers spelled one way.
+///
+/// The holder check compares shapes as JSON, so `[1]` and `[1.0]` would
+/// otherwise name two shapes and refuse the second holder of one claim.
+pub fn canonical(v: &Value) -> Value {
+    match v {
+        Value::Number(n) => match n.as_f64() {
+            Some(f) if f.is_finite() && f >= 0.0 && f.fract() == 0.0 && f <= u64::MAX as f64 => {
+                Value::from(f as u64)
+            }
+            _ => v.clone(),
+        },
+        Value::Array(a) => Value::Array(a.iter().map(canonical).collect()),
+        Value::Object(o) => {
+            Value::Object(o.iter().map(|(k, x)| (k.clone(), canonical(x))).collect())
+        }
+        _ => v.clone(),
+    }
+}
+
 /// One group of nodes the caller wants placed together.
 #[derive(Clone, Debug)]
 pub struct SetReq {
@@ -483,7 +503,19 @@ pub fn parse(shape: &Value) -> Result<Request, String> {
         .map(|s| {
             let name = s["name"].as_str().ok_or("a set needs a name")?.to_string();
             let bundles: Vec<f64> = match &s["bundles"] {
-                Value::Array(a) => a.iter().filter_map(|b| b.as_f64()).collect(),
+                // Whole GPUs. 1 and 1.0 mean the same request, which
+                // `canonical` spells one way. Half a GPU is a mistake worth
+                // reporting rather than rounding.
+                Value::Array(a) => a
+                    .iter()
+                    .map(|b| {
+                        b.as_f64()
+                            .filter(|f| f.is_finite() && *f >= 0.0 && f.fract() == 0.0)
+                            .ok_or_else(|| {
+                                format!("set {name:?}: every bundle is a whole number of GPUs")
+                            })
+                    })
+                    .collect::<Result<Vec<f64>, String>>()?,
                 // A count with no per-node figure means one GPU each, which
                 // is what a rank usually wants.
                 Value::Number(n) => vec![1.0; n.as_u64().unwrap_or(0) as usize],
@@ -612,6 +644,20 @@ pub fn topology(st: &crate::state::State) -> Topology {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A second holder sends the shape its own way. Both spellings name the
+    /// same claim, and a fractional bundle is refused rather than rounded.
+    #[test]
+    fn a_shape_reads_the_same_spelled_either_way() {
+        let ints = serde_json::json!({"sets": [{"name": "s", "bundles": [1, 2]}]});
+        let floats = serde_json::json!({"sets": [{"name": "s", "bundles": [1.0, 2.0]}]});
+        assert_eq!(canonical(&ints), canonical(&floats));
+        assert_eq!(canonical(&floats), ints);
+
+        let half = serde_json::json!({"sets": [{"name": "s", "bundles": [0.5]}]});
+        let e = parse(&half).unwrap_err();
+        assert!(e.contains("whole number"), "{e}");
+    }
 
     fn port(addr: &str, iface: &str, tags: &[&str]) -> Port {
         Port {

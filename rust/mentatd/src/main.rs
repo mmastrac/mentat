@@ -398,9 +398,9 @@ fn cli_request(addr: &str, msg: Msg) -> std::io::Result<(Msg, Vec<u8>)> {
     let mut reader = BufReader::new(stream);
     write_frame(
         &mut writer,
-        &Frame {
-            req: 1,
-            msg: Msg::Hello {
+        &Frame::new(
+            1,
+            Msg::Hello {
                 proto: proto::proto(),
                 client_id: state::random_hex_id(),
                 group: group_from_env(),
@@ -408,7 +408,7 @@ fn cli_request(addr: &str, msg: Msg) -> std::io::Result<(Msg, Vec<u8>)> {
                 kind: "cli".to_string(),
                 node_ip: String::new(),
             },
-        },
+        ),
         &[],
     )?;
     let (hello, _) = read_frame(&mut reader)?.ok_or_else(|| {
@@ -417,17 +417,17 @@ fn cli_request(addr: &str, msg: Msg) -> std::io::Result<(Msg, Vec<u8>)> {
             "daemon closed the connection before answering hello",
         )
     })?;
-    if let Msg::Err { error } = hello.msg {
+    if let Msg::Err { error, .. } = hello.msg {
         return Err(std::io::Error::other(error));
     }
-    write_frame(&mut writer, &Frame { req: 2, msg }, &[])?;
+    write_frame(&mut writer, &Frame::new(2, msg), &[])?;
     let (resp, payload) = read_frame(&mut reader)?.ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "daemon closed the connection before replying",
         )
     })?;
-    if let Msg::Err { error } = resp.msg {
+    if let Msg::Err { error, .. } = resp.msg {
         return Err(std::io::Error::other(error));
     }
     Ok((resp.msg, payload))

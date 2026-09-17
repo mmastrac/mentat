@@ -582,7 +582,7 @@ fn serve_once(
                 &[("agent", agent_id.to_string()), ("node_id", node_id)],
             );
         }
-        Msg::Err { error } => {
+        Msg::Err { error, .. } => {
             return Err(std::io::Error::other(error));
         }
         other => {

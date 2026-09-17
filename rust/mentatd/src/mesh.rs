@@ -366,6 +366,9 @@ pub fn accept_peer(
         let _ = writer.send(
             Msg::Err {
                 error: format!("proto {} here, {proto} offered", crate::proto::PROTO),
+                code: "proto_mismatch".into(),
+                head: String::new(),
+                proto: crate::proto::PROTO.to_string(),
             },
             hello.0.req,
             &[],
