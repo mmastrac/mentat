@@ -35,10 +35,10 @@ pub struct Frame {
     pub req: u64,
     #[serde(flatten)]
     pub msg: Msg,
-    /// The `t` of a message this build has no variant for, so a refusal can
-    /// report it. Empty for every message that parsed into a variant, and
-    /// never on the wire: `Msg` is internally tagged, so the tag reaches
-    /// `Unknown` nowhere else.
+    /// The `t` of a message that parsed as `Unknown`, so a refusal can
+    /// report it. Empty for every other message. `Msg` is internally tagged
+    /// and `Unknown` is a unit variant, so this field is the only place the
+    /// tag survives. It stays out of the serialized frame.
     #[serde(skip)]
     pub unknown_t: String,
 }
@@ -178,8 +178,8 @@ pub enum Msg {
     ///
     /// `error` is for a person: it reaches the caller as the message of its
     /// exception, and its wording is free to change. `code` is what a
-    /// program matches on, and a receiver that has no name for one treats
-    /// the refusal as it would with none.
+    /// program matches on. A receiver reading a `code` it does not know
+    /// treats the refusal as one with an empty `code`.
     Err {
         error: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -648,9 +648,8 @@ mod tests {
         assert!(matches!(frame.msg, Msg::Unknown), "{:?}", frame.msg);
     }
 
-    /// The tag survives a message this build has no variant for, so a
-    /// refusal reports what it refused. `Msg::Unknown` is a unit variant
-    /// with no fields of its own.
+    /// A refusal reports the `t` it refused. `Msg::Unknown` is a unit
+    /// variant, so the frame holds the tag instead.
     #[test]
     fn an_unknown_message_keeps_its_tag() {
         let mut buf: Vec<u8> = Vec::new();

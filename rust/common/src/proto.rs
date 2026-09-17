@@ -14,16 +14,16 @@ pub const PROTO: &str = "0.99";
 /// Whether `peer` shares this build's major.
 ///
 /// A major bump changes a field's type or meaning, so a mismatch refuses the
-/// link. A minor difference is compatible both ways, since a receiver drops
-/// what it has no field for. A version outside `<digits>.<digits>` is
-/// refused, which PROTOCOL.md states as the grammar and the shim applies in
-/// Python.
+/// link. A minor difference is compatible both ways, since a receiver keeps
+/// the fields it knows and drops the rest. A version outside
+/// `<digits>.<digits>` is refused. PROTOCOL.md gives that grammar and the
+/// Python shim applies the same rule.
 pub fn major_matches(peer: &str) -> bool {
     fn major(v: &str) -> Option<&str> {
         let (maj, rest) = v.split_once('.')?;
         let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-        // Leading zeros go, so the comparison is on the number rather than
-        // the spelling.
+        // Stripping leading zeros compares the number, so 00.1 and 0.1 are
+        // one version.
         (digits(maj) && digits(rest)).then(|| maj.trim_start_matches('0'))
     }
     match (major(PROTO), major(peer)) {

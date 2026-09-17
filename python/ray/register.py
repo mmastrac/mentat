@@ -113,6 +113,8 @@ def major_matches(peer):
     package into the actor host.
     """
     def major(v):
+        if not isinstance(v, str):
+            return None
         head, dot, tail = v.partition(".")
         if not dot or not head.isdigit() or not tail.isdigit():
             return None

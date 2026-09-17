@@ -391,11 +391,13 @@ fn sweep_history(st: &mut State) {
         return;
     }
     let before = st.refs.len();
-    // The paths, while the rows that give their group are still here.
+    // Collect the paths first. Each row holds the group its path needs.
     let mut gone: Vec<Patch> = Vec::new();
+    let mut touched_groups: Vec<String> = Vec::new();
     for id in &gone_actors {
         if let Some(a) = st.actors.get(id) {
             gone.push(Patch::remove(&["groups", &a.group, "actors", id]));
+            touched_groups.push(a.group.clone());
         }
     }
     for id in &gone_pgs {
@@ -406,6 +408,7 @@ fn sweep_history(st: &mut State) {
     for id in &gone_agents {
         if let Some(a) = st.agents.get(id) {
             gone.push(Patch::remove(&["groups", &a.group, "agents", id]));
+            touched_groups.push(a.group.clone());
         }
     }
     for id in &gone_actors {
@@ -420,6 +423,19 @@ fn sweep_history(st: &mut State) {
     }
     st.refs
         .retain(|_, r| r.actor.as_ref().is_none_or(|a| st.actors.contains_key(a)));
+    // A snapshot builds `groups` from the agents and actors that mention
+    // one, so a group whose last row went is gone from the snapshot too.
+    let mut emptied: Vec<String> = touched_groups
+        .into_iter()
+        .filter(|g| {
+            !st.agents.values().any(|a| &a.group == g) && !st.actors.values().any(|a| &a.group == g)
+        })
+        .collect();
+    emptied.sort();
+    emptied.dedup();
+    for g in emptied {
+        gone.push(Patch::remove(&["groups", &g]));
+    }
     st.emit_patch("history_swept", gone, &format!("kept {keep} ms"));
     log(
         "history_swept",
@@ -720,6 +736,12 @@ pub fn head_moved(st: &mut State, old: &str) {
             touched.push((pg.group.clone(), pg.id.clone(), false));
         }
     }
+    // Releasing the groups frees their GPUs, so the agent rows moved too.
+    for (_, id, is_actor) in &touched {
+        if !is_actor {
+            patch.extend(agent_patches(st, id));
+        }
+    }
     for (group, id, is_actor) in touched {
         let entry = if is_actor {
             st.actors.get(&id).map(|a| {
@@ -996,7 +1018,7 @@ fn handle_client_msg(
                     },
                     Vec::new(),
                 ),
-                Err(error) => (Msg::error(error), Vec::new()),
+                Err(refusal) => (refusal, Vec::new()),
             }
         }
         Msg::PgCreate {
@@ -1300,15 +1322,18 @@ fn claimed_nodes(view: &Value) -> Vec<String> {
 /// own views could each hand out a placement, and islands are deliberately
 /// soft-consistent between daemons. The error gives the head so a caller can
 /// go there.
+// The refusal is a `Msg` so it can hold `code` and `head`. `Msg` is a wide
+// enum, and one claim per driver makes the size irrelevant here.
+#[allow(clippy::result_large_err)]
 fn claim(
     st: &mut State,
     client_id: &str,
     group: &str,
     name: &str,
     shape: &Value,
-) -> Result<(u64, Value), String> {
+) -> Result<(u64, Value), Msg> {
     if name.trim().is_empty() {
-        return Err("a claim needs a name".into());
+        return Err(Msg::refused("bad_claim_name", "a claim needs a name"));
     }
     if st.head_node_id != st.node_id {
         let addr = st
@@ -1317,25 +1342,34 @@ fn claim(
             .find(|p| p.node_id == st.head_node_id)
             .map(|p| format!("{}:{}", p.node_ip, p.control_port))
             .unwrap_or_default();
-        return Err(format!(
-            "this node is not the head. Send claims to {} at {addr}",
-            st.head_node_id
-        ));
+        // The caller retries against the head, so the address goes in a
+        // field rather than only in the sentence.
+        return Err(Msg::Err {
+            error: format!(
+                "this node is not the head. Send claims to {} at {addr}",
+                st.head_node_id
+            ),
+            code: "not_head".into(),
+            head: addr,
+            proto: String::new(),
+        });
     }
     let key = (group.to_string(), name.to_string());
     if let Some(c) = st.claims.get_mut(&key) {
         // Both are canonical, so `[1]` and `[1.0]` match here.
         if c.shape != crate::claim::canonical(shape) {
-            return Err(format!(
-                "claim {name:?} is held for a different shape. Use another name"
+            return Err(Msg::refused(
+                "shape_conflict",
+                format!("claim {name:?} is held for a different shape. Use another name"),
             ));
         }
         c.holders.insert(client_id.to_string());
         return Ok((c.generation, c.view.clone()));
     }
-    let req = crate::claim::parse(shape)?;
+    let req = crate::claim::parse(shape).map_err(|e| Msg::refused("bad_shape", e))?;
     let topo = crate::claim::topology(st);
-    let solution = crate::claim::solve(&topo, &req)?;
+    let solution =
+        crate::claim::solve(&topo, &req).map_err(|e| Msg::refused("unsolvable_claim", e))?;
     st.claim_generation += 1;
     let generation = st.claim_generation;
     let view = solution.to_json(&topo);

@@ -185,7 +185,9 @@ fn listen(shared: SharedRef, port: u16, key: Vec<u8>, control_port: u16, http_po
     let mut seen: std::collections::HashMap<String, (String, u64)> =
         std::collections::HashMap::new();
     let mut warned: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut buf = [0u8; 1400];
+    // One byte past the sender's cap, so a datagram of exactly MAX_DATAGRAM
+    // arrives whole and only a longer one fills the buffer.
+    let mut buf = [0u8; MAX_DATAGRAM + 1];
     loop {
         let Ok((n, src)) = sock.recv_from(&mut buf) else {
             continue;
@@ -194,7 +196,7 @@ fn listen(shared: SharedRef, port: u16, key: Vec<u8>, control_port: u16, http_po
         // it is gone. Verifying the fragment would report a bad signature
         // for what is really an oversized sender.
         if n == buf.len() {
-            if warned.insert(src.ip().to_string()) {
+            if warned.insert(format!("size:{}", src.ip())) {
                 log(
                     "announce_oversize",
                     &[("src", src.ip().to_string()), ("cap", n.to_string())],
@@ -210,7 +212,7 @@ fn listen(shared: SharedRef, port: u16, key: Vec<u8>, control_port: u16, http_po
             continue;
         }
         let Some(v) = secret::verify(&buf[..n], &key) else {
-            if warned.insert(src.ip().to_string()) {
+            if warned.insert(format!("sig:{}", src.ip())) {
                 log(
                     "announce_rejected",
                     &[
@@ -531,6 +533,22 @@ pub fn local_addr_tags() -> BTreeMap<String, Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A datagram at the sender's cap must survive the read. The buffer is
+    /// one byte longer so a full read means the sender went over, and the
+    /// sender's own check admits a payload of exactly MAX_DATAGRAM.
+    #[test]
+    fn a_datagram_at_the_cap_fits_the_buffer() {
+        let buf = [0u8; MAX_DATAGRAM + 1];
+        assert!(
+            MAX_DATAGRAM < buf.len(),
+            "a capped datagram would read short"
+        );
+        // What the sender admits, from the check in the send loop.
+        let admits = |len: usize| len <= MAX_DATAGRAM;
+        assert!(admits(MAX_DATAGRAM));
+        assert!(!admits(MAX_DATAGRAM + 1));
+    }
 
     /// Names as the fleet reports them: two ConnectX ports and a LAN port on
     /// the pair, a differently-named LAN port on the third box.

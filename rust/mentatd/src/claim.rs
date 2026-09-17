@@ -44,6 +44,18 @@ impl Link {
 /// The holder check compares shapes as JSON, so `[1]` and `[1.0]` would
 /// otherwise name two shapes and refuse the second holder of one claim.
 pub fn canonical(v: &Value) -> Value {
+    canon(v, false)
+}
+
+/// `inside_set` marks the object level where `bundles` may spell a count.
+fn canon(v: &Value, inside_set: bool) -> Value {
+    if inside_set {
+        if let Some(n) = v.as_u64() {
+            // `parse` reads a count as that many single-GPU bundles, so the
+            // two spellings of one request compare equal here too.
+            return Value::Array((0..n).map(|_| Value::from(1u64)).collect());
+        }
+    }
     match v {
         Value::Number(n) => match n.as_f64() {
             Some(f) if f.is_finite() && f >= 0.0 && f.fract() == 0.0 && f <= u64::MAX as f64 => {
@@ -51,10 +63,12 @@ pub fn canonical(v: &Value) -> Value {
             }
             _ => v.clone(),
         },
-        Value::Array(a) => Value::Array(a.iter().map(canonical).collect()),
-        Value::Object(o) => {
-            Value::Object(o.iter().map(|(k, x)| (k.clone(), canonical(x))).collect())
-        }
+        Value::Array(a) => Value::Array(a.iter().map(|x| canon(x, false)).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, x)| (k.clone(), canon(x, k == "bundles")))
+                .collect(),
+        ),
         _ => v.clone(),
     }
 }
@@ -653,6 +667,11 @@ mod tests {
         let floats = serde_json::json!({"sets": [{"name": "s", "bundles": [1.0, 2.0]}]});
         assert_eq!(canonical(&ints), canonical(&floats));
         assert_eq!(canonical(&floats), ints);
+
+        // A count spells the same request `parse` expands it into.
+        let count = serde_json::json!({"sets": [{"name": "s", "bundles": 2}]});
+        let pair = serde_json::json!({"sets": [{"name": "s", "bundles": [1, 1]}]});
+        assert_eq!(canonical(&count), canonical(&pair));
 
         let half = serde_json::json!({"sets": [{"name": "s", "bundles": [0.5]}]});
         let e = parse(&half).unwrap_err();

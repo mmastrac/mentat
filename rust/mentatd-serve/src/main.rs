@@ -1292,9 +1292,9 @@ async fn udp_listener(shared: Arc<Shared>) {
     // unroutable-looking, so the note lands once rather than every round.
     let mut noted: HashSet<String> = HashSet::new();
     let universe = secret::universe();
-    // One Ethernet frame, which is the sender's own cap. Anything longer
-    // is not an announcement this build wrote.
-    let mut buf = [0u8; 1400];
+    // One byte past the sender's cap of one Ethernet frame, so a datagram
+    // at the cap arrives whole and only a longer one fills the buffer.
+    let mut buf = [0u8; 1401];
     loop {
         let Ok((n, src)) = sock.recv_from(&mut buf).await else {
             continue;
@@ -1302,7 +1302,7 @@ async fn udp_listener(shared: Arc<Shared>) {
         // A datagram that filled the buffer was cut to fit. Verifying the
         // fragment would report a bad signature for an oversized sender.
         if n == buf.len() {
-            if warned.insert(src.ip().to_string()) {
+            if warned.insert(format!("size:{}", src.ip())) {
                 log(
                     "announce_oversize",
                     &[("src", src.ip().to_string()), ("cap", n.to_string())],
@@ -1320,7 +1320,7 @@ async fn udp_listener(shared: Arc<Shared>) {
         let Some(v) = secret::verify(&buf[..n], &key) else {
             // A wrong key and a stripped signature look the same from here,
             // and both mean the sender cannot be trusted.
-            if warned.insert(src.ip().to_string()) {
+            if warned.insert(format!("sig:{}", src.ip())) {
                 log(
                     "announce_rejected",
                     &[
@@ -1397,7 +1397,7 @@ async fn udp_listener(shared: Arc<Shared>) {
         if !shared.cfg.allowed_sources.permits(&src_ip, &local) {
             // Named once per source. A dropped announcement is otherwise an
             // empty cluster with no stated cause.
-            if warned.insert(src_ip.clone()) {
+            if warned.insert(format!("allow:{src_ip}")) {
                 log(
                     "announce_source_not_allowed",
                     &[
