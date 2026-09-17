@@ -696,7 +696,7 @@ mod tests {
                     name: n.to_string(),
                     bundles: vec![1.0; *k],
                     link: *l,
-                        vendor: String::new(),
+                    vendor: String::new(),
                 })
                 .collect(),
             between: between

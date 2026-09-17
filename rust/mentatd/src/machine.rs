@@ -35,7 +35,10 @@ pub fn detect_machine() -> Machine {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    let machine = parse(&String::from_utf8_lossy(&out.stdout), &probe.display().to_string());
+    let machine = parse(
+        &String::from_utf8_lossy(&out.stdout),
+        &probe.display().to_string(),
+    );
     log(
         "machine_probed",
         &[

@@ -371,7 +371,10 @@ pub fn render(data: &Value, scoped: bool) -> String {
             g["gpus_total"].as_f64().unwrap_or(0.0) as u64,
         ));
         for (id, a) in g["agents"].as_object().into_iter().flatten() {
-            let gpus = a["machine"]["gpus"].as_array().map(|v| v.len()).unwrap_or(0);
+            let gpus = a["machine"]["gpus"]
+                .as_array()
+                .map(|v| v.len())
+                .unwrap_or(0);
             let free = a["gpus_free"].as_array().map(|v| v.len()).unwrap_or(0);
             // One line per agent, so the vendor set of its devices rather
             // than one vendor: a box may hold two models.

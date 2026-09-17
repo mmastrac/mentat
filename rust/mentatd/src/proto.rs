@@ -605,5 +605,4 @@ mod tests {
         let mut cur = std::io::Cursor::new(buf);
         assert!(read_frame(&mut cur).is_err());
     }
-
 }

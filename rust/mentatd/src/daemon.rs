@@ -13,10 +13,10 @@ use serde_json::{json, Value};
 
 use crate::config::cfg;
 use crate::proto::{read_frame, Frame, Msg};
-use crate::state::{Patch, 
+use crate::state::{
     local_ip_toward, node_id_for, write_json_file, ActorInfo, ActorState, AgentInfo,
-    BundleAssignment, ClaimInfo, ClientInfo, FrameWriter, PgInfo, PgState, RefInfo, RefState,
-    Shared, SharedRef, State,
+    BundleAssignment, ClaimInfo, ClientInfo, FrameWriter, Patch, PgInfo, PgState, RefInfo,
+    RefState, Shared, SharedRef, State,
 };
 use mentat_common::logfmt::log;
 
@@ -195,7 +195,10 @@ fn sweep_lifecycle(shared: &SharedRef) {
         if let Some(row) = row {
             st.emit_patch(
                 "pg_timeout",
-                vec![Patch::set(&["groups", &group, "placement_groups", &pg_id], row)],
+                vec![Patch::set(
+                    &["groups", &group, "placement_groups", &pg_id],
+                    row,
+                )],
                 &format!("waited {age} ms: {why}"),
             );
         }
@@ -229,7 +232,10 @@ fn sweep_lifecycle(shared: &SharedRef) {
                 ("down_ms", down.to_string()),
             ],
         );
-        let row = st.agents.get(&agent).map(|a| crate::status::agent_row(&st, a));
+        let row = st
+            .agents
+            .get(&agent)
+            .map(|a| crate::status::agent_row(&st, a));
         if let Some(row) = row {
             st.emit_patch(
                 "agent_degraded",
@@ -254,7 +260,10 @@ fn sweep_lifecycle(shared: &SharedRef) {
                 ("actors", orphaned.len().to_string()),
             ],
         );
-        let row = st.agents.get(&agent).map(|a| crate::status::agent_row(&st, a));
+        let row = st
+            .agents
+            .get(&agent)
+            .map(|a| crate::status::agent_row(&st, a));
         if let Some(row) = row {
             st.emit_patch(
                 "agent_dead",
@@ -809,11 +818,9 @@ fn handle_client_msg(
                 node_entry(&st.node_id, &st.node_ip, 0.0, 8.0, 0.0),
             );
             for a in st.agents.values().filter(|a| a.alive && a.group == group) {
-                let e = nodes
-                    .entry(a.node_id.clone())
-                    .or_insert_with(|| {
-                        node_entry(&a.node_id, &a.node_ip, 0.0, a.machine.cpus as f64, 0.0)
-                    });
+                let e = nodes.entry(a.node_id.clone()).or_insert_with(|| {
+                    node_entry(&a.node_id, &a.node_ip, 0.0, a.machine.cpus as f64, 0.0)
+                });
                 if let Some(res) = e.get_mut("Resources").and_then(|r| r.as_object_mut()) {
                     let g = res.get("GPU").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     res.insert("GPU".into(), json!(g + a.machine.gpus.len() as f64));
@@ -921,7 +928,10 @@ fn handle_client_msg(
             if let Some(row) = row {
                 st.emit_patch(
                     "pg_created",
-                    vec![Patch::set(&["groups", &group, "placement_groups", &pg_id], row)],
+                    vec![Patch::set(
+                        &["groups", &group, "placement_groups", &pg_id],
+                        row,
+                    )],
                     "",
                 );
             }
@@ -1850,7 +1860,10 @@ pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
         if let Some(row) = row {
             st.emit_patch(
                 "pg_ready",
-                vec![Patch::set(&["groups", &group, "placement_groups", &pg_id], row)],
+                vec![Patch::set(
+                    &["groups", &group, "placement_groups", &pg_id],
+                    row,
+                )],
                 "",
             );
         }
@@ -2595,7 +2608,10 @@ fn agent_conn(
         } else {
             String::new()
         };
-        let row = st.agents.get(&agent_id).map(|a| crate::status::agent_row(&st, a));
+        let row = st
+            .agents
+            .get(&agent_id)
+            .map(|a| crate::status::agent_row(&st, a));
         if let Some(row) = row {
             st.emit_patch(
                 "agent_lost",
