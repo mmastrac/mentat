@@ -527,7 +527,7 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
             writer,
             alive: true,
             last_seen_ms: now_ms_u64(),
-            dead_since_ms: 0,
+            dead_since_ms: None,
             stale: false,
             last_status,
         },
@@ -627,7 +627,7 @@ fn peer_loop(
     if owned {
         if let Some(p) = st.peers.get_mut(&peer_id) {
             p.alive = false;
-            p.dead_since_ms = now_ms_u64();
+            p.dead_since_ms = Some(now_ms_u64());
         }
         st.emit_patch(
             "node_leave",
@@ -691,7 +691,7 @@ fn staleness_sweeper(shared: SharedRef) {
             let silent = now.saturating_sub(p.last_seen_ms);
             if silent >= dead_after {
                 p.alive = false;
-                p.dead_since_ms = now;
+                p.dead_since_ms = Some(now);
                 p.writer.shutdown();
                 gone.push((p.node_id.clone(), silent));
             } else if silent >= stale_after && !p.stale {
@@ -722,7 +722,7 @@ fn staleness_sweeper(shared: SharedRef) {
         let forget: Vec<String> = st
             .peers
             .values()
-            .filter(|p| !p.alive && now.saturating_sub(p.dead_since_ms) > keep)
+            .filter(|p| !p.alive && now.saturating_sub(p.dead_since_ms.unwrap_or(0)) > keep)
             .map(|p| p.node_id.clone())
             .collect();
         for id in forget {
@@ -914,7 +914,7 @@ fn probe_peer(
                 .or_insert(PairProbe {
                     ok: false,
                     rtt_ms: 0,
-                    last_ok_ms: 0,
+                    last_ok_ms: None,
                     error: String::new(),
                 });
             let was = cell.ok;
@@ -922,7 +922,7 @@ fn probe_peer(
                 Ok(rtt) => {
                     cell.ok = true;
                     cell.rtt_ms = rtt.as_millis() as u64;
-                    cell.last_ok_ms = now;
+                    cell.last_ok_ms = Some(now);
                     cell.error.clear();
                 }
                 Err(e) => {

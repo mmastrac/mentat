@@ -266,8 +266,8 @@ pub struct PairProbe {
     pub ok: bool,
     /// Round trip of the last successful probe: connect, frame, reply.
     pub rtt_ms: u64,
-    /// When the pair last replied. 0 means it never has.
-    pub last_ok_ms: u64,
+    /// When the pair last replied, or null if it never has.
+    pub last_ok_ms: Option<u64>,
     /// Why the last attempt failed. Empty while ok.
     pub error: String,
 }
@@ -303,9 +303,9 @@ pub struct PeerInfo {
     pub writer: FrameWriter,
     pub alive: bool,
     pub last_seen_ms: u64,
-    /// When the link was declared gone. 0 while alive. A dead row is kept
-    /// this long past it for an operator to see, then dropped.
-    pub dead_since_ms: u64,
+    /// When the link was declared gone, or null while alive. A dead row is
+    /// kept this long past it for an operator to see, then dropped.
+    pub dead_since_ms: Option<u64>,
     /// The staleness warning has fired for the current silence.
     pub stale: bool,
     pub last_status: Value,

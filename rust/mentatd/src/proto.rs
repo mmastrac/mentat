@@ -217,6 +217,7 @@ pub enum Msg {
         services: BTreeMap<String, Service>,
         /// Actor processes still running from before this register, so a
         /// daemon that lost its state adopts them rather than orphaning them.
+        #[serde(default)]
         resume: Vec<ResumeActor>,
         /// Refs whose results the agent buffered through a link outage and
         /// re-sends right after this frame. The daemon holds them pending

@@ -43,15 +43,22 @@ through untouched. Most are empty. The header is a JSON object:
 {"req": 41, "t": "err", "error": "no such actor a1"}
 ```
 
-`t` selects the message. `req` correlates a response with its request;
-unsolicited messages use 0. Request `x` gets `x_ok`, or `ok` when it does
-not have a result, or `err`. A message uses its subject's prefix: `pg_`
-placement group, `actor_`, `agent_`, `peer_` mesh peer, `host_` actor host,
-`claim_`, `ref_` object ref. The rest are bare: `hello` opens a link, and
-`nodes`, `resources`, `available` and `status` read cluster state. Memory
-and byte counts are integers, in bytes. Ray-shaped responses (`nodes_ok`,
-`resources_ok`, `available_ok`, `pg_table_ok`) use floats because Ray does;
-every other number is an integer.
+`t` selects the message. `req` correlates a response with its request.
+Unsolicited messages use 0, as does an omitted `req`. Request `x` gets
+`x_ok`, or `ok` when it does not have a result, or `err`. A message uses its
+subject's prefix: `pg_` placement group, `actor_`, `agent_`, `peer_` mesh
+peer, `host_` actor host, `claim_`, `ref_` object ref. The rest are bare:
+`hello` opens a link, and `nodes`, `resources`, `available` and `status`
+read cluster state. Memory and byte counts are integers, in bytes.
+Ray-shaped responses (`nodes_ok`, `resources_ok`, `available_ok`,
+`pg_table_ok`) use floats because Ray does. Every other number is an
+integer.
+
+A field written `name?` may be left out. A receiver that does not find one
+uses the empty value for its type: `""`, `[]`, `{}`, `false`, `0`, or
+`null` where the field is nullable. Every other field is required, and a
+later minor version may add optional fields but never require an existing
+one.
 
 ## Connection start
 
@@ -113,20 +120,20 @@ holder never resolves one: they are keys in the snapshot and fields in
 
 | Request | Fields | Response |
 | --- | --- | --- |
-| `hello` | `proto`, `client_id`, `group`, `session`, `kind`, `node_ip` | `hello_ok`: `proto`, `node_id`, `node_ip`, `control_addr`, `head_node_id` |
+| `hello` | `proto`, `client_id`, `group`, `session`, `kind`, `node_ip?` | `hello_ok`: `proto`, `node_id`, `node_ip`, `control_addr`, `head_node_id` |
 | `nodes` | | `nodes_ok`: `nodes`, one Ray-shaped row per node |
 | `resources` | | `resources_ok`: `resources`, the row keys summed over the group |
 | `available` | | `available_ok`: `nodes`, node id to the row keys, with `GPU` the free device count and `memory` the total, since memory is never reserved |
-| `pg_create` | `bundles`, `strategy`, `claim` | `pg_create_ok`: `pg_id` |
+| `pg_create` | `bundles`, `strategy`, `claim?` | `pg_create_ok`: `pg_id` |
 | `pg_table` | `pg_id` | `pg_table_ok`: `table` |
 | `pg_remove` | `pg_id` | `ok` |
 | `actor_create` | `name`, `num_gpus`, `pg_id`, `bundle_index`, `env`. Payload: pickled `(cls, args, kwargs)` | `actor_create_ok`: `actor_id`, `node_id`, `gpu_ids` |
 | `actor_call` | `actor_id`, `method`. Payload: pickled `(args, kwargs)` | `actor_call_ok`: `ref_id`, resolved later by `ref_get` (see "Ids") |
 | `actor_kill` | `actor_id` | `ok` |
-| `ref_get` | `ref_id`, `timeout_ms` | `ref_get_ok`: `status`, `reason`. Payload: the pickled result |
-| `ref_wait` | `ref_ids`, `num_returns`, `timeout_ms` | `ref_wait_ok`: `ready` |
-| `status` | `group` (optional) | `status_ok`: `snapshot` |
-| `actor_stop` | `group`, or `all` | `ok` |
+| `ref_get` | `ref_id`, `timeout_ms?` | `ref_get_ok`: `status`, `reason?`. Payload: the pickled result |
+| `ref_wait` | `ref_ids`, `num_returns`, `timeout_ms?` | `ref_wait_ok`: `ready` |
+| `status` | `group?` | `status_ok`: `snapshot` |
+| `actor_stop` | `group?` or `all?`, exactly one | `ok` |
 | `claim` | `name`, `shape` | `claim_ok`: `name`, `generation`, `view` |
 
 `kind` is `driver` or `cli`. Exactly one connection per driver sets
@@ -153,7 +160,7 @@ A node row, with the daemon's own node always present:
 | `claim` | A claim this placement group sits inside, or empty |
 | `table` | Ray's: `placement_group_id`, `name`, `strategy`, `state`, `bundles` (index string to `{"GPU": n}`), `bundles_to_node_id`, `stats` |
 | `state` | `PENDING`, `CREATED` or `REMOVED` |
-| `timeout_ms` | Null blocks, 0 polls |
+| `timeout_ms?` | Null blocks, 0 polls. Omitted is null, so a caller that leaves it out waits forever |
 | `ref_get_ok.status` | `ok`, `error`, `actor_died` or `timeout`, with `reason` filled for `actor_died` |
 
 `actor_stop` kills one group's actors, or every group's with `all`. The
@@ -229,12 +236,12 @@ spilling outside it would split ranks that agreed on one view.
 
 | Direction | Message | Fields |
 | --- | --- | --- |
-| Agent → daemon | `agent_register` | `proto`, `agent_id`, `group`, `node_ip`, `container`, `pid`, `machine`, `services`, `resume`, `unacked_refs` |
+| Agent → daemon | `agent_register` | `proto`, `agent_id`, `group`, `node_ip`, `container`, `pid`, `machine`, `services?`, `resume?`, `unacked_refs?` |
 | Daemon → agent | `agent_register_ok` | `proto`, `node_id` |
 | Daemon → agent | `actor_spawn` | `actor_id`, `name`, `env`, `gpu_ids`, `owner`. Payload: pickled `(cls, args, kwargs)`. `MENTAT_NODE_ID` and `MENTAT_GCS_ADDRESS` reach the process through `env` |
-| Agent → daemon | `actor_spawn_result` | `actor_id`, `ok`, `error`, `pid` (0 when the failure came before the fork) |
+| Agent → daemon | `actor_spawn_result` | `actor_id`, `ok`, `error?`, `pid?` (0 when the failure came before the fork) |
 | Daemon → agent | `actor_dispatch` | `actor_id`, `ref_id`, `method`. Payload: pickled `(args, kwargs)` |
-| Agent → daemon | `actor_result` | `ref_id`, `ok`, `error`. Payload: pickled result or exception |
+| Agent → daemon | `actor_result` | `ref_id`, `ok`, `error?`. Payload: pickled result or exception |
 | Agent → daemon | `actor_exit` | `actor_id`, `exit_code`, `signal`, each nullable |
 | Daemon → agent | `actor_kill` | `actor_id`. The client message, forwarded unchanged |
 | Agent → daemon | `service_note` | `service`, `note`. Empty `note` clears |
@@ -257,8 +264,8 @@ spilling outside it would split ranks that agreed on one view.
 
 | Field | Value |
 | --- | --- |
-| `actor_result.error` | Set, with an empty payload, when mentat itself failed. Only a Python failure has an exception to pickle |
-| `resume` | Actors alive across a reconnect, each with its `owner`, so a daemon that lost its state rebuilds who owns what |
+| `actor_result.error?` | Set, with an empty payload, when mentat itself failed. Only a Python failure has an exception to pickle |
+| `resume` | Actors alive across a reconnect, each with its `owner?`, so a daemon that lost its state rebuilds who owns what |
 | `unacked_refs` | Ref ids whose results are buffered agent-side and follow the register. The daemon holds them pending until they arrive |
 
 | Field | Value |
@@ -268,7 +275,7 @@ spilling outside it would split ranks that agreed on one view.
 | `index` | What `spawn.gpu_ids` lists |
 | `name` | The vendor's product string |
 | `memory` | The device's own memory |
-| `uma` | True for a device sharing the system pool (DGX Spark) |
+| `uma?` | True for a device sharing the system pool (DGX Spark) |
 
 A UMA device's `memory` is that pool, the same figure as the machine's, so
 adding the two counts it twice.
@@ -279,9 +286,9 @@ selection").
 
 | Field | Value |
 | --- | --- |
-| `host`, `port`, `path` | From `MENTAT_<NAME>_API`: `8000/v1` and `http://0.0.0.0:8000/v1` give an empty `host`, `http://10.0.0.1:8000/v1` sets it, any other value is an error at start |
-| `provider` | From `MENTAT_MODEL_PROVIDER`. Names what serves the endpoint; the daemon stores and forwards it unread |
-| `note` | What the agent found after announcing, such as its server binding one address. A failed probe quotes it |
+| `host?`, `port`, `path?` | From `MENTAT_<NAME>_API`: `8000/v1` and `http://0.0.0.0:8000/v1` give an empty `host`, `http://10.0.0.1:8000/v1` sets it, any other value is an error at start |
+| `provider?` | From `MENTAT_MODEL_PROVIDER`. Names what serves the endpoint. The daemon stores and forwards it unread |
+| `note?` | What the agent found after announcing, such as its server binding one address. A failed probe quotes it |
 
 ## Mesh link
 
@@ -332,7 +339,7 @@ The socket is per actor, so the process identifies itself by connecting.
 | --- | --- |
 | `host_hello` | `proto`. The process is ready for `ctor`. The shim ships in the model image and the agent in the daemon's, so both ends check the major here |
 | `ctor` | `proto`. Payload: pickled `(cls, args, kwargs)` |
-| `ctor_ok` / `ctor_err` | `ctor_err` sends `error`, the exception's repr, with the pickled exception |
+| `ctor_ok` / `ctor_err` | `ctor_err` sends `error?`, the exception's repr, with the pickled exception |
 | `host_call` | `ref_id`, `method`. Payload: pickled `(args, kwargs)` |
 | `host_result` | `ref_id`, `ok`. Payload: pickled result or exception |
 
@@ -466,7 +473,7 @@ the same object. `?group=` on `/status` and `group` on `status` scope it.
    "addr_ifaces": {...}, "control_port": 6379, "http_port": 6380,
    "alive": true, "stale": false, "last_seen_ms": 0, "dead_since_ms": null,
    "probes": {"<local>": {"<remote>": {"ok": true, "rtt_ms": 0,
-                                       "last_ok_ms": 0, "error": ""}}},
+                                       "last_ok_ms": null, "error": ""}}},
    "groups": {"<group>": {"gpus_total": 2, "gpus_used": 1}}}},
  "clients": {"<client_id>": {"group": "glm", "kind": "driver",
                              "node_id": "...", "session": true}},

@@ -122,7 +122,7 @@ def t02b_probes_cover_each_address_pair():
 
     p = wait_for(pairs, 20, "d1 to probe every address pair to d2")
     assert p["127.0.0.1"]["127.0.0.1"]["ok"], p
-    assert p["127.0.0.1"]["127.0.0.1"]["last_ok_ms"] > 0, p
+    assert p["127.0.0.1"]["127.0.0.1"]["last_ok_ms"], p
     # Three of the four pairs use an address this box does not hold.
     assert not p["127.0.0.1"][BOGUS]["ok"], p
     assert not p[BOGUS]["127.0.0.1"]["ok"], p
