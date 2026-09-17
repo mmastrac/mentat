@@ -294,6 +294,63 @@ fn sweep_lifecycle(shared: &SharedRef) {
 /// a daemon restart, which rebuilds the tables from the agents before any
 /// driver reconnects.
 ///
+/// Record why a placement group cannot be placed, reporting a reason that
+/// differs from the one already on the row.
+///
+/// `try_place` runs on every state change, so an unconditional event would
+/// repeat one reason for as long as the group waits.
+fn set_pending_reason(st: &mut State, pg_id: &str, why: String) {
+    let same = st
+        .pgs
+        .get(pg_id)
+        .is_some_and(|pg| pg.pending_reason.as_deref() == Some(why.as_str()));
+    if same {
+        return;
+    }
+    let Some(group) = st.pgs.get_mut(pg_id).map(|pg| {
+        pg.pending_reason = Some(why);
+        pg.group.clone()
+    }) else {
+        return;
+    };
+    let row = st.pgs.get(pg_id).map(crate::status::pg_row);
+    if let Some(row) = row {
+        st.emit_patch(
+            "pg_pending",
+            vec![Patch::set(
+                &["groups", &group, "placement_groups", pg_id],
+                row,
+            )],
+            "",
+        );
+    }
+}
+
+/// Row patches for the agents a placement group reserves GPUs on.
+///
+/// `gpus_free` on an agent row counts what no placement group holds, so
+/// placing or removing one changes every agent it touches. Without these the
+/// pg row moves and the agent rows beside it go stale.
+fn agent_patches(st: &State, pg_id: &str) -> Vec<Patch> {
+    let Some(pg) = st.pgs.get(pg_id) else {
+        return Vec::new();
+    };
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for b in pg.assignment.iter().flatten() {
+        if !seen.insert(b.agent.as_str()) {
+            continue;
+        }
+        if let Some(a) = st.agents.get(&b.agent) {
+            out.push(Patch::set(
+                &["groups", &a.group, "agents", &b.agent],
+                crate::status::agent_row(st, a),
+            ));
+        }
+    }
+    out
+}
+
 /// A group is whatever agents and actors mention it, so its last row going
 /// removes it from every snapshot.
 fn sweep_history(st: &mut State) {
@@ -334,6 +391,23 @@ fn sweep_history(st: &mut State) {
         return;
     }
     let before = st.refs.len();
+    // The paths, while the rows that give their group are still here.
+    let mut gone: Vec<Patch> = Vec::new();
+    for id in &gone_actors {
+        if let Some(a) = st.actors.get(id) {
+            gone.push(Patch::remove(&["groups", &a.group, "actors", id]));
+        }
+    }
+    for id in &gone_pgs {
+        if let Some(p) = st.pgs.get(id) {
+            gone.push(Patch::remove(&["groups", &p.group, "placement_groups", id]));
+        }
+    }
+    for id in &gone_agents {
+        if let Some(a) = st.agents.get(id) {
+            gone.push(Patch::remove(&["groups", &a.group, "agents", id]));
+        }
+    }
     for id in &gone_actors {
         st.actors.remove(id);
     }
@@ -346,6 +420,7 @@ fn sweep_history(st: &mut State) {
     }
     st.refs
         .retain(|_, r| r.actor.as_ref().is_none_or(|a| st.actors.contains_key(a)));
+    st.emit_patch("history_swept", gone, &format!("kept {keep} ms"));
     log(
         "history_swept",
         &[
@@ -613,24 +688,60 @@ pub fn head_moved(st: &mut State, old: &str) {
     for (_, w) in st.client_links.drain(..) {
         w.shutdown();
     }
+    // The rows go in one event, so a consumer applying it lands where a
+    // consumer re-reading /status lands.
+    let mut patch: Vec<Patch> = st
+        .clients
+        .keys()
+        .map(|id| Patch::remove(&["clients", id]))
+        .chain(
+            st.claims
+                .keys()
+                .map(|(g, name)| Patch::remove(&["groups", g, "claims", name])),
+        )
+        .collect();
     st.clients.clear();
     st.claims.clear();
     st.refs.clear();
     let now = crate::state::now_ms_u64();
+    let mut touched: Vec<(String, String, bool)> = Vec::new();
     for a in st.actors.values_mut() {
         if !matches!(a.state, ActorState::Dead { .. }) {
             a.state = ActorState::Dead {
                 reason: reason.clone(),
                 at_ms: now,
             };
+            touched.push((a.group.clone(), a.id.clone(), true));
         }
     }
     for pg in st.pgs.values_mut() {
         if pg.state != PgState::Removed {
             pg.state = PgState::Removed;
             pg.removed_ms = Some(now);
+            touched.push((pg.group.clone(), pg.id.clone(), false));
         }
     }
+    for (group, id, is_actor) in touched {
+        let entry = if is_actor {
+            st.actors.get(&id).map(|a| {
+                (
+                    ["groups", &group, "actors", &id],
+                    crate::status::actor_row(a),
+                )
+            })
+        } else {
+            st.pgs.get(&id).map(|p| {
+                (
+                    ["groups", &group, "placement_groups", &id],
+                    crate::status::pg_row(p),
+                )
+            })
+        };
+        if let Some((at, row)) = entry {
+            patch.push(Patch::set(&at, row));
+        }
+    }
+    st.emit_patch("head_moved", patch, &reason);
 }
 
 // ---------------------------------------------------------------------------
@@ -980,9 +1091,21 @@ fn handle_client_msg(
         }
         Msg::PgRemove { pg_id } => {
             let mut st = shared.st.lock().unwrap();
+            let group = st.pgs.get(&pg_id).map(|pg| pg.group.clone());
             if let Some(pg) = st.pgs.get_mut(&pg_id) {
                 pg.state = PgState::Removed;
                 pg.removed_ms = Some(crate::state::now_ms_u64());
+            }
+            // The row stays REMOVED until the history sweep drops it, so
+            // this sets it rather than removing the path.
+            let row = st.pgs.get(&pg_id).map(crate::status::pg_row);
+            if let (Some(group), Some(row)) = (group, row) {
+                let mut patch = vec![Patch::set(
+                    &["groups", &group, "placement_groups", &pg_id],
+                    row,
+                )];
+                patch.extend(agent_patches(&st, &pg_id));
+                st.emit_patch("pg_removed", patch, "");
             }
             try_place(&mut st, &shared.cv);
             (Msg::Ok, Vec::new())
@@ -1760,10 +1883,20 @@ fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
             .map(|a| a.id.clone())
             .collect();
         let now = crate::state::now_ms_u64();
+        let mut removed: Vec<(String, String)> = Vec::new();
         for pg in st.pgs.values_mut() {
             if pg.owner == client_id && pg.state != PgState::Removed {
                 pg.state = PgState::Removed;
                 pg.removed_ms = Some(now);
+                removed.push((pg.group.clone(), pg.id.clone()));
+            }
+        }
+        for (g, pg_id) in removed {
+            let row = st.pgs.get(&pg_id).map(crate::status::pg_row);
+            if let Some(row) = row {
+                let mut patch = vec![Patch::set(&["groups", &g, "placement_groups", &pg_id], row)];
+                patch.extend(agent_patches(&st, &pg_id));
+                st.emit_patch("pg_removed", patch, "driver session closed");
             }
         }
         if !ids.is_empty() {
@@ -1834,17 +1967,13 @@ pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
                 fit(st, &group, &bundles, &driver_node, nodes.as_deref()).map(|a| (island, a))
             }),
             Err(why) => {
-                if let Some(pg) = st.pgs.get_mut(&pg_id) {
-                    pg.pending_reason = Some(why);
-                }
+                set_pending_reason(st, &pg_id, why);
                 continue;
             }
         };
         let Some((island, assignment)) = placed else {
             let why = no_fit_reason(st, &group, &bundles);
-            if let Some(pg) = st.pgs.get_mut(&pg_id) {
-                pg.pending_reason = Some(why);
-            }
+            set_pending_reason(st, &pg_id, why);
             continue;
         };
 
@@ -1858,14 +1987,12 @@ pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
         }
         let row = st.pgs.get(&pg_id).map(crate::status::pg_row);
         if let Some(row) = row {
-            st.emit_patch(
-                "pg_ready",
-                vec![Patch::set(
-                    &["groups", &group, "placement_groups", &pg_id],
-                    row,
-                )],
-                "",
-            );
+            let mut patch = vec![Patch::set(
+                &["groups", &group, "placement_groups", &pg_id],
+                row,
+            )];
+            patch.extend(agent_patches(st, &pg_id));
+            st.emit_patch("pg_ready", patch, "");
         }
         let _ = (n, members);
         cv.notify_all();
@@ -2565,10 +2692,23 @@ fn agent_conn(
             }
             Msg::ServiceNote { service, note } => {
                 let mut st = shared.st.lock().unwrap();
-                if let Some(a) = st.agents.get_mut(&agent_id) {
-                    if let Some(s) = a.services.get_mut(&service) {
-                        s.note = note;
-                    }
+                let group = st.agents.get_mut(&agent_id).and_then(|a| {
+                    let s = a.services.get_mut(&service)?;
+                    s.note = note;
+                    Some(a.group.clone())
+                });
+                // The note reaches the router through the agent row, so the
+                // row change needs an event like any other.
+                let row = st
+                    .agents
+                    .get(&agent_id)
+                    .map(|a| crate::status::agent_row(&st, a));
+                if let (Some(group), Some(row)) = (group, row) {
+                    st.emit_patch(
+                        "service_note",
+                        vec![Patch::set(&["groups", &group, "agents", &agent_id], row)],
+                        &service,
+                    );
                 }
             }
             Msg::Ping => {

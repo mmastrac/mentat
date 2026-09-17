@@ -582,21 +582,27 @@ Paths below are written with `/` for reading. Each is the array of its keys.
 | `node_join`, `node_leave`, `peer_forgotten` | `peers/<node_id>` |
 | `head_change` | `head_node_id` and `head_generation`, which counts this daemon's own head changes and compares only against itself |
 | `islands_changed` | `islands` |
-| `agent_register`, `agent_lost`, `agent_degraded`, `agent_dead` | `groups/<group>/agents/<agent_id>` |
-| `pg_created`, `pg_ready`, `pg_timeout` | `groups/<group>/placement_groups/<pg_id>` |
+| `agent_register`, `agent_lost`, `agent_degraded`, `agent_dead`, `service_note` | `groups/<group>/agents/<agent_id>` |
+| `pg_created`, `pg_ready`, `pg_pending`, `pg_timeout`, `pg_removed` | `groups/<group>/placement_groups/<pg_id>` |
 | `actor_spawning`, `actor_running`, `actor_dead` | `groups/<group>/actors/<actor_id>` |
 | `driver_connected`, `driver_disconnected`, `driver_gone_reaping` | `clients/<client_id>` |
 | `claim_solved`, `claim_released` | `groups/<group>/claims/<name>` |
+| `history_swept`, `head_moved` | Several of the paths above in one patch |
 
-An event that empties a group also patches its `gpus_used`, and one changing
-membership patches `gpus_total`, since neither follows from the row alone.
+`history_swept` and `head_moved` each hold every row they changed, so a
+single event may mix removals and sets across several groups. A group's
+`gpus_total` and `gpus_used` are sums over its agent rows, so no event
+patches them directly. `gpus_free` on an agent row counts the devices no
+placement group holds, and `pg_ready` and `pg_removed` therefore include
+every agent row they moved.
 
-A removal patch comes from `peer_forgotten`, `claim_released` and
-`driver_disconnected` alone. Every other event sets a whole row.
-`node_leave` therefore leaves the peer in place with `alive` false and
-`dead_since_ms` filled, and `peer_forgotten` removes it after
-`MENTAT_HISTORY_KEEP_MS`, so a consumer applying events and one re-reading
-the snapshot hold the same table.
+An entry removes its path when the daemon has dropped the row, and sets a
+whole row otherwise. A row that the daemon keeps in a terminal state is set,
+so `node_leave` leaves the peer in place with `alive` false and
+`dead_since_ms` filled, and `pg_removed` leaves the group `REMOVED`.
+`peer_forgotten` and `history_swept` remove those paths once the daemon
+forgets them, so a consumer applying events and one re-reading the snapshot
+hold the same tables.
 
 A consumer applies events in `seq` order per originating `node` and re-reads
 the snapshot on a gap, since a missed event leaves the view wrong. Counters
