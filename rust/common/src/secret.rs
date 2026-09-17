@@ -13,10 +13,6 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// The wire version an announcement payload holds. Every announcement is
-/// signed, so `proto` is the only discriminator a listener needs.
-pub const PROTO: &str = "0.99";
-
 /// A datagram older or newer than this is refused. Wide enough for clock
 /// skew between cluster boxes, narrow enough that a captured packet stops
 /// being useful quickly.

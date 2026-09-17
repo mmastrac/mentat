@@ -25,6 +25,26 @@ import time
 PROTO = "0.99"
 
 
+def major_matches(peer):
+    """Whether `peer` shares this module's major version.
+
+    PROTOCOL.md fixes the grammar as `<digits>.<digits>` and rust/common
+    applies the same rule. Anything outside it is refused. Each shim module
+    keeps its own copy because importing a sibling would pull the whole
+    package into the actor host.
+    """
+    def major(v):
+        head, dot, tail = v.partition(".")
+        if not dot or not head.isdigit() or not tail.isdigit():
+            return None
+        if not (head.isascii() and tail.isascii()):
+            return None
+        return head.lstrip("0")
+
+    a, b = major(PROTO), major(peer)
+    return a is not None and a == b
+
+
 def _send(sock, header, payload=b""):
     hb = json.dumps(header).encode("utf-8")
     sock.sendall(struct.pack("<II", len(hb), len(payload)) + hb + payload)
@@ -107,7 +127,7 @@ def main():
     # This shim ships in the model image and the agent in the daemon's, so
     # the two upgrade apart. A payload from another major unpickles wrong.
     offered = header.get("proto", "")
-    if offered.split(".")[0] != PROTO.split(".")[0]:
+    if not major_matches(offered):
         print(
             f"mentat host: agent proto {offered!r}, this host {PROTO}",
             file=sys.stderr,

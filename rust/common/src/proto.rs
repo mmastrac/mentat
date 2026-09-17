@@ -14,15 +14,17 @@ pub const PROTO: &str = "0.99";
 /// Whether `peer` shares this build's major.
 ///
 /// A major bump changes a field's type or meaning, so a mismatch refuses the
-/// link. A minor difference is compatible both ways: a peer sends nothing
-/// introduced after the minor its counterpart reported. An unparseable
-/// version is refused, since a peer that cannot state its version cannot be
-/// held to one.
+/// link. A minor difference is compatible both ways, since a receiver drops
+/// what it has no field for. A version outside `<digits>.<digits>` is
+/// refused, which PROTOCOL.md states as the grammar and the shim applies in
+/// Python.
 pub fn major_matches(peer: &str) -> bool {
     fn major(v: &str) -> Option<&str> {
         let (maj, rest) = v.split_once('.')?;
-        rest.parse::<u32>().ok()?;
-        Some(maj)
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        // Leading zeros go, so the comparison is on the number rather than
+        // the spelling.
+        (digits(maj) && digits(rest)).then(|| maj.trim_start_matches('0'))
     }
     match (major(PROTO), major(peer)) {
         (Some(a), Some(b)) => a == b,
@@ -45,5 +47,9 @@ mod tests {
         assert!(!major_matches("1.0"));
         assert!(!major_matches("nonsense"));
         assert!(!major_matches("1"));
+        assert!(!major_matches("0.1.2"), "three parts");
+        assert!(!major_matches("0abc.1"), "a major that is not digits");
+        assert!(!major_matches("0."), "an empty minor");
+        assert!(major_matches("00.1"), "leading zeros are the same number");
     }
 }

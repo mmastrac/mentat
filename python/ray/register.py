@@ -104,6 +104,26 @@ def agent_id(args):
 PROTO = "0.99"
 
 
+def major_matches(peer):
+    """Whether `peer` shares this module's major version.
+
+    PROTOCOL.md fixes the grammar as `<digits>.<digits>` and rust/common
+    applies the same rule. Anything outside it is refused. Each shim module
+    keeps its own copy because importing a sibling would pull the whole
+    package into the actor host.
+    """
+    def major(v):
+        head, dot, tail = v.partition(".")
+        if not dot or not head.isdigit() or not tail.isdigit():
+            return None
+        if not (head.isascii() and tail.isascii()):
+            return None
+        return head.lstrip("0")
+
+    a, b = major(PROTO), major(peer)
+    return a is not None and a == b
+
+
 def register_frame(args):
     """The `agent_register` header this process opens its connection with."""
     return {
@@ -177,7 +197,7 @@ def connect(args):
         if header.get("t") == "err":
             raise RuntimeError(header.get("error", "unknown error"))
         offered = header.get("proto", "")
-        if offered.split(".")[0] != PROTO.split(".")[0]:
+        if not major_matches(offered):
             raise SystemExit(
                 f"mentatd: daemon proto {offered!r}, this shim {PROTO}"
             )

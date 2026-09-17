@@ -8,9 +8,13 @@ variables named here.
 
 ## Version
 
-The version is `major.minor`. This document describes `0.99`, the 1.0
-candidate: the shapes here are 1.0's and the number moves once the spec is
-accepted. Both opening frames of every link set `"proto"`: `hello`/`hello_ok`,
+The version is `major.minor`, matching `[0-9]+\.[0-9]+` exactly, with the
+major compared as a number so leading zeros make no difference. Anything
+else is refused, since a peer that cannot state its version cannot be held
+to one. This document describes `0.99`, the 1.0 candidate: the shapes here
+are 1.0's and the number moves once the spec is accepted.
+
+Both opening frames of every link set `"proto"`: `hello`/`hello_ok`,
 `agent_register`/`agent_register_ok`, `peer_hello`/`peer_hello_ok`,
 `probe`/`probe_ok` and `host_hello`/`ctor`. So do the snapshot and the
 announcement payload.

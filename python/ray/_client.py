@@ -25,6 +25,26 @@ class MentatError(RuntimeError):
 PROTO = "0.99"
 
 
+def major_matches(peer):
+    """Whether `peer` shares this module's major version.
+
+    PROTOCOL.md fixes the grammar as `<digits>.<digits>` and rust/common
+    applies the same rule. Anything outside it is refused. Each shim module
+    keeps its own copy because importing a sibling would pull the whole
+    package into the actor host.
+    """
+    def major(v):
+        head, dot, tail = v.partition(".")
+        if not dot or not head.isdigit() or not tail.isdigit():
+            return None
+        if not (head.isascii() and tail.isascii()):
+            return None
+        return head.lstrip("0")
+
+    a, b = major(PROTO), major(peer)
+    return a is not None and a == b
+
+
 def _checked(answer, expect=None):
     """The daemon's answer, or its error raised.
 
@@ -134,7 +154,7 @@ class Connection:
             "hello_ok",
         )[0]
         offered = self.hello.get("proto", "")
-        if offered.split(".")[0] != PROTO.split(".")[0]:
+        if not major_matches(offered):
             raise MentatError(
                 f"mentat: daemon proto {offered!r}, this shim {PROTO}"
             )
