@@ -123,7 +123,31 @@ pub fn peer_row(p: &PeerInfo) -> Value {
         "stale": p.stale,
         "last_seen_ms": p.last_seen_ms,
         "dead_since_ms": p.dead_since_ms,
+        "groups": peer_groups(p),
     })
+}
+
+/// A peer's groups as its own snapshot last reported them, reduced to the
+/// GPU counts. The full detail is on that daemon's own `/status`.
+fn peer_groups(p: &PeerInfo) -> Value {
+    p.last_status["groups"]
+        .as_object()
+        .map(|gs| {
+            Value::Object(
+                gs.iter()
+                    .map(|(name, g)| {
+                        (
+                            name.clone(),
+                            json!({
+                                "gpus_total": g["gpus_total"],
+                                "gpus_used": g["gpus_used"],
+                            }),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .unwrap_or(Value::Null)
 }
 
 pub fn client_row(c: &crate::state::ClientInfo) -> Value {
@@ -204,49 +228,12 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
         );
     }
 
+    // The same builder the node_join and node_leave events use, so a
+    // consumer holds one shape whichever way it got the row.
     let peers: serde_json::Map<String, Value> = st
         .peers
         .values()
-        .map(|p| {
-            // Only a summary of the peer's groups. The full detail is on
-            // that daemon's own /status.
-            let peer_groups: Value = p.last_status["groups"]
-                .as_object()
-                .map(|gs| {
-                    Value::Object(
-                        gs.iter()
-                            .map(|(name, g)| {
-                                (
-                                    name.clone(),
-                                    json!({
-                                        "gpus_total": g["gpus_total"],
-                                        "gpus_used": g["gpus_used"],
-                                    }),
-                                )
-                            })
-                            .collect(),
-                    )
-                })
-                .unwrap_or(Value::Null);
-            (
-                p.node_id.clone(),
-                json!({
-                    "node_ip": p.node_ip,
-                    "link_ip": p.link_ip,
-                    "addrs": p.addrs,
-                    "addr_tags": p.addr_tags,
-                    "addr_ifaces": p.addr_ifaces,
-                    "probes": probe_table(p),
-                    "control_port": p.control_port,
-                    "http_port": p.http_port,
-                    "alive": p.alive,
-                    "stale": p.stale,
-                    "last_seen_ms": p.last_seen_ms,
-                    "dead_since_ms": p.dead_since_ms,
-                    "groups": peer_groups,
-                }),
-            )
-        })
+        .map(|p| (p.node_id.clone(), peer_row(p)))
         .collect();
 
     let clients: serde_json::Map<String, Value> = st

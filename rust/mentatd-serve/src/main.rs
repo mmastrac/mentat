@@ -2679,7 +2679,7 @@ mod tests {
     }
 
     /// A minor bump may add an event kind. Applying reads `patch` alone, so
-    /// an older router folds in a kind it has no name for.
+    /// an older router folds in a kind released after it.
     #[test]
     fn an_unknown_event_kind_still_applies_its_patch() {
         let mut v = snap();

@@ -593,8 +593,8 @@ mod tests {
         assert!(matches!(frame.msg, Msg::Unknown), "{:?}", frame.msg);
     }
 
-    /// A minor bump may add a field. No struct denies unknown fields, so a
-    /// receiver drops one it has no name for and reads the rest.
+    /// A minor bump may add a field. Every struct accepts unknown fields,
+    /// dropping them in parsing and reading the rest.
     #[test]
     fn a_field_from_a_later_minor_is_dropped() {
         let mut buf: Vec<u8> = Vec::new();

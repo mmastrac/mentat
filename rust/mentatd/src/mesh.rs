@@ -494,7 +494,15 @@ fn register_peer(shared: &SharedRef, p: PeerIdent, writer: FrameWriter) -> bool 
         .collect();
     for old in superseded {
         st.peers.remove(&old);
-        log("peer_superseded", &[("peer", old), ("by", node_id.clone())]);
+        log(
+            "peer_superseded",
+            &[("peer", old.clone()), ("by", node_id.clone())],
+        );
+        st.emit_patch(
+            "peer_forgotten",
+            vec![crate::state::Patch::remove(&["peers", &old])],
+            "superseded",
+        );
     }
 
     // A relink keeps the probed pairs and the last snapshot. The pairs

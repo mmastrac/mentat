@@ -16,15 +16,16 @@ accepted. Both opening frames of every link set `"proto"`: `hello`/`hello_ok`,
 announcement payload.
 
 A minor bump may add an optional field with a default, a message type, an
-event kind, a snapshot key or a metric. Compatibility rests on the receiver
-ignoring what it does not know: an unknown field is dropped in parsing, and
-an unknown event kind still applies its patch. A sender always sends its own
-current shape, since nothing records a counterpart's minor. Any other change
-is major.
+event kind, a snapshot key or a metric. The receiver absorbs the difference:
+an unknown field is dropped in parsing, and an unknown event kind still
+applies its patch. A sender always sends its own current shape, since
+nothing records a counterpart's minor. Any other change is major.
 
 `ref_get_ok.status` is a closed set, since the shim raises on a value it
-does not know, so adding one there is major. Actor and placement group
-`state` hold Ray's vocabulary, which fixes those the same way.
+does not know, so adding one there is major. Actor `state`
+(`spawning`, `running`, `dead`) and placement group `state` (`PENDING`,
+`CREATED`, `REMOVED`, Ray's words) stay open: a receiver matches the value
+it wants and passes the rest through, so a minor bump may add one.
 
 On a major mismatch the accepter returns `err` with its own `proto` and
 closes. The dialer closes on a mismatched reply. A mesh peer of another
@@ -145,7 +146,7 @@ holder never resolves one: they are keys in the snapshot and fields in
 actor, `actor` for a shim inside one, `thread` for a shim's extra per-thread
 connection, `cli` for a `mentatd` subcommand. The daemon stores it, logs it
 and reports it under `clients`. No daemon behaviour depends on the value, so
-a minor version may add one and a reader takes an unknown value as text.
+a minor version may add one and a reader treats an unknown value as text.
 
 Exactly one connection per driver sets `session: true`, and a second in one
 group is refused. An `actor`, `thread` or `cli` connection sets it false.
@@ -253,10 +254,10 @@ spilling outside it would split ranks that agreed on one view.
 | Agent → daemon | `actor_spawn_result` | `actor_id`, `ok`, `error?`, `pid?` (0 when the failure came before the fork) |
 | Daemon → agent | `actor_dispatch` | `actor_id`, `ref_id`, `method`. Payload: pickled `(args, kwargs)` |
 | Agent → daemon | `actor_result` | `ref_id`, `ok`, `error?`. Payload: pickled result or exception |
-| Agent → daemon | `actor_exit` | `actor_id`, `exit_code`, `signal`, each nullable |
+| Agent → daemon | `actor_exit` | `actor_id`, `exit_code?`, `signal?`, each nullable |
 | Daemon → agent | `actor_kill` | `actor_id`. The client message, forwarded unchanged |
 | Agent → daemon | `service_note` | `service`, `note`. Empty `note` clears |
-| Agent → daemon | `ping` | Sent every `MENTAT_AGENT_PING_INTERVAL_MS`; the daemon replies `pong` on the same `req`. The send fails once the daemon is gone. The daemon learns of a lost agent from EOF and does not send `ping` |
+| Agent → daemon | `ping` | Sent every `MENTAT_AGENT_PING_INTERVAL_MS`, and the daemon replies `pong` on the same `req`. The send fails once the daemon is gone. The daemon learns of a lost agent from EOF and does not send `ping` |
 
 ```json
 {"t": "agent_register", "proto": "0.99", "agent_id": "g1", "group": "glm",
@@ -298,7 +299,7 @@ selection").
 | Field | Value |
 | --- | --- |
 | `host?`, `port`, `path?` | From `MENTAT_<NAME>_API`: `8000/v1` and `http://0.0.0.0:8000/v1` give an empty `host`, `http://10.0.0.1:8000/v1` sets it, any other value is an error at start |
-| `provider?` | From `MENTAT_MODEL_PROVIDER`. Names what serves the endpoint. The daemon stores and forwards it unread |
+| `provider?` | From `MENTAT_MODEL_PROVIDER`, the label for what serves the endpoint. The daemon stores and forwards it unread |
 | `note?` | What the agent found after announcing, such as its server binding one address. A failed probe quotes it |
 
 ## Mesh link
@@ -329,7 +330,9 @@ of it as protocol input:
 | `head_node_id` | Election |
 | `addrs`, `addr_tags`, `addr_ifaces` | Refreshing the sending peer's own row |
 | `peers/<node_id>/alive`, `node_ip`, `control_port` | Dialing a peer's peers, so one seed address reaches the whole mesh |
-| `groups/<group>/gpus_total`, `gpus_used` | The per-group summary a peer row carries |
+| `peers/<node_id>/addrs`, `addr_tags` | Island membership, which decides where an `rdma` claim fits |
+| `peers/<node_id>/probes/<local>/<remote>/ok`, `rtt_ms` | The link topology a claim is solved against, and island membership |
+| `groups/<group>/gpus_total`, `gpus_used` | The per-group summary in a peer row |
 
 Every other key is output for the HTTP readers. Reshaping one of these is a
 mesh change and a major bump, whatever it does to `/status`.
@@ -388,8 +391,8 @@ signed:
 `sig` is HMAC-SHA256 over the payload in canonical form, keyed by
 `MENTAT_SECRET_FILE`'s contents or else `MENTAT_SECRET`. Canonical form is
 the payload as JSON with object keys sorted at every depth, no whitespace,
-`,` and `:` as separators, and non-ASCII left as UTF-8 rather than escaped
-to `\uXXXX`. Signing this payload with the key `k`:
+`,` and `:` as separators, and non-ASCII held as UTF-8 bytes. Signing this
+payload with the key `k`:
 
 ```json
 {"a":1,"b":[2,{"c":3,"d":4}],"universe":"kü"}
@@ -414,9 +417,9 @@ one without logging, since another cluster on the same broadcast domain is
 expected. It then verifies the signature, logging a bad one once per source,
 and checks `proto`, `t` and `seq`. The source address, and each advertised
 address before it is chosen, must pass `ALLOWED_SOURCES`, and a rejection is
-logged once. An announcement is a hint. For the router it adds a single
-address to watch. For a daemon it produces a single dial, after which
-`peer_hello` settles identity, version and link ownership. Every field is
+logged once. An announcement is a hint. For the router it adds one address
+to watch. For a daemon it produces one dial from which `peer_hello` settles
+identity, version and link ownership. Every field is
 re-read over TCP and probed before it affects routing, so an empty
 `MENTAT_PEERS` joins a daemon by putting it on the same broadcast domain.
 
@@ -576,9 +579,8 @@ Paths below are written with `/` for reading. Each is the array of its keys.
 An event that empties a group also patches its `gpus_used`, and one changing
 membership patches `gpus_total`, since neither follows from the row alone.
 
-A path is removed only when the daemon drops the row itself, which is
-`peer_forgotten`, `claim_released` and `driver_disconnected`. Every other
-event sets a whole row. `node_leave` therefore leaves the peer in place with
+A removal patch comes from `peer_forgotten`, `claim_released` and
+`driver_disconnected` alone. Every other event sets a whole row. `node_leave` therefore leaves the peer in place with
 `alive` false and `dead_since_ms` filled, and `peer_forgotten` removes it
 after `MENTAT_HISTORY_KEEP_MS`, so a consumer applying events and one
 re-reading the snapshot hold the same table.

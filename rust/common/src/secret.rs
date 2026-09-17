@@ -100,11 +100,12 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// The bytes a signature covers: compact JSON, object keys in byte order,
-/// non-ASCII as raw UTF-8. PROTOCOL.md carries the same definition.
+/// non-ASCII as raw UTF-8. PROTOCOL.md holds the same definition.
 ///
 /// Sorting explicitly keeps the bytes the same if a dependency turns on
-/// serde_json's `preserve_order`, which would otherwise re-sign every
-/// announcement differently.
+/// serde_json's `preserve_order`, which would otherwise change the bytes
+/// every signature covers. No test in this crate can see that, since
+/// `json!` builds a sorted map either way.
 ///
 /// The verifier re-serializes a payload it parsed, so every value in it must
 /// survive a JSON round trip. Integers and strings do. `f64` does not:
@@ -240,12 +241,12 @@ mod tests {
         assert_eq!(verify(b"{\"p\":{},\"sig\":\"zz\"}", b"k"), None);
     }
 
-    /// The canonical form, byte for byte, with the signature over it. Any
-    /// change here invalidates every deployed key. If this fails, fix the
-    /// change. tests/test_autoconfig.py pins the same vector from Python.
+    /// The canonical form, byte for byte, with the signature over it. A
+    /// change here stops every deployed signer and verifier from agreeing,
+    /// spark-agent included.
     ///
     /// Nested objects sort too, and non-ASCII stays raw UTF-8. Python's
-    /// `json.dumps` escapes it to `\u00fc` unless told `ensure_ascii=False`.
+    /// `json.dumps` writes `\u00fc` for it unless told `ensure_ascii=False`.
     #[test]
     fn canonical_form_is_pinned() {
         let v = serde_json::json!({"universe": "k\u{fc}", "b": [2, {"d": 4, "c": 3}], "a": 1});

@@ -276,7 +276,7 @@ def t07_a_lost_peer_is_marked_then_forgotten():
     assert json.loads(stream.frame(5)[1])["type"] == "snapshot"
     victim.kill()
 
-    leave, forgotten = None, None
+    leave, forgotten, snapshot_row = None, None, None
     deadline = time.time() + keep_ms / 1000 + 25
     for evt in stream.events(deadline):
         for entry in evt.get("patch", []):
@@ -286,6 +286,8 @@ def t07_a_lost_peer_is_marked_then_forgotten():
                 leave = entry
             elif evt["type"] == "peer_forgotten":
                 forgotten = entry
+        if leave and snapshot_row is None:
+            snapshot_row = watcher.status_json()["peers"].get(victim_id, {})
         if leave and forgotten:
             break
     stream.close()
@@ -294,6 +296,10 @@ def t07_a_lost_peer_is_marked_then_forgotten():
     assert "value" in leave, f"node_leave must set the row: {leave}"
     assert leave["value"]["alive"] is False, leave
     assert leave["value"]["dead_since_ms"], leave
+    # The event's row and the /status row have the same keys.
+    assert set(leave["value"]) == set(snapshot_row), (
+        sorted(set(leave["value"]) ^ set(snapshot_row))
+    )
 
     assert forgotten, f"no peer_forgotten within {keep_ms} ms"
     assert "value" not in forgotten, f"peer_forgotten must remove: {forgotten}"
