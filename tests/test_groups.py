@@ -202,6 +202,79 @@ else:
     assert inside is not None and len(inside) == 1, inside
 
 
+def t06_a_new_driver_places_once_the_old_actors_exit():
+    """The reap sent the kill and ran placement while the old actors were
+    still running, so the new driver's group pended behind GPUs that came
+    free a moment later and waited out MENTAT_PG_PENDING_TIMEOUT_MS.
+
+    The reap grace widens the window so the new driver's group is pending
+    when the old actor dies. The timeout is short so the unfixed daemon
+    fails in seconds.
+    """
+    c = tl.Cluster(daemon_env={
+        "MENTAT_SESSION_REAP_GRACE_MS": "1500",
+        "MENTAT_PG_PENDING_TIMEOUT_MS": "8000",
+    })
+    try:
+        c.start_agent("swap", gpus=1, container="sw", node_ip="127.0.0.1")
+        c.wait_group_gpus("swap", 1)
+        env = {
+            **os.environ,
+            "RAY_ADDRESS": c.address,
+            "MENTAT_GROUP": "swap",
+            "PYTHONPATH": os.pathsep.join([tl.PYTHON_PKG, HERE]),
+        }
+        old = """
+import os, sys
+sys.path[:0] = os.environ["PYTHONPATH"].split(os.pathsep)
+import ray
+from ray.util.placement_group import placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from fake_worker import FakeWorker
+ray.init()
+pg = placement_group([{"GPU": 1.0}])
+assert ray.wait([pg.ready()], timeout=15)[0]
+a = ray.remote(FakeWorker).options(
+    name="w0", num_gpus=1,
+    scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg,
+                                                         placement_group_bundle_index=0),
+).remote()
+ray.get(a.pid.remote(), timeout=30)
+a.block_forever.remote()
+os._exit(0)
+"""
+        r = subprocess.run([sys.executable, "-c", old], env=env,
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr[-400:]
+
+        new = """
+import os, sys, time
+sys.path[:0] = os.environ["PYTHONPATH"].split(os.pathsep)
+import ray
+from ray.util.placement_group import placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from fake_worker import FakeWorker
+ray.init()
+t0 = time.time()
+pg = placement_group([{"GPU": 1.0}])
+done, _ = ray.wait([pg.ready()], timeout=6)
+assert done, "the group is still pending after the old actor exited"
+ray.get(pg.ready())
+a = ray.remote(FakeWorker).options(
+    name="w0", num_gpus=1,
+    scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg,
+                                                         placement_group_bundle_index=0),
+).remote(rank=1)
+assert ray.get(a.echo.remote("took over"), timeout=30) == ("echo", 1, "took over")
+print("PLACED_AFTER %.1f" % (time.time() - t0), flush=True)
+"""
+        r = subprocess.run([sys.executable, "-c", new], env=env,
+                           capture_output=True, text=True, timeout=60)
+        assert "PLACED_AFTER" in r.stdout, (r.stdout + r.stderr)[-600:]
+    finally:
+        c.cleanup()
+
+
 def main():
     tests = [
         t01_tp4_placement_and_serving,
@@ -209,6 +282,7 @@ def main():
         t03_parallel_groups_share_nodes,
         t04_metrics_per_group,
         t05_a_claim_fences_placement,
+        t06_a_new_driver_places_once_the_old_actors_exit,
     ]
     try:
         for t in tests:

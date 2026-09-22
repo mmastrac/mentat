@@ -1882,6 +1882,9 @@ pub fn mark_actor_dead(st: &mut State, cv: &std::sync::Condvar, actor_id: &str, 
             };
         }
     }
+    // A live actor holds its GPUs, so its death frees them for a group
+    // waiting on them.
+    try_place(st, cv);
     cv.notify_all();
 }
 
@@ -2918,6 +2921,84 @@ mod tests {
         let mut st = state_with("driver-1", crate::state::now_ms_u64());
         sweep_history(&mut st);
         assert_eq!(st.actors.len(), 1);
+    }
+
+    /// A live agent with a single GPU. The socket is a loopback pair the
+    /// test never reads.
+    fn with_agent(mut st: State, id: &str) -> State {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let seq = st.seq();
+        st.agents.insert(
+            id.into(),
+            crate::state::AgentInfo {
+                id: id.into(),
+                group: "g".into(),
+                node_id: st.node_id.clone(),
+                node_ip: st.node_ip.clone(),
+                machine: crate::proto::Machine {
+                    memory: 0,
+                    cpus: 1,
+                    gpus: vec![crate::proto::Gpu {
+                        index: 0,
+                        vendor: "nvidia".into(),
+                        name: "fake".into(),
+                        memory: 0,
+                        uma: false,
+                    }],
+                },
+                container: "c".into(),
+                pid: 1,
+                services: Default::default(),
+                writer: crate::state::FrameWriter::new(stream),
+                alive: true,
+                lost_at_ms: None,
+                degraded: false,
+                gone_since_ms: None,
+                seq,
+            },
+        );
+        st
+    }
+
+    /// The old driver's reap sent the kill and ran placement while the
+    /// actor was still running, so the new driver's group pended behind a
+    /// GPU that came free a moment later. Nothing re-ran placement, and the
+    /// group waited out MENTAT_PG_PENDING_TIMEOUT_MS.
+    #[test]
+    fn an_actor_exit_places_the_group_waiting_on_its_gpu() {
+        let mut st = with_agent(state_with("driver-1", 0), "ag");
+        st.head_node_id = st.node_id.clone();
+        st.actors.get_mut("a1").unwrap().state = ActorState::Running;
+        let mut st = with_driver(st, "driver-2");
+        st.pgs.insert(
+            "p1".into(),
+            crate::state::PgInfo {
+                id: "p1".into(),
+                group: "g".into(),
+                owner: "driver-2".into(),
+                bundles: vec![1],
+                strategy: "PACK".into(),
+                assignment: vec![None],
+                state: crate::state::PgState::Pending,
+                created_ms: crate::state::now_ms_u64(),
+                fail_reason: None,
+                claim: String::new(),
+                island: None,
+                pending_reason: None,
+                removed_ms: None,
+            },
+        );
+        let cv = std::sync::Condvar::new();
+        super::try_place(&mut st, &cv);
+        assert_eq!(st.pgs["p1"].state, crate::state::PgState::Pending);
+
+        super::mark_actor_dead(&mut st, &cv, "a1", "actor process exited");
+        assert_eq!(st.pgs["p1"].state, crate::state::PgState::Created);
+        assert_eq!(
+            st.pgs["p1"].assignment[0].as_ref().unwrap().gpu_ids,
+            vec![0]
+        );
     }
 
     fn boxes() -> Vec<(String, String, Vec<String>)> {
