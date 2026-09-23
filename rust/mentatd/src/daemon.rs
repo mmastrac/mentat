@@ -739,12 +739,19 @@ pub fn head_moved(st: &mut State, old: &str) {
             touched.push((pg.group.clone(), pg.id.clone(), false));
         }
     }
-    // Releasing the groups frees their GPUs, so the agent rows moved too.
+    // Every GPU these actors and groups held is free now, so each agent they
+    // touched has a new row. An adopted actor holds GPUs with no group.
+    let mut agents: Vec<String> = Vec::new();
     for (_, id, is_actor) in &touched {
-        if !is_actor {
-            patch.extend(agent_patches(st, id));
+        if *is_actor {
+            agents.extend(st.actors.get(id).map(|a| a.agent.clone()));
+        } else if let Some(pg) = st.pgs.get(id) {
+            agents.extend(pg.assignment.iter().flatten().map(|b| b.agent.clone()));
         }
     }
+    agents.sort();
+    agents.dedup();
+    patch.extend(agents.iter().filter_map(|a| agent_patch(st, a)));
     for (group, id, is_actor) in touched {
         let entry = if is_actor {
             st.actors.get(&id).map(|a| {
@@ -774,15 +781,17 @@ pub fn head_moved(st: &mut State, old: &str) {
 
 /// The live actors in `group` that a new driver session for it replaces.
 ///
-/// A group holds one driver session, so an actor whose owner holds none
-/// belongs to a driver that is gone. An adopted actor has no reap pending,
-/// so killing it here is the only thing that frees its GPUs.
+/// A group holds one driver session. An actor whose owner lacks both a
+/// session and a pending reap belongs to a driver that is gone, such as one
+/// adopted after a daemon restart. A surviving driver that has yet to re-send
+/// `hello` after a restart counts as gone too.
 fn orphans_of(st: &State, group: &str, client_id: &str) -> Vec<String> {
     st.actors
         .values()
         .filter(|a| a.group == group && a.owner != client_id)
         .filter(|a| !matches!(a.state, ActorState::Dead { .. }))
         .filter(|a| !st.clients.get(&a.owner).is_some_and(|c| c.has_session))
+        .filter(|a| !st.reap_pending.contains(&a.owner))
         .map(|a| a.id.clone())
         .collect()
 }
@@ -910,7 +919,7 @@ fn client_conn(
         (client_id, session, orphans)
     };
     for id in &orphans {
-        kill_actor(&shared, id, "a new driver session took the group");
+        kill_actor(&shared, id, "a new driver session opened for the group");
     }
 
     loop {
@@ -1933,6 +1942,12 @@ fn reap_client(shared: &SharedRef, client_id: &str) {
     if grace == 0 {
         reap_client_resources(shared, client_id, &group);
     } else {
+        shared
+            .st
+            .lock()
+            .unwrap()
+            .reap_pending
+            .insert(client_id.to_string());
         log(
             "session_reap_deferred",
             &[
@@ -1954,6 +1969,12 @@ fn reap_client(shared: &SharedRef, client_id: &str) {
 fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
     let actor_ids: Vec<String> = {
         let mut st = shared.st.lock().unwrap();
+        st.reap_pending.remove(client_id);
+        // The driver reopened its session inside the grace, so its actors,
+        // groups and claims belong to a live driver.
+        if st.clients.get(client_id).is_some_and(|c| c.has_session) {
+            return;
+        }
         release_all(&mut st, client_id);
         let ids: Vec<String> = st
             .actors
@@ -2960,6 +2981,26 @@ mod tests {
 
         // The owner reconnecting is the same driver, and keeps its actor.
         assert!(orphans_of(&st, "g", "gone").is_empty());
+
+        // A thread connection gives the owner a client row without a session.
+        let mut st = st;
+        st.clients.insert(
+            "gone".into(),
+            ClientInfo {
+                id: "gone".into(),
+                group: "g".into(),
+                kind: "thread".into(),
+                node_id: st.node_id.clone(),
+                has_session: false,
+            },
+        );
+        assert_eq!(orphans_of(&st, "g", "new"), vec!["a1".to_string()]);
+
+        // A pending reap keeps the actor up for the grace.
+        st.reap_pending.insert("gone".into());
+        assert!(orphans_of(&st, "g", "new").is_empty());
+        st.reap_pending.clear();
+
         // An owner with a live session holds the group.
         let st = with_driver(st, "gone");
         assert!(orphans_of(&st, "g", "new").is_empty());

@@ -9,8 +9,8 @@ environment variables.
 ## Version
 
 The version is `major.minor` and matches `[0-9]+\.[0-9]+` exactly. The
-major is compared as a number, so leading zeros make no difference. Any
-other form is refused. `0.99` is the 1.0 candidate. Its shapes are 1.0's,
+major is compared as a number, so `00` and `0` are equal. Any other form
+is refused. `0.99` is the 1.0 candidate. Its shapes are 1.0's,
 and the number changes once the spec is accepted.
 
 Majors 0 and 1 accept each other for the one release that spans that
@@ -42,7 +42,7 @@ as absent. A minor bump may add a code.
 | `duplicate_session` | The group already has a driver session | |
 | `agent_refused` | The agent's `node_ip` belongs to another box | |
 | `unknown_message` | The client link receives an unknown `t` | |
-| `unknown_ref` | `ref_get` names an unknown ref | |
+| `unknown_ref` | `ref_get` gives an unknown ref id | |
 | `not_head` | A claim reaches a daemon other than the head | `head`: the head's control address |
 | `bad_claim_name` | The claim name is empty | |
 | `bad_shape` | The shape fails to parse | |
@@ -188,15 +188,17 @@ group is refused. An `actor`, `thread` or `cli` connection sets it false.
 
 The session's EOF starts a reap. The daemon drops the client id at once.
 After `MENTAT_SESSION_REAP_GRACE_MS` it kills the driver's actors, removes
-its placement groups and drops its claims. A non-head daemon skips the reap
-and leaves the session to the new head.
+its placement groups and drops its claims. If the same client id has
+reopened its session by then, the daemon skips the reap. A non-head daemon
+skips the reap and leaves the session to the new head.
 
 An actor holds its GPUs until its process exits. The agent's `actor_exit`
 frees them, and the daemon then places any pending group. When a driver
-session opens, the daemon kills each live actor in the group owned by a
-client without a session. That covers a driver that restarts inside the
-reap grace, and an actor adopted after a daemon restart whose driver is
-gone.
+session opens, the daemon kills each live actor in the group whose owner
+lacks both a session and a pending reap, such as an actor adopted after a
+daemon restart. A surviving driver that has yet to re-send `hello` after a
+restart counts as gone, so a second driver that connects first holds the
+group.
 
 A node row. The daemon's own node is always present:
 
@@ -281,8 +283,9 @@ applies, so a claim outlives its driver by `MENTAT_SESSION_REAP_GRACE_MS`. A
 driver that restarts inside that window under the same name gets the view
 it had.
 
-A head change ends every claim. The shim sends `claim` before each
-`pg_create`, so the next one reaches the new head, which solves the shape.
+A head change ends every claim. With `MENTAT_CLAIM` set, the shim sends
+`claim` before each `pg_create`, so the next one reaches the new head, which
+solves the shape.
 
 `pg_create` with `claim` set places among the nodes the claim chose. A
 placement group that requests more than its claim holds stays pending.
@@ -402,8 +405,8 @@ cluster may share a subnet, so a reply from an address does not prove the
 intended node sent it. Binding the local address makes the result describe
 the cabling. An unbound probe reports the routing table's preference.
 
-Each daemon probes every pair of one of its own addresses and one of a
-peer's, once per `MENTAT_PROBE_INTERVAL_MS`. A probe times out at
+Each daemon probes every address pair (own address, peer address) once per
+`MENTAT_PROBE_INTERVAL_MS`. A probe times out at
 `MENTAT_PROBE_TIMEOUT_MS`. Peers are probed in parallel. Results appear per
 peer under `probes` in the snapshot. An entry exists once the pair has been
 tried. A row whose local

@@ -85,9 +85,10 @@ which is a warning. After `MENTAT_AGENT_DEAD_AFTER_MS` its actors are dead,
 their `run()` refs resolve, and the driver restarts.
 
 The end of a driver session reaps its actors and placement groups after
-`MENTAT_SESSION_REAP_GRACE_MS`. A new driver session for the group kills the
-old driver's actors at once. An actor holds its GPUs until its process
-exits, so the new driver's placement group places when that exit arrives.
+`MENTAT_SESSION_REAP_GRACE_MS`. A new driver session for the group kills
+every live actor whose owner lacks both a session and a pending reap, such as
+one adopted after a daemon restart. An actor holds its GPUs until its process
+exits, and a pending placement group places when that exit arrives.
 
 A dead actor keeps its row in `/status`. Its owner's next call on it
 returns `RayActorError` with the reason it died. The daemon drops finished
@@ -386,14 +387,13 @@ link into a fabric. Probing decides whether that holds.
 
 ### Probing
 
-Every `MENTAT_PROBE_INTERVAL_MS`, each daemon opens one TCP connection for
-each pair of one of its own addresses and one of a peer's, with the source
-address bound. Binding the
-source makes the result describe the cabling. An unbound probe describes the
-routing table. Peers are probed concurrently. A pair that fails logs
-`fabric_addr_unverified` once and stays out of placement. Rows for an
-address the daemon has lost, or one missing from the peer's current list,
-are dropped after the round.
+Every `MENTAT_PROBE_INTERVAL_MS`, each daemon opens one TCP connection per
+address pair (own address, peer address), with the source address bound.
+Binding the source makes the result describe the cabling. An unbound probe
+describes the routing table. Peers are probed concurrently. A pair that
+fails logs `fabric_addr_unverified` once and stays out of placement. Rows
+for an address the daemon has lost, or one missing from the peer's current
+list, are dropped after the round.
 
 The result, for comparison against the patch panel:
 
@@ -625,8 +625,9 @@ once. The call is queued behind a blocking method or the worker is stuck.
 - `MENTAT_SESSION_REAP_GRACE_MS` (default 0)
 
 Delay between a driver session ending and the reap of its actors and
-placement groups. A new driver session for the group kills the old actors at
-once, whatever the grace. Use a grace to inspect workers after a driver
+placement groups. The actors stay up for the grace, and a new driver for the
+group waits for the reap to place. A driver that reopens its session inside
+the grace keeps its actors. Use a grace to inspect workers after a driver
 crash.
 
 - `MENTAT_TCP_DEAD_AFTER_MS` (default 75000)
