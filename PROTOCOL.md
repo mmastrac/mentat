@@ -30,12 +30,24 @@ parsing and applies the patch of an unknown event kind. A sender sends its
 own current shape. Nothing records a counterpart's minor. Any other change
 is major.
 
-`err` holds `error`, free text for a person, and an optional `code` for a
-program to match on. The wording of `error` may change. A receiver treats an
-unknown `code` as an absent one. The codes are `no_head`, `proto_mismatch`
-(with the refusing side's `proto`), `duplicate_session`, `bad_first_frame`,
-`agent_refused`, `unknown_message` and `unknown_ref`. A minor bump may add
-one.
+`err` holds `error` and an optional `code`. `error` is text for a person
+and may change. `code` is for a program. A receiver treats an unknown `code`
+as absent. A minor bump may add a code.
+
+| `code` | Sent when | Extra field |
+| --- | --- | --- |
+| `no_head` | The wait for a head exceeds thirty seconds | |
+| `bad_first_frame` | The first frame is a type outside "Connection start" | |
+| `proto_mismatch` | The majors differ | `proto`: the refusing side's version |
+| `duplicate_session` | The group already has a driver session | |
+| `agent_refused` | The agent's `node_ip` belongs to another box | |
+| `unknown_message` | The client link receives an unknown `t` | |
+| `unknown_ref` | `ref_get` names an unknown ref | |
+| `not_head` | A claim reaches a daemon other than the head | `head`: the head's control address |
+| `bad_claim_name` | The claim name is empty | |
+| `bad_shape` | The shape fails to parse | |
+| `shape_conflict` | The name is held for a different shape | |
+| `unsolvable_claim` | The shape needs more than the cluster holds | |
 
 `ref_get_ok.status` is a closed set. The shim raises on an unknown value, so
 adding one is major. Actor `state` (`spawning`, `running`, `dead`) and
@@ -172,12 +184,19 @@ minor version may add one, and a reader treats an unknown value as text.
 
 Exactly one connection per driver sets `session: true`. A second in one
 group is refused. An `actor`, `thread` or `cli` connection sets it false.
-`node_ip` is empty from the client. The session's EOF starts a reap. After
-`MENTAT_SESSION_REAP_GRACE_MS` the daemon kills the driver's actors, removes
-its placement groups and drops its claims. The client id is dropped at once,
-so a driver that restarts inside the grace opens its session without
-waiting. A non-head daemon skips the reap and leaves the session to the new
-head.
+`node_ip` is empty from the client.
+
+The session's EOF starts a reap. The daemon drops the client id at once.
+After `MENTAT_SESSION_REAP_GRACE_MS` it kills the driver's actors, removes
+its placement groups and drops its claims. A non-head daemon skips the reap
+and leaves the session to the new head.
+
+An actor holds its GPUs until its process exits. The agent's `actor_exit`
+frees them, and the daemon then places any pending group. When a driver
+session opens, the daemon kills each live actor in the group owned by a
+client without a session. That covers a driver that restarts inside the
+reap grace, and an actor adopted after a daemon restart whose driver is
+gone.
 
 A node row. The daemon's own node is always present:
 
@@ -256,13 +275,14 @@ move nodes under the first claimant. Only the head solves a claim. A claim
 sent to any other daemon is refused with the head's address. Two daemons
 solving one name against their own views could each hand out a placement.
 
-Each session that sends `claim` joins the holder set. The claim ends when
-the last holder's session is reaped. The reap is the only release. The reap
-grace applies, so a claim lasts `MENTAT_SESSION_REAP_GRACE_MS` past its
-driver, and a restart inside that window under the same name gets the view
-it had. A session cut by a head change keeps its claim. The holder re-sends
-`claim` to the new head, which rebuilds the table there. Only sessions hold
-a claim. A node that leaves the mesh does not end one.
+Each session that sends `claim` joins the holder set. A claim ends when its
+last holder's session is reaped, or when the head changes. The reap grace
+applies, so a claim outlives its driver by `MENTAT_SESSION_REAP_GRACE_MS`. A
+driver that restarts inside that window under the same name gets the view
+it had.
+
+A head change ends every claim. The shim sends `claim` before each
+`pg_create`, so the next one reaches the new head, which solves the shape.
 
 `pg_create` with `claim` set places among the nodes the claim chose. A
 placement group that requests more than its claim holds stays pending.
@@ -272,16 +292,16 @@ Spilling outside the claim would split ranks that agreed on one view.
 
 | Direction | Message | Fields |
 | --- | --- | --- |
-| Agent → daemon | `agent_register` | `proto`, `agent_id`, `group`, `node_ip`, `container`, `pid`, `machine`, `services?`, `resume?`, `unacked_refs?` |
-| Daemon → agent | `agent_register_ok` | `proto`, `node_id` |
-| Daemon → agent | `actor_spawn` | `actor_id`, `name`, `env`, `gpu_ids`, `owner`. Payload: pickled `(cls, args, kwargs)`. The daemon adds the actor's own variables to `env`, which GUIDE.md lists under "Actor process" |
-| Agent → daemon | `actor_spawn_result` | `actor_id`, `ok`, `error?`, `pid?` (0 when the failure came before the fork) |
-| Daemon → agent | `actor_dispatch` | `actor_id`, `ref_id`, `method`. Payload: pickled `(args, kwargs)` |
-| Agent → daemon | `actor_result` | `ref_id`, `ok`, `error?`. Payload: pickled result or exception |
-| Agent → daemon | `actor_exit` | `actor_id`, `exit_code?`, `signal?`, each nullable |
-| Daemon → agent | `actor_kill` | `actor_id`. The client message, forwarded unchanged |
-| Agent → daemon | `service_note` | `service`, `note`. Empty `note` clears |
-| Agent → daemon | `ping` | Sent every `MENTAT_AGENT_PING_INTERVAL_MS`. The daemon replies `pong` on the same `req`, which is 0. The send fails once the daemon is gone. The daemon learns of a lost agent from EOF and does not send `ping` |
+| Agent to daemon | `agent_register` | `proto`, `agent_id`, `group`, `node_ip`, `container`, `pid`, `machine`, `services?`, `resume?`, `unacked_refs?` |
+| Daemon to agent | `agent_register_ok` | `proto`, `node_id` |
+| Daemon to agent | `actor_spawn` | `actor_id`, `name`, `env`, `gpu_ids`, `owner`. Payload: pickled `(cls, args, kwargs)`. The daemon adds the actor's own variables to `env`, which GUIDE.md lists under "Actor process" |
+| Agent to daemon | `actor_spawn_result` | `actor_id`, `ok`, `error?`, `pid?` (0 when the failure came before the fork) |
+| Daemon to agent | `actor_dispatch` | `actor_id`, `ref_id`, `method`. Payload: pickled `(args, kwargs)` |
+| Agent to daemon | `actor_result` | `ref_id`, `ok`, `error?`. Payload: pickled result or exception |
+| Agent to daemon | `actor_exit` | `actor_id`, `exit_code?`, `signal?`, each nullable |
+| Daemon to agent | `actor_kill` | `actor_id`. The client message, forwarded unchanged |
+| Agent to daemon | `service_note` | `service`, `note`. Empty `note` clears |
+| Agent to daemon | `ping` | Sent every `MENTAT_AGENT_PING_INTERVAL_MS`. The daemon replies `pong` on the same `req`, which is 0. The send fails once the daemon is gone. The daemon learns of a lost agent from EOF and does not send `ping` |
 
 ```json
 {"t": "agent_register", "proto": "0.99", "agent_id": "g1", "group": "glm",
@@ -382,10 +402,11 @@ cluster may share a subnet, so a reply from an address does not prove the
 intended node sent it. Binding the local address makes the result describe
 the cabling. An unbound probe reports the routing table's preference.
 
-Each daemon probes every (own address × peer address) pair once per
-`MENTAT_PROBE_INTERVAL_MS`, times out at `MENTAT_PROBE_TIMEOUT_MS`, and
-probes peers in parallel. Results appear per peer under `probes` in the
-snapshot. An entry exists once the pair has been tried. A row whose local
+Each daemon probes every pair of one of its own addresses and one of a
+peer's, once per `MENTAT_PROBE_INTERVAL_MS`. A probe times out at
+`MENTAT_PROBE_TIMEOUT_MS`. Peers are probed in parallel. Results appear per
+peer under `probes` in the snapshot. An entry exists once the pair has been
+tried. A row whose local
 address the daemon has lost, or whose remote address the peer stopped
 listing, is dropped after the round.
 
@@ -578,7 +599,7 @@ one row by path.
 | Field | Value |
 | --- | --- |
 | `machine`, `services` | The agent's registration verbatim |
-| `gpus_free` | Device indices open to a new bundle |
+| `gpus_free` | Device indices held by neither a live placement group nor a live actor |
 | `gpus_total`, `gpus_used` | Devices across the group's alive agents |
 | actor `state` | `spawning`, `running` or `dead`, with `reason` filled for `dead` |
 | `clients` | The connections this daemon serves. `session` marks the one whose EOF reaps the group |
@@ -623,17 +644,19 @@ The paths below are written with `/`. Each is the array of its keys.
 | `islands_changed` | `islands` |
 | `agent_register`, `agent_lost`, `agent_degraded`, `agent_dead`, `service_note` | `groups/<group>/agents/<agent_id>` |
 | `pg_created`, `pg_ready`, `pg_pending`, `pg_timeout`, `pg_removed` | `groups/<group>/placement_groups/<pg_id>` |
-| `actor_spawning`, `actor_running`, `actor_dead` | `groups/<group>/actors/<actor_id>` |
+| `actor_spawning`, `actor_running`, `actor_dead`, `actor_adopted` | `groups/<group>/actors/<actor_id>` |
 | `driver_connected`, `driver_disconnected`, `driver_gone_reaping` | `clients/<client_id>` |
 | `claim_solved`, `claim_released` | `groups/<group>/claims/<name>` |
 | `history_swept`, `head_moved` | Several of the paths above in one patch |
 
 `history_swept` and `head_moved` each hold every row they changed, so a
-single event may mix removals and sets across several groups. A group's
-`gpus_total` and `gpus_used` are sums over its agent rows. No event patches
-them directly. `gpus_free` on an agent row counts the devices no placement
-group holds, so `pg_ready` and `pg_removed` include every agent row they
-moved.
+single event may mix removals and sets across several groups.
+
+`gpus_free` on an agent row lists the devices held by neither a live
+placement group nor a live actor. An event that changes it includes the
+agent row: `pg_ready`, `pg_removed`, `actor_dead` and `actor_adopted`. A
+group's `gpus_total` and `gpus_used` are sums over its agent rows, and a
+consumer recomputes them.
 
 An entry removes its path when the daemon has dropped the row. Otherwise it
 sets a whole row. A row that the daemon keeps in a terminal state is set.
@@ -677,7 +700,7 @@ Daemon, port 6380:
 | --- | --- | --- |
 | `mentat_build_info` | `version` | Always 1 |
 | `mentat_agents` | `group` | Alive agents |
-| `mentat_gpus_total`, `mentat_gpus_used` | `group`, `vendor` | Devices on alive agents, and those held by a live bundle |
+| `mentat_gpus_total`, `mentat_gpus_used` | `group`, `vendor` | Devices on alive agents, and those held by a live placement group or a live actor |
 | `mentat_gpu_memory_bytes` | `group`, `vendor` | Sum of device `memory` on alive agents |
 | `mentat_memory_bytes` | `group` | Sum of `machine.memory` on alive agents. A UMA node counts its pool in both |
 | `mentat_actors` | `group`, `state` | Actors by state |

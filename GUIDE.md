@@ -84,17 +84,17 @@ reconnect. After `MENTAT_AGENT_DEGRADED_AFTER_MS` the agent is degraded,
 which is a warning. After `MENTAT_AGENT_DEAD_AFTER_MS` its actors are dead,
 their `run()` refs resolve, and the driver restarts.
 
-The end of a driver session reaps its group's actors and placement groups
-after `MENTAT_SESSION_REAP_GRACE_MS`.
+The end of a driver session reaps its actors and placement groups after
+`MENTAT_SESSION_REAP_GRACE_MS`. A new driver session for the group kills the
+old driver's actors at once. An actor holds its GPUs until its process
+exits, so the new driver's placement group places when that exit arrives.
 
-A dead actor keeps its row in `/status`. A later call on it returns
-`RayActorError` with the reason it died. Only its owner can make that call,
-so once the owner is gone the row is history. History ages out. After
-`MENTAT_HISTORY_KEEP_MS` the daemon drops a dead actor whose owner is gone,
-a removed placement group whose owner is gone, an agent whose link is down
-and a dead mesh peer. `history_swept` and `peer_forgotten` report what was
-dropped. A group is the set of agents and actors that refer to it, so a
-model removed from a compose file leaves every snapshot on its own.
+A dead actor keeps its row in `/status`. Its owner's next call on it
+returns `RayActorError` with the reason it died. The daemon drops finished
+records after `MENTAT_HISTORY_KEEP_MS`, and `history_swept` and
+`peer_forgotten` report each drop. A group is the set of agents and actors
+that refer to it, so a model removed from a compose file leaves the snapshot
+once its rows age out.
 
 ### Head election
 
@@ -386,8 +386,9 @@ link into a fabric. Probing decides whether that holds.
 
 ### Probing
 
-Each daemon opens one TCP connection per (own address × peer address) pair,
-with the source address bound, every `MENTAT_PROBE_INTERVAL_MS`. Binding the
+Every `MENTAT_PROBE_INTERVAL_MS`, each daemon opens one TCP connection for
+each pair of one of its own addresses and one of a peer's, with the source
+address bound. Binding the
 source makes the result describe the cabling. An unbound probe describes the
 routing table. Peers are probed concurrently. A pair that fails logs
 `fabric_addr_unverified` once and stays out of placement. Rows for an
@@ -585,12 +586,13 @@ between this and the degrade threshold allows for short outages.
 
 - `MENTAT_HISTORY_KEEP_MS` (default 600000)
 
-How long a record nobody can act on stays in the tables for an operator to
-read: a dead actor or removed placement group whose owner is gone, an agent
-whose link has been down past `MENTAT_AGENT_DEAD_AFTER_MS`, a mesh peer that
-has been dead. The age is counted from the event, so a daemon restart, which
-rebuilds the table before any driver reconnects, does not erase reasons the
-drivers have yet to request.
+How long the daemon keeps a finished record for an operator to read. The
+age counts from the event:
+
+- a dead actor or removed placement group, from its end, once its owner is
+  gone
+- an agent, from when its link dropped
+- a mesh peer, from when it was declared dead
 
 - `MENTAT_PEER_STALE_AFTER_MS` (default 30000)
 
@@ -623,10 +625,9 @@ once. The call is queued behind a blocking method or the worker is stuck.
 - `MENTAT_SESSION_REAP_GRACE_MS` (default 0)
 
 Delay between a driver session ending and the reap of its actors and
-placement groups. A restarting vLLM needs the old actors' names and GPUs
-freed, so a grace delays recovery. The dead client is removed at once either
-way, so a new driver session is never blocked by the grace. Its only use is
-inspecting workers after a driver crash.
+placement groups. A new driver session for the group kills the old actors at
+once, whatever the grace. Use a grace to inspect workers after a driver
+crash.
 
 - `MENTAT_TCP_DEAD_AFTER_MS` (default 75000)
 

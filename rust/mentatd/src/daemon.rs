@@ -326,29 +326,33 @@ fn set_pending_reason(st: &mut State, pg_id: &str, why: String) {
     }
 }
 
-/// Row patches for the agents a placement group reserves GPUs on.
-///
-/// `gpus_free` on an agent row counts what no placement group holds, so
-/// placing or removing one changes every agent it touches. Without these the
-/// pg row moves and the agent rows beside it go stale.
+/// The row patch for one agent. Its `gpus_free` changes when a placement
+/// group or a live actor on it starts or stops holding GPUs.
+fn agent_patch(st: &State, agent_id: &str) -> Option<Patch> {
+    let a = st.agents.get(agent_id)?;
+    Some(Patch::set(
+        &["groups", &a.group, "agents", agent_id],
+        crate::status::agent_row(st, a),
+    ))
+}
+
+/// Row patches for each agent a placement group reserves GPUs on.
 fn agent_patches(st: &State, pg_id: &str) -> Vec<Patch> {
     let Some(pg) = st.pgs.get(pg_id) else {
         return Vec::new();
     };
-    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
-    for b in pg.assignment.iter().flatten() {
-        if !seen.insert(b.agent.as_str()) {
-            continue;
-        }
-        if let Some(a) = st.agents.get(&b.agent) {
-            out.push(Patch::set(
-                &["groups", &a.group, "agents", &b.agent],
-                crate::status::agent_row(st, a),
-            ));
-        }
-    }
-    out
+    let mut agents: Vec<&str> = pg
+        .assignment
+        .iter()
+        .flatten()
+        .map(|b| b.agent.as_str())
+        .collect();
+    agents.sort();
+    agents.dedup();
+    agents
+        .into_iter()
+        .filter_map(|id| agent_patch(st, id))
+        .collect()
 }
 
 /// A group is whatever agents and actors mention it, so its last row going
@@ -769,6 +773,21 @@ pub fn head_moved(st: &mut State, old: &str) {
 // Client connections
 // ---------------------------------------------------------------------------
 
+/// The live actors in `group` that a new driver session for it replaces.
+///
+/// A group holds one driver session, so an actor whose owner holds none
+/// belongs to a driver that is gone. An adopted actor has no reap pending,
+/// so killing it here is the only thing that frees its GPUs.
+fn orphans_of(st: &State, group: &str, client_id: &str) -> Vec<String> {
+    st.actors
+        .values()
+        .filter(|a| a.group == group && a.owner != client_id)
+        .filter(|a| !matches!(a.state, ActorState::Dead { .. }))
+        .filter(|a| !st.clients.get(&a.owner).is_some_and(|c| c.has_session))
+        .map(|a| a.id.clone())
+        .collect()
+}
+
 fn client_conn(
     shared: SharedRef,
     mut reader: BufReader<TcpStream>,
@@ -776,7 +795,7 @@ fn client_conn(
     peer_ip: String,
     hello: Frame,
 ) {
-    let (client_id, is_session) = {
+    let (client_id, is_session, orphans) = {
         let Msg::Hello {
             proto,
             client_id,
@@ -833,6 +852,12 @@ fn client_conn(
             },
         );
 
+        let orphans = if session {
+            orphans_of(&st, &group, &client_id)
+        } else {
+            Vec::new()
+        };
+
         let entry = st
             .clients
             .entry(client_id.clone())
@@ -883,8 +908,11 @@ fn client_conn(
                 ("peer", peer_ip.clone()),
             ],
         );
-        (client_id, session)
+        (client_id, session, orphans)
     };
+    for id in &orphans {
+        kill_actor(&shared, id, "a new driver session took the group");
+    }
 
     loop {
         let (frame, payload) = match read_frame(&mut reader) {
@@ -1860,16 +1888,20 @@ pub fn mark_actor_dead(st: &mut State, cv: &std::sync::Condvar, actor_id: &str, 
         // below.
         actor.queued_calls.clear();
         let group = actor.group.clone();
-        let name = actor.name.clone();
-        let row = st.actors.get(actor_id).map(crate::status::actor_row);
-        if let Some(row) = row {
-            st.emit_patch(
-                "actor_dead",
-                vec![Patch::set(&["groups", &group, "actors", actor_id], row)],
-                reason,
-            );
-        }
-        let _ = name;
+        let agent = actor.agent.clone();
+        let mut patch: Vec<Patch> = st
+            .actors
+            .get(actor_id)
+            .map(|a| {
+                Patch::set(
+                    &["groups", &group, "actors", actor_id],
+                    crate::status::actor_row(a),
+                )
+            })
+            .into_iter()
+            .collect();
+        patch.extend(agent_patch(st, &agent));
+        st.emit_patch("actor_dead", patch, reason);
     }
     for (rid, r) in st.refs.iter_mut() {
         if r.actor.as_deref() == Some(actor_id) && matches!(r.state, RefState::Pending) {
@@ -2468,6 +2500,7 @@ fn agent_conn(
                 }),
             }
         }
+        let mut adopted: Vec<Patch> = Vec::new();
         for a in adopt {
             log(
                 "actor_adopted",
@@ -2477,7 +2510,15 @@ fn agent_conn(
                     ("owner", a.owner.clone()),
                 ],
             );
-            st.actors.insert(a.id.clone(), a);
+            let id = a.id.clone();
+            let row = crate::status::actor_row(&a);
+            st.actors.insert(id.clone(), a);
+            adopted.push(Patch::set(&["groups", &group, "actors", &id], row));
+        }
+        if !adopted.is_empty() {
+            // agent_register above counted these actors' GPUs as free.
+            adopted.extend(agent_patch(&st, &agent_id));
+            st.emit_patch("actor_adopted", adopted, "");
         }
 
         // The calls those actors are still working on. The agent holds
@@ -2821,7 +2862,7 @@ fn agent_conn(
 
 #[cfg(test)]
 mod tests {
-    use super::{claim, misfiled, sweep_history};
+    use super::{claim, misfiled, orphans_of, sweep_history};
     use crate::state::{ActorInfo, ActorState, ClientInfo, State};
 
     /// A second holder spells the shape its own way and joins the claim it
@@ -2921,6 +2962,22 @@ mod tests {
         let mut st = state_with("driver-1", crate::state::now_ms_u64());
         sweep_history(&mut st);
         assert_eq!(st.actors.len(), 1);
+    }
+
+    /// A driver that crashed while its daemon restarted never re-sends its
+    /// hello, so its adopted actor held its GPU until a new driver for the
+    /// group waited out MENTAT_PG_PENDING_TIMEOUT_MS.
+    #[test]
+    fn a_new_session_replaces_actors_whose_owner_has_none() {
+        let mut st = state_with("gone", 0);
+        st.actors.get_mut("a1").unwrap().state = ActorState::Running;
+        assert_eq!(orphans_of(&st, "g", "new"), vec!["a1".to_string()]);
+
+        // The owner reconnecting is the same driver, and keeps its actor.
+        assert!(orphans_of(&st, "g", "gone").is_empty());
+        // An owner with a live session holds the group.
+        let st = with_driver(st, "gone");
+        assert!(orphans_of(&st, "g", "new").is_empty());
     }
 
     /// A live agent with a single GPU. The socket is a loopback pair the

@@ -584,6 +584,69 @@ for line in sys.stdin:
         c.cleanup()
 
 
+def t19_a_new_driver_replaces_an_actor_its_old_driver_left():
+    """A driver that died while the daemon restarted never re-sent its hello,
+    so its adopted actor held the GPU and a new driver for the group pended
+    until MENTAT_PG_PENDING_TIMEOUT_MS failed it.
+    """
+    c = tl.Cluster(daemon_env={"MENTAT_PG_PENDING_TIMEOUT_MS": "8000"})
+    try:
+        c.start_agent("gswap", container="cs", gpus=1)
+        c.wait_group_gpus("gswap", 1)
+        env = {
+            **os.environ,
+            "RAY_ADDRESS": c.address,
+            "MENTAT_GROUP": "gswap",
+            "PYTHONPATH": os.pathsep.join([tl.PYTHON_PKG, HERE]),
+        }
+        place = """
+import os, sys, time
+sys.path[:0] = os.environ["PYTHONPATH"].split(os.pathsep)
+import ray
+from ray.util.placement_group import placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from fake_worker import FakeWorker
+ray.init()
+pg = placement_group([{"GPU": 1.0}])
+done, _ = ray.wait([pg.ready()], timeout=6)
+assert done, "the group is still pending"
+a = ray.remote(FakeWorker).options(
+    name="w0", num_gpus=1,
+    scheduling_strategy=PlacementGroupSchedulingStrategy(
+        placement_group=pg, placement_group_bundle_index=0),
+).remote()
+print("READY %d" % ray.get(a.pid.remote(), timeout=30), flush=True)
+sys.stdin.readline()
+"""
+        old = subprocess.Popen(
+            [sys.executable, "-c", place], env=env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, text=True, bufsize=1,
+        )
+        tl._children.append(old)
+        assert old.stdout.readline().startswith("READY")
+
+        # The daemon goes first, so the old driver's exit reaches nothing and
+        # the fresh daemon adopts an actor whose owner never returns.
+        c.daemon.kill()
+        c.daemon.wait(timeout=5)
+        old.kill()
+        old.wait(timeout=5)
+        c.daemon = c._spawn_daemon()
+        c._wait_port(c.port)
+        snap = c.wait_group_gpus("gswap", 1)
+        running = [a for a in snap["groups"]["gswap"]["actors"].values()
+                   if a["state"] == "running"]
+        assert len(running) == 1, f"the fresh daemon did not adopt the actor: {snap}"
+
+        new = subprocess.run(
+            [sys.executable, "-c", place], env=env, input="\n",
+            capture_output=True, text=True, timeout=60,
+        )
+        assert "READY" in new.stdout, (new.stdout + new.stderr)[-600:]
+    finally:
+        c.cleanup()
+
+
 def main():
     tests = [
         t01_init_and_resources,
@@ -606,6 +669,7 @@ def main():
         t16_agent_link_degrade_and_recover,
         t17_agent_link_giveup,
         t18_actors_survive_a_daemon_restart,
+        t19_a_new_driver_replaces_an_actor_its_old_driver_left,
     ]
     try:
         for t in tests:
