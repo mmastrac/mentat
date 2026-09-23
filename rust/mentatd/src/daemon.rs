@@ -150,8 +150,8 @@ fn sweep_lifecycle(shared: &SharedRef) {
         );
     }
 
-    // Pending-pg timeout: a placement group that never gets its agents must
-    // fail loudly instead of leaving the driver waiting forever.
+    // Pending timeout: a placement group still PENDING after
+    // MENTAT_PG_PENDING_TIMEOUT_MS fails, and its driver raises.
     let pg_timeout = cfg().pg_pending_timeout_ms;
     let timed_out: Vec<(String, String, u64, Option<String>)> = st
         .pgs
@@ -168,10 +168,9 @@ fn sweep_lifecycle(shared: &SharedRef) {
         })
         .collect();
     for (pg_id, group, age, why) in timed_out {
-        // The last placement attempt recorded what it could not find. Report
-        // that rather than the old blanket guess about GPU counts: at four
-        // nodes on two fabrics, "not enough GPUs" is usually wrong and
-        // "not enough on one fabric" is usually right.
+        // The last placement attempt recorded what it could not find. With
+        // several fabrics the limit is usually the GPUs on a single fabric,
+        // so the report quotes that reason.
         let why =
             why.unwrap_or_else(|| format!("group '{group}' never had enough registered GPUs"));
         if let Some(pg) = st.pgs.get_mut(&pg_id) {
@@ -474,11 +473,11 @@ pub fn set_keepalive(stream: &TcpStream) {
             &one as *const _ as *const libc::c_void,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
-        // Aggressive-ish probing on Linux: a wedged peer is declared dead in
-        // ~MENTAT_TCP_DEAD_AFTER_MS (default 75s) instead of the kernel
-        // default of >2h. wait_for_init blocks for ~10 minutes legitimately,
-        // but that's an idle-with-live-peer case, which keepalive handles
-        // correctly. The target splits as idle + 3 probes: 2/5 + 3*(1/5).
+        // Linux: keepalive declares a wedged peer dead after about
+        // MENTAT_TCP_DEAD_AFTER_MS (75 s by default), against a kernel default
+        // over two hours. A long wait_for_init is idle with a live peer, which
+        // keepalive leaves alone. The target splits as idle plus three
+        // probes: 2/5 plus 3 x 1/5.
         #[cfg(target_os = "linux")]
         {
             let total_s = (cfg().tcp_dead_after_ms / 1000).max(5) as libc::c_int;
@@ -707,8 +706,8 @@ pub fn head_moved(st: &mut State, old: &str) {
     for (_, w) in st.client_links.drain(..) {
         w.shutdown();
     }
-    // The rows go in one event, so a consumer applying it lands where a
-    // consumer re-reading /status lands.
+    // A single event holds every row, so a consumer applying it matches a
+    // consumer re-reading /status.
     let mut patch: Vec<Patch> = st
         .clients
         .keys()
@@ -1057,10 +1056,9 @@ fn handle_client_msg(
         } => {
             let mut st = shared.st.lock().unwrap();
             let group = client_group(&st, client_id);
-            // Placement packs: it fills one agent before moving to the next,
-            // inside one island. A caller requesting a spread gets a pack, so
-            // the difference is logged rather than left silent. See "Placement"
-            // in PROTOCOL.md.
+            // Placement packs: it fills an agent before the next, inside a
+            // single island. A caller that requests a spread gets a pack, and
+            // the log records the difference.
             if !strategy.is_empty() && !strategy.contains("PACK") {
                 log(
                     "pg_strategy_ignored",
@@ -1153,7 +1151,7 @@ fn handle_client_msg(
                 pg.removed_ms = Some(crate::state::now_ms_u64());
             }
             // The row stays REMOVED until the history sweep drops it, so
-            // this sets it rather than removing the path.
+            // this event sets it.
             let row = st.pgs.get(&pg_id).map(crate::status::pg_row);
             if let (Some(group), Some(row)) = (group, row) {
                 let mut patch = vec![Patch::set(
@@ -1371,8 +1369,7 @@ fn claim(
             .find(|p| p.node_id == st.head_node_id)
             .map(|p| format!("{}:{}", p.node_ip, p.control_port))
             .unwrap_or_default();
-        // The caller retries against the head, so the address goes in a
-        // field rather than only in the sentence.
+        // The caller retries against the head, so `head` holds its address.
         return Err(Msg::Err {
             error: format!(
                 "this node is not the head. Send claims to {} at {addr}",
@@ -1459,15 +1456,11 @@ fn release_all(st: &mut State, client_id: &str) {
 
 /// Whether an agent claimed an address the mesh files under another node.
 ///
-/// A node id is the hash of an address, so a container told to call itself
-/// by its LAN address registers a node distinct from the box it runs on. Its
-/// GPUs land on a node no island contains, the group never opts into fabric
-/// placement, and the ranks talk over whichever link the address named. That
-/// reads as a slow model rather than as a misconfiguration.
-///
-/// Advisory only, like the agent's own bind finding. A refusal here would
-/// stop a deployment that is running, badly, and being told which address to
-/// use is the operator's job to correct.
+/// A node id derives from an address, so a container told to call itself by
+/// its LAN address registers a node apart from the box it runs on. Its GPUs
+/// sit outside every island and its ranks use whichever link that address
+/// reaches, which shows only as a slow model. The caller refuses the agent
+/// with `agent_refused` and the reason.
 fn misfiled_node(st: &State, node_ip: &str, node_id: &str) -> Option<String> {
     let mut boxes: Vec<(String, String, Vec<String>)> = vec![(
         st.node_id.clone(),
@@ -1711,9 +1704,8 @@ enum Res {
 
 /// What a ref currently holds.
 ///
-/// Every id holds its type, so this reads the prefix rather than inferring
-/// from what the id is not. `p:` is a placement group, which resolves once
-/// it reaches CREATED; `a:<hex>:<n>` is a call ref.
+/// The id prefix gives its type. `p:` is a placement group, which resolves
+/// once it reaches CREATED. `a:<hex>:<n>` is a call ref.
 fn resolve_ref(st: &State, ref_id: &str) -> Res {
     if ref_id.starts_with("p:") {
         return match st.pgs.get(ref_id) {
@@ -2271,13 +2263,12 @@ fn fit(
     Some(assignment)
 }
 
-/// Why no island could hold this group, in the terms an operator can act
-/// on: how many nodes it needs on one fabric, and what the best fabric that
-/// actually holds part of this group offers.
+/// Why each island is too small for this group: the nodes it needs on a
+/// single fabric, and what the best fabric holding part of the group offers.
 ///
-/// Islands with no agent of this group are left out. Naming the cluster's
-/// largest fabric when the group has nothing on it sends the reader to the
-/// wrong rack.
+/// Only islands with an agent of this group count. The cluster's largest
+/// fabric may hold none of the group, and quoting it points at the wrong
+/// rack.
 fn no_island_reason(st: &State, group: &str, bundles: usize, need: usize) -> String {
     let best = st
         .fabrics
@@ -2391,11 +2382,8 @@ fn agent_conn(
             (node_ip, id)
         }
     };
-    // A container claiming an address that belongs to a box the mesh files
-    // under another node is refused. Registering it would put its GPUs on a
-    // node no island reaches, so its group would cross no fabric and its
-    // ranks would talk over whichever link the address named, which reads
-    // as a slow model rather than as a misconfiguration.
+    // A container claiming an address the mesh files under another box is
+    // refused. `misfiled_node` gives the reason.
     let misfiled = {
         let mut st = shared.st.lock().unwrap();
         misfiled_node(&st, &node_ip, &node_id).map(|why| {
@@ -2604,10 +2592,9 @@ fn agent_conn(
             }
         }
 
-        // A pending ref the agent neither holds (pending_refs), has a
-        // buffered result for (unacked_refs), nor sits in this daemon's own
-        // held-call queue was lost in flight during the outage: fail it so
-        // the driver raises instead of hanging forever.
+        // A pending ref outside the agent's pending_refs and unacked_refs,
+        // and outside this daemon's held-call queue, was lost during the
+        // outage. It fails, so the driver raises.
         {
             let known: std::collections::HashSet<&str> = resume
                 .iter()
@@ -2819,13 +2806,11 @@ fn agent_conn(
         }
     }
 
-    // Agent link lost: its actors are unreachable, but a link blip and a dead
-    // container look identical here, so start the degrade window instead of
-    // declaring death. The lifecycle sweeper marks the agent degraded after
-    // MENTAT_AGENT_DEGRADED_AFTER_MS and gives up (actors dead, run()
-    // sentinels resolve, driver restarts) after MENTAT_AGENT_DEAD_AFTER_MS;
-    // an agent that re-registers inside the window holds on with nothing
-    // lost.
+    // Agent link lost. A link blip and a dead container look the same here,
+    // so this starts the degrade window. The lifecycle sweeper marks the
+    // agent degraded after MENTAT_AGENT_DEGRADED_AFTER_MS, and after
+    // MENTAT_AGENT_DEAD_AFTER_MS marks its actors dead. An agent that
+    // re-registers inside the window keeps everything.
     let mut st = shared.st.lock().unwrap();
     // Only if this reader owned the current registration -- a re-register may
     // already have replaced the entry with a fresh connection.

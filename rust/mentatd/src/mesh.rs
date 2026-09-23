@@ -362,7 +362,7 @@ pub fn accept_peer(
     };
     if !crate::proto::major_matches(&proto) {
         // A peer of another major is left out of election, so the link is
-        // refused rather than kept as a half-understood member.
+        // refused.
         let _ = writer.send(
             Msg::Err {
                 error: format!("proto {} here, {proto} offered", crate::proto::PROTO),

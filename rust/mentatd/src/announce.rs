@@ -6,14 +6,13 @@
 //! sequence number, matching spark-agent's mesh discovery so one key serves
 //! both. A daemon with no key does not announce at all.
 //!
-//! Signing raises the floor rather than closing the hole. The control port
-//! still accepts unauthenticated connections from the same network, so a
-//! listener keeps treating an announcement as a hint -- an address to watch
-//! -- and verifies everything it claims over TCP.
+//! Signing limits who can announce. The control port still accepts
+//! unauthenticated connections from the same network, so a listener treats
+//! an announcement as an address to watch and verifies the rest over TCP.
 //!
-//! The two listeners want different things from one. The router adds a watch
-//! and reads /status. A daemon dials, and `peer_hello` settles the rest, so a
-//! seeded mesh and a discovered one converge on the same links.
+//! The router adds a watch and reads /status. A daemon dials, and
+//! `peer_hello` settles the rest, so a seeded mesh and a discovered one end
+//! with the same links.
 
 use std::collections::BTreeMap;
 use std::net::UdpSocket;
@@ -162,10 +161,10 @@ fn run(shared: SharedRef, port: u16, interval: Duration, extra: Vec<String>, key
 /// every peer publishes its own table. This covers the case before that: a
 /// box with an empty seed list joins by being on the same broadcast domain.
 ///
-/// An announcement is a hint, as it is for the router. It produces one dial,
-/// and `peer_hello` then settles identity, version and which side owns the
-/// link. Only a holder of the key can put a datagram in front of this, and a
-/// foreign `universe` is dropped before the key is consulted.
+/// An announcement is a hint, as it is for the router. It produces a single
+/// dial, and `peer_hello` settles identity, version and which side owns the
+/// link. A datagram reaches this only with the key, and a foreign `universe`
+/// is dropped before the key check.
 fn listen(shared: SharedRef, port: u16, key: Vec<u8>, control_port: u16, http_port: u16) {
     let sock = match mentat_common::udp::bind_shared(port) {
         Ok(s) => s,
@@ -410,14 +409,14 @@ fn selected_ifaces() -> Vec<Iface> {
             Some((rank, Iface { iface: i, tags }))
         })
         .collect();
-    // Rank by position in the operator's list rather than the kernel's. A
-    // stable sort keeps kernel order within one entry.
+    // Rank by position in the operator's list. A stable sort keeps the
+    // kernel's order within a single entry.
     out.sort_by_key(|(rank, _)| *rank);
     out.into_iter().map(|(_, i)| i).collect()
 }
 
-/// Addresses this node advertises, when the operator names them outright
-/// instead of naming interfaces.
+/// Addresses this node advertises, when the operator lists addresses in
+/// place of interfaces.
 ///
 /// MENTAT_ANNOUNCE_ADDRS uses the same `value=tag+tag` syntax and the same
 /// order-is-preference rule as MENTAT_ANNOUNCE_IFACES, with addresses in
@@ -425,12 +424,10 @@ fn selected_ifaces() -> Vec<Iface> {
 ///
 ///     MENTAT_ANNOUNCE_ADDRS=192.168.1.11=lan,10.100.0.1=connectx+rdma
 ///
-/// It exists for the node whose advertisable address is not on any of its
-/// own interfaces -- and for the tests, which build topologies a single box
-/// is not cabled for. It replaces what this node reports it listens on, and
-/// nothing else: broadcast still goes out on the selected interfaces, so a
-/// node using this and no MENTAT_ANNOUNCE_ADDR still announces where it
-/// always did.
+/// It serves a node that advertises an address outside its own interfaces,
+/// and the tests, which build topologies beyond one box's cabling. It
+/// replaces the addresses this node reports. Broadcast still uses the
+/// selected interfaces.
 fn announced_override() -> Option<Vec<(String, Vec<String>)>> {
     let raw = crate::testnet::load()
         .and_then(|n| n.announce())
@@ -439,9 +436,8 @@ fn announced_override() -> Option<Vec<(String, Vec<String>)>> {
     if spec.is_empty() {
         return None;
     }
-    // Checked here rather than at first use. A typo would otherwise be
-    // announced to the whole mesh and surface much later as one failing
-    // probe per peer, giving the address but not where it came from.
+    // Checked at startup. A typo announced to the mesh shows up later as a
+    // failed probe on each peer, far from its cause.
     let (ok, bad): (Vec<_>, Vec<_>) = spec
         .into_iter()
         .partition(|s| s.pat.parse::<std::net::Ipv4Addr>().is_ok());

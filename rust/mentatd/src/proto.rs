@@ -19,10 +19,8 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Cap on each length prefix. A corrupt length would otherwise size an
-/// allocation straight off the wire.
-/// Hard cap on a frame's header and payload, each. A corrupt length prefix
-/// then fails the read instead of allocating whatever it claimed.
+/// Cap on a frame's header and on its payload. A corrupt length prefix
+/// fails the read before any allocation.
 const MAX_FRAME: u32 = 256 * 1024 * 1024;
 
 /// One frame header: a correlation id and the message.
@@ -214,7 +212,7 @@ pub enum Msg {
     ClaimOk {
         name: String,
         /// Counts the solves this head has done. It restarts with the head,
-        /// so a holder compares it against `head_node_id` and not alone.
+        /// so a holder compares the pair with `head_node_id`.
         generation: u64,
         /// The head that solved this claim.
         head_node_id: String,
@@ -271,8 +269,8 @@ pub enum Msg {
         /// mentatd-serve.
         #[serde(default)]
         services: BTreeMap<String, Service>,
-        /// Actor processes still running from before this register, so a
-        /// daemon that lost its state adopts them rather than orphaning them.
+        /// Actor processes still running from before this register. A daemon
+        /// that lost its state adopts them.
         #[serde(default)]
         resume: Vec<ResumeActor>,
         /// Refs whose results the agent buffered through a link outage and
@@ -377,10 +375,10 @@ pub enum Msg {
         addr_tags: BTreeMap<String, Vec<String>>,
         addr_ifaces: BTreeMap<String, String>,
     },
-    /// Reachability probe, sent as the first frame of its own short-lived
-    /// connection rather than over the mesh link. The prober binds one of its
-    /// own addresses before connecting, so an answer proves that one address
-    /// pair holds traffic. The mesh link proves nothing about any other pair.
+    /// Reachability probe, the first frame of its own short connection. The
+    /// prober binds one of its addresses first, so a reply proves traffic
+    /// flows between that pair of addresses. The mesh link tests its own pair
+    /// alone.
     Probe {
         proto: String,
         /// The prober's node id, so a mistargeted probe is visible.

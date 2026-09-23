@@ -125,19 +125,12 @@ impl HttpClients {
     /// Send `req`, retrying once on a fresh connection if the first attempt
     /// established a connection and then failed on it.
     ///
-    /// Only for idempotent GETs: the probe and the status poll, whose only
-    /// consumer is the health gate. They are synthetic, short, and safe to
-    /// repeat, which is what makes the retry obviously worth it there and
-    /// not elsewhere. A proxied completion may legitimately run for minutes,
-    /// and a second timeout window is a user-visible hang with nothing to
-    /// show for it -- a client that fails fast can decide for itself, one
-    /// inside a doubled timeout can do nothing until it expires.
+    /// For idempotent GETs only: the probe and the status poll. A proxied
+    /// completion may run for minutes, and a retry would double a visible
+    /// hang.
     ///
-    /// `is_connect` is the discriminator. A refused connection never got
-    /// anywhere, so a retry would only fail the same way. Anything else got
-    /// far enough to have been a live socket, which is the case worth a
-    /// second look. The request is rebuilt rather than cloned because it was
-    /// consumed.
+    /// A refused connection fails the same way twice, so `is_connect` skips
+    /// the retry. The request is rebuilt because sending consumed it.
     async fn send(
         &self,
         build: impl Fn() -> Result<Request<Full<Bytes>>, String>,
@@ -246,8 +239,8 @@ impl Config {
             // getting back onto the preferred link, and every attempt while
             // the preferred link is down is a wasted connect.
             probe_promote: env_secs("PROBE_PROMOTE_S", (probe_interval * 6).as_secs_f64()),
-            // A non-streaming answer arrives only when generation ends, so
-            // this is sized for generation rather than for a hung request.
+            // A non-streaming reply arrives when generation ends, so this is
+            // sized for a full generation.
             serving_timeout: env_secs("SERVING_TIMEOUT_S", 1800.0),
             // A model with cached weights restarts in well under a minute.
             model_wait: env_secs("MODEL_WAIT_S", 60.0),
@@ -307,10 +300,9 @@ pub struct ProbeResult {
     pub models: Vec<Value>,
     pub seen: Instant,
     pub error: Option<String>,
-    /// The candidate this group is currently routed to. Sticky: once an
-    /// address replies, the router keeps using it rather than re-deciding
-    /// every round, so a flapping preferred link cannot move live traffic
-    /// between addresses on every probe.
+    /// The candidate this group is routed to. Once an address replies, the
+    /// router keeps it, so a flapping preferred link leaves live traffic in
+    /// place.
     pub selected: Option<String>,
     /// When a higher-ranked candidate was last re-tried.
     pub promoted_at: Instant,
@@ -369,8 +361,8 @@ pub struct Endpoint {
     pub candidates: Vec<String>,
     /// What was announced, for messages. Not parsed anywhere.
     pub announced: String,
-    /// What the announcing agent noticed about the service afterwards,
-    /// typically that its server bound one address rather than all of them.
+    /// What the announcing agent found about the service later, typically
+    /// that its server bound a single address.
     pub note: Option<String>,
 }
 
@@ -703,8 +695,8 @@ fn age_groups(shared: &Shared, announced: &BTreeMap<String, GroupEntry>) {
     let mut retired: Vec<(String, String)> = Vec::new();
     {
         let mut live = shared.live.lock().unwrap();
-        // A group no daemon mentions any more is gone rather than retired,
-        // and keeping its clock would retire it the moment it came back.
+        // A group absent from every daemon is gone. Keeping its clock would
+        // retire it the moment it came back.
         live.retain(|name, _| announced.contains_key(name));
         for (name, e) in announced {
             let l = live
@@ -755,9 +747,8 @@ pub fn health_of(shared: &Shared, e: &GroupEntry) -> Result<Vec<Value>, String> 
     let probes = shared.probes.lock().unwrap();
     match probes.get(&e.group) {
         None => Err("not probed yet".into()),
-        // The agent's own finding is appended rather than substituted: it
-        // explains a probe failure without being the gate. "connection
-        // refused" plus "bound to 10.100.0.1 only" is one diagnosis. Either
+        // The agent's finding is appended to the probe error. "connection
+        // refused" with "bound to 10.100.0.1 only" is a diagnosis. Either
         // alone is a guess.
         Some(p) if !p.ok => Err(format!(
             "endpoint probe failed: {}{}",
@@ -1165,10 +1156,9 @@ async fn try_alternates(shared: &Arc<Shared>, id: &str, current: &str) -> Option
                 .collect()
         })
         .unwrap_or_default();
-    // Loopback is the box the router runs on rather than the peer, and
-    // is right only where router and daemon share one. The set is ordered
-    // lexicographically, which puts `127.` ahead of a real address, so the
-    // preference `peer_addresses` established is restored here.
+    // Loopback reaches the router's own box, which is the peer only when
+    // they share one. The set sorts `127.` ahead of a real address, so this
+    // puts loopback back last, as `peer_addresses` ranked it.
     alts.sort_by_key(|a| a.starts_with("127.") || a.starts_with("::1"));
     for alt in alts {
         if poll_status(shared, &alt).await.as_deref() == Some(id) {
@@ -1197,7 +1187,7 @@ fn drop_watch(shared: &Shared, addr: &str) {
 }
 
 /// Whether any fresh daemon view lists this node, or this address, as a
-/// live peer. Such a daemon is unreachable from here rather than gone.
+/// live peer. If so, the daemon is alive and unreachable from here.
 fn published_alive(shared: &Shared, node: Option<&str>, addr: &str) -> bool {
     let stale = shared.cfg.poll_interval * 3;
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
@@ -1225,12 +1215,10 @@ fn published_alive(shared: &Shared, node: Option<&str>, addr: &str) -> bool {
     })
 }
 
-/// Listen for the daemons' UDP announcements. An announcement is a hint: it
-/// only adds a watch candidate, and everything the daemon claims is then
-/// read over TCP and probed like any other. Every datagram is signed, so a
-/// listener with no key exits at boot rather than watching an empty
-/// cluster. Both the datagram source and the claimed address must pass
-/// ALLOWED_SOURCES, as the HTTP side does.
+/// Listen for the daemons' UDP announcements. An announcement adds a watch
+/// candidate, and the router reads and probes the rest over TCP. Every
+/// datagram is signed, so the router exits at boot without a key. The source
+/// and the claimed address must both pass ALLOWED_SOURCES.
 async fn udp_listener(shared: Arc<Shared>) {
     let port = shared.cfg.announce_port;
     if port == 0 {
@@ -1288,8 +1276,8 @@ async fn udp_listener(shared: Arc<Shared>) {
     // Sources already complained about, so a 5s broadcast cannot flood the
     // log with the same misconfiguration.
     let mut warned: HashSet<String> = HashSet::new();
-    // Sources whose advertised address has already been reported as
-    // unroutable-looking, so the note lands once rather than every round.
+    // Sources already reported for an address that looks unroutable, so
+    // the note logs once.
     let mut noted: HashSet<String> = HashSet::new();
     let universe = secret::universe();
     // One byte past the sender's cap of one Ethernet frame, so a datagram
@@ -1511,8 +1499,8 @@ fn peer_addresses(p: &Value, local: &[Net]) -> (Option<String>, Vec<String>) {
         push(a.as_str());
     }
     push(p["node_ip"].as_str());
-    // Loopback is the reporting box rather than the peer, and is right
-    // only when router, reporter and peer share one box. It goes last.
+    // Loopback reaches the reporting box, which is the peer only when
+    // router, reporter and peer share a box. It goes last.
     let lo = |c: &String| c.starts_with("127.") || c == "::1";
     cands.sort_by_key(lo);
     let best = cands
@@ -1551,10 +1539,9 @@ enum Applied {
 /// an HTTP read. After that each event holds a `patch`: paths into the
 /// snapshot and the rows to store there.
 ///
-/// A daemon replicates its peers' events, and those describe the
-/// originating node's snapshot while this daemon's summarises its peers
-/// rather than holding their rows. So only the watched daemon's own events
-/// are applied, and every other node arrives on its own stream.
+/// A daemon replicates its peers' events, which describe the originating
+/// node's snapshot. This daemon's snapshot summarises its peers, so only its
+/// own events apply here. Every other node has a stream of its own.
 fn apply_frame(
     shared: &Arc<Shared>,
     addr: &str,
@@ -1811,9 +1798,8 @@ async fn prober(shared: Arc<Shared>) {
                     models: Vec::new(),
                     seen: now,
                     error: Some(e),
-                    // Nothing replied, so there is nothing to be routed to;
-                    // clearing it means recovery starts from the top of the
-                    // ranking rather than from the last thing that worked.
+                    // No candidate replied. Clearing the choice restarts
+                    // recovery at the top of the ranking.
                     selected: None,
                     promoted_at: if tried_top { now } else { was_promoted },
                 },
@@ -2008,8 +1994,8 @@ async fn handle(
             &json!({"object": "list", "data": model_objects(&shared)}),
         ),
         (Method::POST, "/mcp") => mcp::handle(&shared, req).await,
-        // Owned rather than proxied: vLLM does not serve that endpoint, and the path
-        // lands on its /v1/responses/{response_id} pattern for a 405.
+        // Answered here. vLLM lacks this endpoint, and the path would match
+        // its /v1/responses/{response_id} pattern and return 405.
         (Method::POST, "/v1/responses/input_tokens") => tokens::count(&shared, req).await,
         // The model in the body routes anything else posted. vLLM's
         // endpoint set moves between versions and a pinned list would rot,
@@ -2378,9 +2364,8 @@ mod tests {
         }
     }
 
-    /// The provider names the engine behind the endpoint, so it has to come
-    /// from the rank whose endpoint won rather than from whichever agent the
-    /// snapshot happened to list first.
+    /// The provider identifies the engine behind the endpoint, so it comes
+    /// from the rank whose endpoint won.
     #[test]
     fn the_provider_follows_the_winning_endpoint() {
         let (ep, provider) = best_openai(vec![
@@ -2391,8 +2376,8 @@ mod tests {
         assert_eq!(provider, "vllm");
     }
 
-    /// An agent predating the field announces no provider, which reads as
-    /// unknown rather than as a group with no endpoint.
+    /// An agent without `provider` reads as an unknown provider. The group
+    /// keeps its endpoint.
     #[test]
     fn an_unannounced_provider_is_empty() {
         let (ep, provider) = best_openai(vec![(endpoint("http://a:8000/v1"), String::new())]);
@@ -2481,9 +2466,8 @@ mod tests {
         );
     }
 
-    /// A verbatim URL is the escape hatch, so it must survive untouched --
-    /// including past ALLOWED_SOURCES, which covers addresses this process
-    /// derived rather than one the operator wrote down.
+    /// A verbatim URL passes through untouched, ALLOWED_SOURCES included.
+    /// That list covers the addresses this process derives.
     #[test]
     fn a_verbatim_url_is_neither_re_derived_nor_gated() {
         let agent = serde_json::json!({
@@ -2501,10 +2485,9 @@ mod tests {
         assert_eq!(ep.candidates, vec!["http://203.0.113.7:8000/v1"]);
     }
 
-    /// A derived address is a claim this process would connect to, so the
-    /// allowlist does apply to it. Everything filtered out leaves a resolved
-    /// endpoint with nothing to try, which health_of reports as its own
-    /// failure rather than as "nothing announced".
+    /// A derived address is one this process would connect to, so the
+    /// allowlist applies. If it filters out every address, health_of reports
+    /// the filtering as the failure.
     #[test]
     fn derived_addresses_are_gated_and_may_leave_nothing() {
         let mut nodes = HashMap::new();

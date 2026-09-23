@@ -160,11 +160,11 @@ pub struct PgInfo {
     /// was placed from the whole cluster.
     pub claim: String,
     /// The fabric island this group was placed inside, when placement had
-    /// to pick one. None for a single-bundle group, for a group that fits
-    /// on one node, and on a cluster with no derived islands.
+    /// to pick one. None for a single-bundle group, a group that fits a
+    /// single node, and a cluster without islands.
     pub island: Option<crate::island::Island>,
-    /// Why the last placement attempt did not fit, kept so the pending
-    /// timeout can state the constraint rather than guess at it.
+    /// Why the last placement attempt failed. The pending timeout reports
+    /// it.
     pub pending_reason: Option<String>,
     /// When the group became Removed, which is what `sweep_history` ages.
     pub removed_ms: Option<u64>,
@@ -203,8 +203,8 @@ pub struct ClientInfo {
 /// set without a coordinator between them. A claim ends when its last holder
 /// goes, which is what makes a driver that dies give its nodes back.
 pub struct ClaimInfo {
-    /// The request this was solved for. A second claim describing something
-    /// else is a conflict rather than a re-solve.
+    /// The request this was solved for, in canonical form. A second claim
+    /// with a different shape is refused as `shape_conflict`.
     pub shape: serde_json::Value,
     /// The answer, returned verbatim to every later holder.
     pub view: serde_json::Value,
@@ -230,9 +230,9 @@ pub struct Counters {
 
 /// One entry of an event's `patch`: where in the snapshot to store a row.
 ///
-/// `at` is an array of keys rather than a joined string, since a group name
-/// and an id are opaque and either may hold any character. An entry with no
-/// `value` removes the path.
+/// `at` is an array of keys, because a group name or an id may hold any
+/// character, a separator included. An entry without `value` removes the
+/// path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Patch {
     pub at: Vec<String>,
@@ -350,17 +350,16 @@ pub struct State {
     /// one name hold two claims.
     pub claims: std::collections::BTreeMap<(String, String), ClaimInfo>,
     pub claim_generation: u64,
-    /// Agent ids already refused for a misfiled node, so a container that
-    /// retries every few seconds is named once rather than every round. The
-    /// refusal itself repeats, and only the line is held back.
+    /// Agent ids already logged as misfiled. A container retries every few
+    /// seconds, and this logs it once. The refusal repeats each time.
     pub misfiled_warned: std::collections::BTreeSet<String>,
     pub next_seq: u64,
     pub next_ref: u64,
     pub counters: Counters,
     pub next_event_seq: u64,
     /// This process's identifier, in the snapshot and in every announcement.
-    /// Event `seq` restarts with the process, so a consumer reads a new
-    /// `boot_id` as the restart rather than as a gap.
+    /// Event `seq` restarts with the process, and a new `boot_id` marks the
+    /// restart.
     pub boot_id: String,
     /// Live WebSocket subscribers get every new event pushed.
     pub event_subs: Vec<std::sync::mpsc::Sender<String>>,
@@ -501,17 +500,16 @@ impl State {
     }
 }
 
-/// Stable node id derived from the node's cluster IP: hex of "mentat:<ip>",
-/// zero-padded to ray's 56-hex-char shape. vLLM only ever compares these for
-/// equality and uses them as dict keys, so shape is all that matters.
-/// node_ip_of reverses it.
-/// Whether an address belongs to every box rather than identifying one.
+/// Whether `ip` is a loopback address, which every box holds.
 pub fn is_loopback(ip: &str) -> bool {
     ip.parse::<std::net::IpAddr>()
         .map(|a| a.is_loopback())
         .unwrap_or(false)
 }
 
+/// The node id for a cluster IP: hex of "mentat:<ip>", zero-padded to Ray's
+/// 56-character shape. vLLM compares these for equality and uses them as
+/// dict keys, so only the shape matters. `node_ip_of` reverses it.
 pub fn node_id_for(ip: &str) -> NodeId {
     let mut hex = String::with_capacity(56);
     for b in format!("mentat:{ip}").bytes() {

@@ -20,17 +20,14 @@ pub const CLOCK_SKEW_S: f64 = 30.0;
 
 /// The mesh key, from a mounted file or the environment.
 ///
-/// `Ok(None)` means no key was requested, which runs unsigned. `Err` means a
-/// key was requested and could not be had: a named file that will not read,
-/// or one that reads empty. Those are misconfigurations rather than choices,
-/// and a daemon that shrugged at them would sign nothing, refuse every
-/// signed announcement its peers send, and look from the outside like a node
-/// that never joined.
+/// `Ok(None)` means no key is configured. The daemon then stops announcing
+/// and the router exits. `Err` means a named file fails to read or reads
+/// empty. That is fatal, because the process would look like a node that
+/// never joined.
 ///
-/// The file wins over the environment, so a secret need not appear where
-/// `docker inspect` and `/proc/<pid>/environ` expose it. An empty
-/// MENTAT_SECRET stays absent rather than fatal, since a compose file
-/// setting a variable to nothing is how deployments write "unset".
+/// The file wins over the environment, which keeps the secret out of
+/// `docker inspect` and `/proc/<pid>/environ`. An empty MENTAT_SECRET counts
+/// as unset, because a compose file writes "unset" that way.
 pub fn load() -> Result<Option<Vec<u8>>, String> {
     if let Ok(path) = std::env::var("MENTAT_SECRET_FILE") {
         let path = path.trim();
@@ -199,8 +196,7 @@ pub fn now_s() -> f64 {
 /// A per-process identifier, so a restarted daemon's sequence numbers can
 /// start over without the listener reading them as replay.
 pub fn boot_id() -> String {
-    // read_exact rather than fs::read. /dev/urandom does not end, so
-    // reading to EOF never returns.
+    // read_exact: /dev/urandom is endless, so fs::read would never return.
     let mut buf = [0u8; 8];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         use std::io::Read;
@@ -302,9 +298,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// No key configured is None rather than an error. Only a named file
-    /// that cannot be read is fatal, and what None means is the caller's:
-    /// the daemon stops announcing, the router exits.
+    /// An unset key is None. A named file that fails to read is the fatal
+    /// case. The caller decides what None means: the daemon stops
+    /// announcing, the router exits.
     #[test]
     fn an_unset_key_is_absent_rather_than_fatal() {
         assert_eq!(from_env(None), Ok(None), "unset");

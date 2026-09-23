@@ -256,13 +256,12 @@ pub fn snapshot(st: &State, scope: Option<&str>) -> Value {
         "control_port": st.control_port,
         "head_node_id": st.head_node_id,
         "head_generation": st.head_generation,
-        // What the stream this snapshot came from has already delivered.
-        // A consumer that re-reads resumes from here rather than replaying,
-        // and a `boot_id` it has not seen means the counter restarted.
+        // The last event this snapshot reflects. A consumer that re-reads
+        // resumes from here, and a new `boot_id` means the counter restarted.
         "seq": st.next_event_seq - 1,
         "boot_id": st.boot_id,
-        // Derived from probes rather than configuration: these are the sets a
-        // multi-bundle placement group may be placed inside.
+        // Derived from probes: the sets a multi-bundle placement group may be
+        // placed inside.
         "islands": st.fabrics.islands.iter().map(|i| json!({
             "nodes": i.nodes,
             "addrs": i.addr,

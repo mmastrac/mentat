@@ -149,15 +149,13 @@ enum Announcement {
 
 /// Read one MENTAT_*_API value.
 ///
-///     http://10.0.0.1:8000/v1   one address, verbatim
+///     http://10.0.0.1:8000/v1   a single address, verbatim
 ///     http://0.0.0.0:8000/v1    every address this node listens on
 ///     8000/v1                   the same, the same, shorter
 ///
-/// The wildcard host is what the API server was told to bind, so writing it
-/// here means the same to the router as `--host 0.0.0.0` means to
-/// uvicorn. Anything that parses as neither is passed through verbatim: a
-/// value this function does not understand is still the operator's, and
-/// refusing it would drop an endpoint that used to announce.
+/// The wildcard host is what the API server binds, so it means to the
+/// router what `--host 0.0.0.0` means to uvicorn. A value in neither form
+/// passes through verbatim, because it is still the operator's endpoint.
 fn parse_announcement(v: &str) -> Announcement {
     let verbatim = || Announcement::Url(v.to_string());
     let split_path = |rest: &str| -> Option<(u16, String)> {
@@ -356,9 +354,7 @@ fn watch_service_binds(shared: &Arc<AgentShared>, services: &Services) {
         let (shared, name, port) = (shared.clone(), name.clone(), svc.port);
         std::thread::spawn(move || {
             // The API server binds minutes after `ray start` returns, so
-            // this waits rather than sampling once. Ten minutes covers a
-            // cold weight load. Past that the container has a bigger
-            // problem than its bind address.
+            // this polls for 10 minutes, which covers a cold weight load.
             let give_up = Instant::now() + Duration::from_secs(600);
             let mut ever_listened = false;
             let mut reported: Option<String> = None;
@@ -1102,8 +1098,7 @@ mod tests {
 
     use super::*;
 
-    /// The form every existing deployment uses. It must keep meaning
-    /// exactly one address, because that is the escape hatch for a server
+    /// A full URL means exactly that address. It is the form for a server
     /// the port form cannot describe.
     #[test]
     fn a_url_with_a_host_is_used_verbatim() {

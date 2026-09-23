@@ -103,7 +103,7 @@ pub struct Request {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Port {
     pub addr: String,
-    /// Absent where the address was configured rather than discovered.
+    /// None for an address from configuration.
     pub iface: Option<String>,
     pub tags: Vec<String>,
 }
@@ -129,8 +129,8 @@ pub struct Topology {
     pub free_gpus: BTreeMap<NodeId, f64>,
     /// Hostname per node, held through for the answer to be readable.
     pub hosts: BTreeMap<NodeId, String>,
-    /// The GPU vendor each node offers. One per node today: a set is placed
-    /// on one vendor, since no collective spans two.
+    /// The GPU vendor each node offers, a single vendor per node. A set is
+    /// placed on a single vendor, because a collective spans only one.
     pub vendors: BTreeMap<NodeId, String>,
 }
 
@@ -292,11 +292,9 @@ fn candidates(t: &Topology, set: &SetReq, taken: &BTreeSet<NodeId>) -> Vec<Vec<N
                 if avail.len() < want {
                     continue;
                 }
-                // The first `want` that fit, in island order. Trying every
-                // subset would multiply the search for no gain: island
-                // members are interchangeable by construction. A member
-                // whose GPUs are already reserved is stepped over rather than
-                // ending the walk.
+                // The first `want` that fit, in island order. Island members
+                // are interchangeable, so the first fit is as good as any. A
+                // member whose GPUs are already reserved is skipped.
                 let mut chosen: Vec<NodeId> = Vec::new();
                 for n in &avail {
                     if chosen.len() == want {
@@ -517,9 +515,8 @@ pub fn parse(shape: &Value) -> Result<Request, String> {
         .map(|s| {
             let name = s["name"].as_str().ok_or("a set needs a name")?.to_string();
             let bundles: Vec<f64> = match &s["bundles"] {
-                // Whole GPUs. 1 and 1.0 mean the same request, which
-                // `canonical` spells one way. Half a GPU is a mistake worth
-                // reporting rather than rounding.
+                // Whole GPUs. `canonical` spells 1 and 1.0 alike. A fraction
+                // is refused.
                 Value::Array(a) => a
                     .iter()
                     .map(|b| {
@@ -659,8 +656,8 @@ pub fn topology(st: &crate::state::State) -> Topology {
 mod tests {
     use super::*;
 
-    /// A second holder sends the shape its own way. Both spellings name the
-    /// same claim, and a fractional bundle is refused rather than rounded.
+    /// `[1]` and `[1.0]` were two shapes to the holder check, which refused
+    /// the second holder of a claim. A fractional bundle is refused.
     #[test]
     fn a_shape_reads_the_same_spelled_either_way() {
         let ints = serde_json::json!({"sets": [{"name": "s", "bundles": [1, 2]}]});
@@ -836,7 +833,7 @@ mod tests {
     }
 
     /// A node with its GPUs already reserved cannot host a rank, so the pair
-    /// goes to the other fabric rather than being placed short.
+    /// goes to the other fabric.
     #[test]
     fn a_full_node_sends_the_set_elsewhere() {
         let mut t = two_pairs();
