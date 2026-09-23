@@ -1,0 +1,66 @@
+#!/bin/sh
+# Model-check spec/HeadDaemon.tla against every configuration it must pass or
+# fail. Each configuration is spec/HeadDaemon.cfg with edits applied.
+#
+# The fixed model must pass in both grace modes, at three devices and three
+# groups. Each Bug constant, set alone, restores a defect that shipped, and
+# the property that defect broke must fail. A variant that passes means the
+# spec has lost the ability to find that bug.
+set -eu
+cd "$(dirname "$0")/.."
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+cp spec/HeadDaemon.tla "$work/"
+failed=0
+
+# check NAME EXPECT SED-ARGS...
+# EXPECT is "pass", or the line TLC prints for the violation.
+check() {
+    name=$1
+    expect=$2
+    shift 2
+    sed "$@" spec/HeadDaemon.cfg > "$work/$name.cfg"
+    if scripts/tlc -workers auto -metadir "$work/meta-$name" \
+        -config "$work/$name.cfg" "$work/HeadDaemon.tla" > "$work/$name.out" 2>&1; then
+        status=0
+    else
+        status=$?
+    fi
+    states=$(grep -o '[0-9]* distinct states found' "$work/$name.out" | tail -1)
+    if [ "$expect" = pass ] && [ "$status" -eq 0 ]; then
+        echo "ok    $name ($states)"
+    elif [ "$expect" != pass ] && [ "$status" -ne 0 ] && grep -qF "$expect" "$work/$name.out"; then
+        echo "ok    $name: $expect"
+    else
+        echo "FAIL  $name: expected '$expect', TLC exited $status"
+        tail -40 "$work/$name.out" | sed 's/^/      /'
+        failed=1
+    fi
+}
+
+nograce="s/GraceDeferred = TRUE/GraceDeferred = FALSE/"
+
+check fixed-grace pass \
+    -e 's/Gpus = {g1, g2}/Gpus = {g1, g2, g3}/' -e 's/MaxPgs = 2/MaxPgs = 3/'
+check fixed-nograce pass \
+    -e 's/Gpus = {g1, g2}/Gpus = {g1, g2, g3}/' -e 's/MaxPgs = 2/MaxPgs = 3/' \
+    -e "$nograce"
+
+check bug-account-pgs-only "Invariant NoDoubleAlloc is violated" \
+    -e 's/BugAccountPgsOnly = FALSE/BugAccountPgsOnly = TRUE/' -e "$nograce" \
+    -e 's/^INVARIANTS.*/INVARIANTS TypeOK NoDoubleAlloc/' -e '/^PROPERTIES/d'
+check bug-no-place-on-exit "Temporal properties were violated" \
+    -e 's/BugNoPlaceOnExit = FALSE/BugNoPlaceOnExit = TRUE/' -e "$nograce" \
+    -e 's/^INVARIANTS.*/INVARIANTS TypeOK/' -e 's/^PROPERTIES.*/PROPERTIES NoStall/'
+check bug-no-orphan-reap "Temporal properties were violated" \
+    -e 's/BugNoOrphanReap = FALSE/BugNoOrphanReap = TRUE/' \
+    -e 's/^INVARIANTS.*/INVARIANTS TypeOK/' -e 's/^PROPERTIES.*/PROPERTIES NoStall/'
+check bug-kill-during-grace "Action property GraceHoldsActors is violated" \
+    -e 's/BugKillDuringGrace = FALSE/BugKillDuringGrace = TRUE/' \
+    -e 's/^INVARIANTS.*/INVARIANTS TypeOK/' -e 's/^PROPERTIES.*/PROPERTIES GraceHoldsActors/'
+check bug-reap-reconnected "Action property SessionKeepsActors is violated" \
+    -e 's/BugReapReconnected = FALSE/BugReapReconnected = TRUE/' \
+    -e 's/^INVARIANTS.*/INVARIANTS TypeOK/' -e 's/^PROPERTIES.*/PROPERTIES SessionKeepsActors/'
+
+exit $failed
