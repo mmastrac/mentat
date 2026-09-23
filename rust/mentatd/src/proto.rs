@@ -212,7 +212,7 @@ pub enum Msg {
     ClaimOk {
         name: String,
         /// Counts the solves this head has done. It restarts with the head,
-        /// so a holder compares the pair with `head_node_id`.
+        /// so a holder compares `(generation, head_node_id)` as a pair.
         generation: u64,
         /// The head that solved this claim.
         head_node_id: String,
@@ -357,8 +357,8 @@ pub enum Msg {
         /// route there.
         addrs: Vec<String>,
         /// Operator tags per address, for consumers that route classes of
-        /// traffic over different links. An address given no tags has no
-        /// entry.
+        /// traffic over different links. An address without tags is absent
+        /// from the map.
         addr_tags: BTreeMap<String, Vec<String>>,
         /// The interface each address sits on. Only an address discovered from
         /// one has an entry, so MENTAT_ANNOUNCE_ADDRS leaves it out.
@@ -377,16 +377,16 @@ pub enum Msg {
     },
     /// Reachability probe, the first frame of its own short connection. The
     /// prober binds one of its addresses first, so a reply proves traffic
-    /// flows between that pair of addresses. The mesh link tests its own pair
-    /// alone.
+    /// flows between that pair of addresses. The mesh link proves only its
+    /// own address pair.
     Probe {
         proto: String,
         /// The prober's node id, so a mistargeted probe is visible.
         node_id: String,
     },
-    /// The reply to `probe`. The prober checks `node_id`, since both fabrics are
-    /// numbered out of one subnet and an address that replies is no evidence
-    /// of which node replied.
+    /// The reply to `probe`. The prober checks `node_id`, because both fabrics
+    /// are numbered out of one subnet and the address alone leaves the
+    /// replying node ambiguous.
     ProbeOk { proto: String, node_id: String },
     /// A daemon's own snapshot, pushed on an interval, so every daemon serves
     /// a merged cluster view without forwarding requests. The receiver reads

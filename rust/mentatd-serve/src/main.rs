@@ -468,8 +468,8 @@ fn collect_node_addrs(snap: &Value, out: &mut HashMap<String, Vec<String>>) {
 ///
 /// Within the node's ranking, an address on one of this box's own subnets
 /// comes first. The node ranks its links by speed because only it can. The
-/// router ranks by whether it shares the wire, because only it can. Serving
-/// Serving HTTP costs almost nothing to send, so reachable beats fast.
+/// router ranks by whether it shares the wire, because only it can. HTTP
+/// requests are small, so reachable beats fast.
 fn endpoint_of(
     agent: &Value,
     svc: &str,
@@ -484,8 +484,8 @@ fn endpoint_of(
         .map(str::to_string);
     let port = entry["port"].as_u64()?;
     let path = entry["path"].as_str().unwrap_or_default();
-    // A host the operator named is used as written and passes no check:
-    // naming one is the operator choosing which address to use.
+    // A host the operator set is used as written and skips the check, since
+    // setting one is the operator's choice of address.
     if let Some(host) = entry["host"].as_str().filter(|h| !h.is_empty()) {
         let url = format!("http://{host}:{port}{path}");
         return Some(Endpoint {
@@ -1582,7 +1582,7 @@ fn apply_frame(
             );
             return Applied::Resync;
         }
-        // No snapshot frame yet, so there is no view to patch.
+        // Before the first snapshot frame the view is empty.
         None => return Applied::Resync,
     }
     let Some(snapshot) = view.status.as_mut() else {
@@ -1994,7 +1994,7 @@ async fn handle(
             &json!({"object": "list", "data": model_objects(&shared)}),
         ),
         (Method::POST, "/mcp") => mcp::handle(&shared, req).await,
-        // Answered here. vLLM lacks this endpoint, and the path would match
+        // Served here. vLLM lacks this endpoint, and the path would match
         // its /v1/responses/{response_id} pattern and return 405.
         (Method::POST, "/v1/responses/input_tokens") => tokens::count(&shared, req).await,
         // The model in the body routes anything else posted. vLLM's
@@ -2188,8 +2188,8 @@ mod tests {
 
     /// The reported trap: ALLOWED_SOURCES lists where packets come from, and
     /// the node calls itself something on another subnet. Gating on that
-    /// identity field, which nothing acts on, closes discovery over a subnet
-    /// the operator had no reason to list. The source address decides.
+    /// identity field closed discovery over a subnet the operator left
+    /// unlisted. The source address decides.
     #[test]
     fn an_unlisted_identity_subnet_does_not_block_discovery() {
         let allowed = Allow::parse("192.168.1.0/24");

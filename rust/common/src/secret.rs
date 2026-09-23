@@ -20,10 +20,11 @@ pub const CLOCK_SKEW_S: f64 = 30.0;
 
 /// The mesh key, from a mounted file or the environment.
 ///
-/// `Ok(None)` means no key is configured. The daemon then stops announcing
-/// and the router exits. `Err` means a named file fails to read or reads
-/// empty. That is fatal, because the process would look like a node that
-/// never joined.
+/// `Ok(None)` means the key is unset, so the daemon stays silent and the
+/// router exits. `Err` means a named file fails to read or reads empty. The
+/// caller treats that as fatal: a daemon that ignored it would refuse every
+/// signed announcement its peers send, and look like a node that never
+/// joined.
 ///
 /// The file wins over the environment, which keeps the secret out of
 /// `docker inspect` and `/proc/<pid>/environ`. An empty MENTAT_SECRET counts
@@ -49,7 +50,7 @@ fn from_file(path: &str) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(key.to_vec()))
 }
 
-/// The environment half of `load`. An absent or blank value is no key.
+/// The environment half of `load`. An absent or blank value reads as unset.
 fn from_env(v: Option<&str>) -> Result<Option<Vec<u8>>, String> {
     let Some(v) = v else { return Ok(None) };
     let key = trim_ascii(v.as_bytes());
@@ -141,7 +142,8 @@ pub fn verify(raw: &[u8], key: &[u8]) -> Option<Value> {
     let want = unhex(env.get("sig")?.as_str()?)?;
     let mut mac = HmacSha256::new_from_slice(key).ok()?;
     mac.update(canonical(payload).as_bytes());
-    // Constant-time inside the mac, so a wrong signature leaks no position.
+    // The mac compares in constant time, so timing hides where a wrong
+    // signature differs.
     mac.verify_slice(&want).ok()?;
     Some(payload.clone())
 }

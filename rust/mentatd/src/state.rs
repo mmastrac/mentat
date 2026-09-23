@@ -371,8 +371,7 @@ pub struct State {
 pub struct Shared {
     pub st: Mutex<State>,
     /// One condvar for everything that blocks (get/wait/pg-ready). At this
-    /// scale broadcast wakeups are simpler than per-ref parking and cost
-    /// nothing measurable.
+    /// scale a broadcast wakeup is simpler than per-ref parking.
     pub cv: Condvar,
 }
 
@@ -431,8 +430,8 @@ impl State {
     /// replicate to mesh peers (who deliver to their subscribers only --
     /// events are never re-forwarded).
     ///
-    /// `patch` names paths into the snapshot and the rows to store there, so
-    /// an event defines no shapes of its own. `why` is free text for a log.
+    /// `patch` holds paths into the snapshot and the rows to store there, so
+    /// an event reuses the snapshot's shapes. `why` is free text for a log.
     pub fn emit_patch(&mut self, kind: &str, patch: Vec<Patch>, why: &str) {
         let mut fields = json!({ "patch": patch });
         if !why.is_empty() {

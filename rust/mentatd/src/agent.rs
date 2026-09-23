@@ -187,9 +187,9 @@ fn parse_announcement(v: &str) -> Announcement {
 ///
 /// The identity is hashed into a node id, so the agent and the daemon have to
 /// arrive at the same string or the cluster grows a second node where there is
-/// one. Reading the route which address reaches the daemon returns 127.0.0.1
-/// over loopback, which is such a string: a node beside the daemon's own,
-/// holding this agent's GPUs.
+/// one. Asking the route table which address reaches the daemon returns
+/// 127.0.0.1 over loopback, and that string makes a node beside the daemon's
+/// own, holding this agent's GPUs.
 ///
 /// An agent whose daemon is on this box is on that daemon's node, so it
 /// claims nothing and the daemon fills in its own. A container then needs

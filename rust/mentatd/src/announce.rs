@@ -46,8 +46,8 @@ pub fn start(shared: SharedRef, control_port: u16, http_port: u16) {
         .filter(|v| *v > 0.0)
         .map(Duration::from_secs_f64)
         .unwrap_or(Duration::from_secs(5));
-    // Explicit unicast targets, for tests and for a listener sharing no
-    // broadcast domain with this box. "host" or "host:port".
+    // Explicit unicast targets, for tests and for a listener outside this
+    // box's broadcast domains. "host" or "host:port".
     let extra: Vec<String> = std::env::var("MENTAT_ANNOUNCE_ADDR")
         .unwrap_or_default()
         .split(',')
@@ -415,8 +415,8 @@ fn selected_ifaces() -> Vec<Iface> {
     out.into_iter().map(|(_, i)| i).collect()
 }
 
-/// Addresses this node advertises, when the operator lists addresses in
-/// place of interfaces.
+/// Addresses this node advertises, when the operator lists addresses.
+/// MENTAT_ANNOUNCE_IFACES lists interfaces.
 ///
 /// MENTAT_ANNOUNCE_ADDRS uses the same `value=tag+tag` syntax and the same
 /// order-is-preference rule as MENTAT_ANNOUNCE_IFACES, with addresses in
@@ -424,7 +424,7 @@ fn selected_ifaces() -> Vec<Iface> {
 ///
 ///     MENTAT_ANNOUNCE_ADDRS=192.168.1.11=lan,10.100.0.1=connectx+rdma
 ///
-/// It serves a node that advertises an address outside its own interfaces,
+/// It is for a node that advertises an address outside its own interfaces,
 /// and the tests, which build topologies beyond one box's cabling. It
 /// replaces the addresses this node reports. Broadcast still uses the
 /// selected interfaces.

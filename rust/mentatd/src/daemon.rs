@@ -283,18 +283,8 @@ fn sweep_lifecycle(shared: &SharedRef) {
     sweep_history(&mut st);
 }
 
-/// Drop the rows nobody can act on, once they are MENTAT_HISTORY_KEEP_MS
-/// old: dead actors and removed placement groups whose owner is gone, and
-/// agents past the give-up threshold.
-///
-/// A dead actor's row is what turns its owner's next call into
-/// RayActorError with the reason, and a removed group's fail reason is read
-/// by its owner's ready ref. Nobody else reads either. The age floor covers
-/// a daemon restart, which rebuilds the tables from the agents before any
-/// driver reconnects.
-///
-/// Record why a placement group cannot be placed, reporting a reason that
-/// differs from the one already on the row.
+/// Records why a placement group cannot be placed, and emits an event when
+/// the reason differs from the one on the row.
 ///
 /// `try_place` runs on every state change, so an unconditional event would
 /// repeat one reason for as long as the group waits.
@@ -354,8 +344,14 @@ fn agent_patches(st: &State, pg_id: &str) -> Vec<Patch> {
         .collect()
 }
 
-/// A group is whatever agents and actors mention it, so its last row going
-/// removes it from every snapshot.
+/// Drops finished rows once they are MENTAT_HISTORY_KEEP_MS old: dead actors
+/// and removed placement groups whose owner is gone, and agents past the
+/// give-up threshold.
+///
+/// A dead actor's row turns its owner's next call into RayActorError with the
+/// reason. A removed group's fail reason reaches its owner's ready ref. A
+/// snapshot builds `groups` from the rows that mention a group, so a group
+/// whose last row goes leaves the snapshot.
 fn sweep_history(st: &mut State) {
     let (now, keep) = (crate::state::now_ms_u64(), cfg().history_keep_ms);
     let aged = |at: u64| now.saturating_sub(at) > keep;
@@ -474,10 +470,9 @@ pub fn set_keepalive(stream: &TcpStream) {
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         );
         // Linux: keepalive declares a wedged peer dead after about
-        // MENTAT_TCP_DEAD_AFTER_MS (75 s by default), against a kernel default
-        // over two hours. A long wait_for_init is idle with a live peer, which
-        // keepalive leaves alone. The target splits as idle plus three
-        // probes: 2/5 plus 3 x 1/5.
+        // MENTAT_TCP_DEAD_AFTER_MS (75 s by default). A long wait_for_init is
+        // idle with a live peer, which keepalive leaves alone. The target
+        // splits as idle plus three probes: 2/5 plus 3 x 1/5.
         #[cfg(target_os = "linux")]
         {
             let total_s = (cfg().tcp_dead_after_ms / 1000).max(5) as libc::c_int;
@@ -532,9 +527,9 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
                 _ => agent_conn(shared, reader, writer, peer_ip, first),
             },
             Head::At(addr) => {
-                // A client that claimed no box is on this one. The relay's
-                // source address may be one this box does not announce, so
-                // the head is told outright.
+                // A client with an empty `node_ip` is on this box. The relay's
+                // source address may be outside what this box announces, so
+                // the head gets this box's address outright.
                 let mut first = first;
                 let mine = crate::announce::all_local_addrs();
                 let local = crate::state::is_loopback(&peer_ip) || mine.contains(&peer_ip);
@@ -559,10 +554,9 @@ fn conn_entry(shared: SharedRef, stream: TcpStream) {
             }
         },
         Msg::PeerHello { .. } => crate::mesh::accept_peer(shared, reader, writer, peer_ip, first),
-        // A probe gets its own connection, since the question is whether
-        // this address pair holds traffic. The node id in the reply gives
-        // the address belongs to the node the prober meant. The prober owns
-        // the result.
+        // A probe gets its own connection, so it tests one address pair. The
+        // node id in the reply confirms the address belongs to the node the
+        // prober meant. The prober owns the result.
         Msg::Probe { .. } => {
             let my_id = shared.st.lock().unwrap().node_id.clone();
             let _ = writer.send(
@@ -1111,8 +1105,8 @@ fn handle_client_msg(
             }
             try_place(&mut st, &shared.cv);
             (
-                // The id is also the handle `ref_get` resolves once the
-                // group is CREATED, so there is no separate ready ref.
+                // The id is also the ready ref: `ref_get` resolves it once
+                // the group is CREATED.
                 Msg::PgCreateOk { pg_id },
                 Vec::new(),
             )
@@ -1290,10 +1284,9 @@ fn handle_client_msg(
         }
         Msg::ActorStop { group, all } => {
             if group.is_empty() == !all {
-                // Neither leaves the scope unsaid and both contradict. The
-                // wide form has to be requested: this binary is also installed as
-                // `ray`, where an inherited `ray stop` in an entrypoint would
-                // otherwise reach every group on the cluster.
+                // A request sets exactly one of `group` and `all`. The binary
+                // is also installed as `ray`, where an inherited `ray stop` in
+                // an entrypoint would reach every group on the cluster.
                 let st = shared.st.lock().unwrap();
                 let mut groups: Vec<&str> = st.actors.values().map(|a| a.group.as_str()).collect();
                 groups.sort();
@@ -2024,21 +2017,17 @@ fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
 // Placement
 // ---------------------------------------------------------------------------
 
-/// Try to complete every pending placement group. All-or-nothing per group:
-/// partial reservations are never held, so two pending pgs can't deadlock.
+/// Places every pending placement group it can. Each group places all its
+/// bundles at once, so two pending groups cannot deadlock on partial holds.
 ///
 /// A group of more than one bundle is placed inside one fabric island. TP
-/// ranks talk to each other over NCCL, so ranks split across two fabrics
-/// would rendezvous and then hang -- a failure that looks like a model bug
-/// and costs a debugging session. Waiting is the better answer: the group
-/// stays PENDING and fails loudly at the pending timeout, naming what it
-/// could not find.
+/// ranks talk over NCCL, and ranks split across two fabrics rendezvous and
+/// then hang. Such a group stays PENDING until the pending timeout, which
+/// reports what it could not find.
 ///
-/// The constraint applies only where it means something. A cluster with no
-/// derived island places exactly as it did before fabrics existed, which is
-/// every untagged deployment and every single-box one. A group that fits on
-/// one node does not need a fabric at all, and a node is therefore its own island
-/// of one.
+/// A cluster without derived islands places across every node, which covers
+/// an untagged deployment and a single box. A node is also its own island, so
+/// a group that fits on one node places without a fabric.
 pub fn try_place(st: &mut State, cv: &std::sync::Condvar) {
     let pending: Vec<String> = st
         .pgs
@@ -2419,9 +2408,8 @@ fn agent_conn(
                 &[("agent", agent_id.clone()), ("why", why.clone())],
             );
         }
-        // The reason rides on the refusal, and the agent retries in a loop
-        // and logs it there, so the operator reading the container's own
-        // output sees it however long it has been failing.
+        // The refusal holds the reason. The agent retries in a loop and logs
+        // it, so the container's own output shows it for as long as it fails.
         let _ = writer.send(
             Msg::refused("agent_refused", format!("agent {agent_id} {why}")),
             first.0.req,
@@ -2587,9 +2575,9 @@ fn agent_conn(
         }
 
         // The resume list is authoritative for what survived on the agent's
-        // side. An actor this daemon still thinks is live but the agent no
-        // longer holds (agent restarted, or the actor exited during the
-        // outage and the exit report was lost) is dead.
+        // side. An actor this daemon still thinks is live and the agent
+        // omits (the agent restarted, or the actor exited during the outage
+        // and the exit report was lost) is dead.
         {
             let resumed: std::collections::HashSet<&str> =
                 resume.iter().map(|r| r.actor_id.as_str()).collect();
@@ -2733,8 +2721,8 @@ fn agent_conn(
                             a.state = ActorState::Running;
                         }
                     }
-                    // The group comes from the actor: a path needs it, and
-                    // the event used to hold only the id and pid.
+                    // The group comes from the actor, since the event path
+                    // needs it.
                     let found = st
                         .actors
                         .get(&actor_id)
@@ -2960,11 +2948,10 @@ mod tests {
         assert_eq!(st.actors.len(), 1);
     }
 
-    /// A restarted daemon rebuilds its tables from the agents before any
-    /// driver reconnects, so for a moment every owner looks gone. Without
-    /// the age floor that moment would erase the reasons.
+    /// A dead actor stays for MENTAT_HISTORY_KEEP_MS after its death, for an
+    /// operator to read, with its owner gone.
     #[test]
-    fn a_recent_death_survives_a_daemon_restart() {
+    fn a_recent_death_with_its_owner_gone_is_kept() {
         let mut st = state_with("driver-1", crate::state::now_ms_u64());
         sweep_history(&mut st);
         assert_eq!(st.actors.len(), 1);
