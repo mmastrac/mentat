@@ -89,7 +89,9 @@ jobs:
               "$HUB/$i:$v-amd64" "$HUB/$i:$v-arm64"
             docker buildx imagetools inspect "$HUB/$i:$v" | grep Platform
           done
+      # Needs a token with the Delete scope. Without one the tags stay.
       - name: Drop the architecture tags
+        continue-on-error: true
         env:
           HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
           HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -127,7 +129,9 @@ jobs:
           for i in $IMAGES; do
             docker buildx imagetools create -t "$HUB/$i:latest" "$HUB/$i:$V"
           done
+      # Needs a token with the Delete scope. Without one the tags stay.
       - name: Drop the architecture tags
+        continue-on-error: true
         env:
           V: ${{ inputs.latest }}
           HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
