@@ -1,0 +1,31 @@
+#!/bin/sh
+# Delete one tag from Docker Hub repositories.
+#
+#   HUB_USER=... HUB_TOKEN=... scripts/hub-drop-tags NAMESPACE TAG REPO...
+#
+# HUB_TOKEN is a personal access token with the Delete scope. A tag that is
+# already gone counts as deleted. A multi-arch tag refers to its images by
+# digest, so deleting the per-architecture tags it was joined from leaves it
+# whole.
+set -eu
+ns=$1
+tag=$2
+shift 2
+
+jwt=$(jq -n --arg u "$HUB_USER" --arg s "$HUB_TOKEN" '{identifier: $u, secret: $s}' |
+    curl -fsS -H 'content-type: application/json' -d @- \
+        https://hub.docker.com/v2/auth/token | jq -r .access_token)
+
+for repo in "$@"; do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+        -H "Authorization: Bearer $jwt" \
+        "https://hub.docker.com/v2/namespaces/$ns/repositories/$repo/tags/$tag")
+    case $code in
+    200 | 204) echo "deleted $ns/$repo:$tag" ;;
+    404) echo "already gone: $ns/$repo:$tag" ;;
+    *)
+        echo "delete $ns/$repo:$tag: HTTP $code" >&2
+        exit 1
+        ;;
+    esac
+done
