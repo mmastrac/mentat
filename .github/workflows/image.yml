@@ -1,32 +1,110 @@
 name: image
 
+# Every push builds the images on x86_64 and arm64. A v* tag also publishes
+# them to Docker Hub as one multi-arch tag per image. `latest` moves only by
+# hand: run this workflow with the version to promote.
 on:
   push:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      latest:
+        description: "Version to point latest at, such as 0.14.0"
+        required: true
+
+env:
+  HUB: mmastrac
+  IMAGES: mentat-artifacts mentatd mentatd-serve mentat
 
 jobs:
   # build.sh runs each binary and checks that it is static, so each
   # architecture builds on a runner of that architecture.
   build:
     name: ${{ matrix.arch }}
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: x86_64
+          - arch: amd64
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
-      - run: VERSION=ci DOCKER=docker ./build.sh
+      - name: Pick the image tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v=${GITHUB_REF_NAME#v}; else v=ci; fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      - run: DOCKER=docker ./build.sh
       - name: Check the image architecture
         run: |
           want=$(uname -m)
-          got=$(docker run --rm mentat-artifacts:ci uname -m)
+          got=$(docker run --rm "mentat-artifacts:$VERSION" uname -m)
           echo "runner $want, image $got"
           [ "$want" = "$got" ]
+      - name: Check the tag matches the binaries
+        if: github.ref_type == 'tag'
+        run: |
+          got=$(docker run --rm "mentat-artifacts:$VERSION" /out/mentatd --version)
+          echo "tag $VERSION, binary $got"
+          [ "$got" = "mentatd $VERSION" ]
+      - uses: docker/login-action@v4
+        if: github.ref_type == 'tag'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Each architecture pushes under its own tag. The publish job joins
+      # them into the version tag.
+      - name: Push the architecture tags
+        if: github.ref_type == 'tag'
+        run: |
+          for i in $IMAGES; do
+            docker tag "$i:$VERSION" "$HUB/$i:$VERSION-${{ matrix.arch }}"
+            docker push -q "$HUB/$i:$VERSION-${{ matrix.arch }}"
+          done
+
+  publish:
+    name: publish
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Join the architectures under the version tag
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          for i in $IMAGES; do
+            docker buildx imagetools create -t "$HUB/$i:$v" \
+              "$HUB/$i:$v-amd64" "$HUB/$i:$v-arm64"
+            docker buildx imagetools inspect "$HUB/$i:$v" | grep Platform
+          done
+
+  latest:
+    name: latest
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Point latest at the version
+        env:
+          V: ${{ inputs.latest }}
+        run: |
+          case "$V" in
+            *[!0-9.]* | "") echo "not a version: $V" >&2; exit 1 ;;
+          esac
+          for i in $IMAGES; do
+            docker buildx imagetools create -t "$HUB/$i:latest" "$HUB/$i:$V"
+          done
