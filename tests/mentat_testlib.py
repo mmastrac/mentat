@@ -412,6 +412,9 @@ class TcpProxy:
             except OSError:
                 client.close()
                 continue
+            # The timeout is for the connect. A daemon can stay quiet for
+            # longer, such as before its first head election.
+            server.settimeout(None)
             with self.lock:
                 self.conns.append((client, server))
             for a, b in ((client, server), (server, client)):
@@ -427,7 +430,17 @@ class TcpProxy:
                 dst.sendall(data)
         except OSError:
             pass
-        for s in (src, dst):
+        TcpProxy._drop(src, dst)
+
+    @staticmethod
+    def _drop(*socks):
+        # On Linux, close() leaves a socket open while another thread is in
+        # recv() on it, so the peer gets no FIN. shutdown() wakes that recv().
+        for s in socks:
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 s.close()
             except OSError:
@@ -445,11 +458,7 @@ class TcpProxy:
         with self.lock:
             conns, self.conns = self.conns, []
         for pair in conns:
-            for s in pair:
-                try:
-                    s.close()
-                except OSError:
-                    pass
+            self._drop(*pair)
 
     def close(self):
         self.closed = True
