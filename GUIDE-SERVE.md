@@ -26,16 +26,16 @@ models keep serving the clients already connected to them.
 
 Configuration is by environment. The only option is `--version`. A
 containerised router needs `network_mode: host`, because announced
-endpoints sit on host addresses that bridge networking cannot reach.
+endpoints are on host addresses that bridge networking cannot reach.
 
 ### Discovery
 
 The router builds a watch set of daemons from UDP announcements on
 `MENTAT_ANNOUNCE_PORT`, the `MENTAT_DAEMONS` seed list, and the mesh
 membership each watched daemon reports. Each watched daemon is polled on
-`/status` every `POLL_INTERVAL_S` with its `/events` WebSocket held open, so
-a cluster event re-reads at once. A burst of events coalesces into one
-re-read.
+`/status` every `POLL_INTERVAL_S` with its `/events` WebSocket held open. An
+event on that socket starts a re-read at once. A burst of events coalesces
+into one re-read.
 
 A daemon is watched on one address however many it is known by. The first
 reply identifies the node. A second address that replies as the same node is
@@ -103,8 +103,8 @@ candidate. The router uses it as written and skips the allowlist check.
 The prober walks the list and keeps the first address that replies. Live
 traffic stays on it until it stops replying, then the router falls through
 to the next candidate. Every `PROBE_PROMOTE_S` the router re-tries the
-addresses ranked above the one in use, so a repaired link is restored
-without operator action. `/status.json` shows `openai` (in use) beside
+addresses ranked above the one in use and moves to the highest-ranked one
+that replies. `/status.json` shows `openai` (in use) beside
 `openai_candidates` (all of them, best first). A group serving from its
 second candidate is the router's view of a dropped link.
 
@@ -247,11 +247,12 @@ of the numbers.
 
 The MCP table lists each group that announces `mcp`, by group name, with the
 tools its server offers. A group that announces `mcp` and no `openai` serves
-no model, so only the MCP table lists it. Its caption is the merged endpoint's URL under the
-host name the page was loaded from. A group whose server has not answered
-shows `listing`, or `no answer` and the error, dimmed. The page reads the
-tools cache and lists a group in the background when its entry is missing,
-failed or older than `TOOLS_TTL_S`.
+no model, so only the MCP table lists it. Its caption is the merged
+endpoint's URL under the host name the page was loaded from. A group whose
+server has not answered shows `listing`. One whose list failed shows `no
+answer` and the error. Both rows are dimmed. The page reads the tools cache
+and lists a group in the background when its entry is missing, failed or
+older than `TOOLS_TTL_S`.
 
 ### Counting tokens
 
@@ -264,8 +265,8 @@ curl -s http://<node>:6381/v1/responses/input_tokens \
 # {"object":"response.input_tokens","input_tokens":14}
 ```
 
-The router owns this route. vLLM does not serve that endpoint, and the path
-lands on its `/v1/responses/{response_id}` pattern for a 405.
+The router owns this route. vLLM does not serve that endpoint. The path
+matches its `/v1/responses/{response_id}` pattern, which returns 405.
 
 The serving engine counts the text. The router sends it to that group's
 `/tokenize` as a chat request, so the chat template is included.
@@ -274,7 +275,7 @@ through, because the template renders both and the engine then prices them.
 Text-only counts match the engine.
 
 Media is estimated at flat rates: 4000 tokens per image and 40000 per video,
-whatever the resolution or length. The true cost depends on tiling and the
+for any resolution or length. The true cost depends on tiling and the
 model's patch size, which the router cannot know without fetching the media
 and running the engine's preprocessor. An attachment that is neither, such
 as a PDF, contributes only the text that accompanies it.
@@ -296,7 +297,7 @@ strips it before forwarding the call, so the container sees its own plain
 arguments. `tools/list` replies are cached per group for `TOOLS_TTL_S`.
 
 The merge skips the admission gate. A status server matters most while its
-engine is loading or wedged, which is when the gate would exclude it.
+engine is loading or stuck, which is when the gate would exclude it.
 
 The native tool `serve_status` reports the watched daemons, each group's
 health and endpoints, and the model table. That name is reserved. A group
@@ -338,9 +339,9 @@ one entry before the router acts on it. The node's own identity address is
 not checked, because nothing acts on it. A rejected source logs
 `announce_source_not_allowed` once, with the entries in force.
 
-The default admits a fabric only when this box is on it, the same wire test
-candidate ranking uses. An entry for a fabric the router cannot reach costs
-a `PROBE_TIMEOUT_S` wait every round before the fall-through.
+The default admits a fabric only when this box is on it, by the same subnet
+test that candidate ranking uses. An entry for a fabric the router cannot
+reach costs a `PROBE_TIMEOUT_S` wait every round before the fall-through.
 
 - `DISCOVER_PEERS` (default `1`)
 
@@ -404,8 +405,8 @@ How long a group's `tools/list` reply is cached.
 
 How long a group stays listed while nothing it announces can serve, and how
 long a daemon outside the seed list is watched while it replies to nothing.
-See "Retirement" and "Discovery". The default outlasts a reboot, a weight
-reload or a fabric outage, so a model does not disappear mid-repair.
+See "Retirement" and "Discovery". The default is longer than a reboot, a
+weight reload or a fabric outage.
 
 - `MENTAT_SECRET` (default: unset)
 
