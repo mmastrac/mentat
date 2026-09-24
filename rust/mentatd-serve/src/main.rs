@@ -308,6 +308,9 @@ pub struct ProbeResult {
     pub promoted_at: Instant,
 }
 
+/// One group's tools/list answer, or why it failed.
+pub type ToolsReport = Result<Vec<Value>, String>;
+
 pub struct Shared {
     pub cfg: Config,
     /// When this process started.
@@ -330,8 +333,11 @@ pub struct Shared {
     /// group -> latest endpoint probe. Present only for probe candidates
     /// (openai announced, actors running).
     pub probes: Mutex<HashMap<String, ProbeResult>>,
-    /// "group url" -> cached tools/list report for the MCP merge.
-    pub tools: Mutex<HashMap<String, (Instant, Vec<Value>)>>,
+    /// "group url" -> the last tools/list report for the MCP merge, or the
+    /// error that replaced it.
+    pub tools: Mutex<HashMap<String, (Instant, ToolsReport)>>,
+    /// "group url" keys with a tools/list in flight for the status page.
+    pub tools_fetching: Mutex<HashSet<String>>,
     /// Wakes the prober when a daemon view changes, so admission does not
     /// wait out a full probe interval after boot.
     pub refresh: tokio::sync::Notify,
@@ -2028,6 +2034,7 @@ async fn main() {
         probes: Mutex::new(HashMap::new()),
         live: Mutex::new(HashMap::new()),
         tools: Mutex::new(HashMap::new()),
+        tools_fetching: Mutex::new(HashSet::new()),
         refresh: tokio::sync::Notify::new(),
         inflight: Mutex::new(BTreeMap::new()),
         next_req: AtomicU64::new(1),

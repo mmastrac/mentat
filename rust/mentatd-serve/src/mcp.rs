@@ -214,20 +214,21 @@ fn with_group_arg(m: &Merged) -> Value {
 
 /// One group's tool list, cached briefly. Read rather than assumed -- the
 /// containers already differ in what they expose (the Ray tool is
-/// conditional). An empty answer is not cached, so a container that was
-/// still booting is retried on the next list instead of a minute later.
+/// conditional). An empty or failed answer is stored for the status page
+/// but counts as a miss, so a container that was still booting is retried
+/// on the next list instead of a minute later.
 async fn group_tools(shared: &Arc<Shared>, group: &str, url: &str) -> Vec<Value> {
     let key = format!("{group} {url}");
     {
         let cache = shared.tools.lock().unwrap();
-        if let Some((t, tools)) = cache.get(&key) {
-            if t.elapsed() <= shared.cfg.tools_ttl {
+        if let Some((t, Ok(tools))) = cache.get(&key) {
+            if !tools.is_empty() && t.elapsed() <= shared.cfg.tools_ttl {
                 return tools.clone();
             }
         }
     }
     let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
-    let tools = match http_post_json(
+    let got = match http_post_json(
         &shared.client,
         url,
         &req,
@@ -235,23 +236,67 @@ async fn group_tools(shared: &Arc<Shared>, group: &str, url: &str) -> Vec<Value>
     )
     .await
     {
-        Ok(v) => v["result"]["tools"].as_array().cloned().unwrap_or_default(),
+        Ok(v) => Ok(v["result"]["tools"].as_array().cloned().unwrap_or_default()),
         Err(e) => {
             log(
                 "mcp_tools_fetch_failed",
-                &[("group", group.to_string()), ("error", e)],
+                &[("group", group.to_string()), ("error", e.clone())],
             );
-            Vec::new()
+            Err(e)
         }
     };
-    if !tools.is_empty() {
-        shared
+    let tools = got.clone().unwrap_or_default();
+    shared
+        .tools
+        .lock()
+        .unwrap()
+        .insert(key, (Instant::now(), got));
+    tools
+}
+
+/// Each group's MCP endpoint for the status page, named by group. The page
+/// reads the tools cache and never waits on a container. A group whose
+/// entry is missing, stale or failed gets a background tools/list.
+///
+/// `tools` is null until a list has answered. `error` is the last failure.
+pub fn page_view(shared: &Arc<Shared>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for e in group_table(shared).values() {
+        let Some(url) = e.mcp.as_ref().and_then(|m| m.best()) else {
+            continue;
+        };
+        let key = format!("{} {url}", e.group);
+        let cached = shared
             .tools
             .lock()
             .unwrap()
-            .insert(key, (Instant::now(), tools.clone()));
+            .get(&key)
+            .map(|(t, r)| (t.elapsed(), r.clone()));
+        let fresh = matches!(&cached, Some((age, Ok(t)))
+                             if !t.is_empty() && *age <= shared.cfg.tools_ttl);
+        if !fresh && shared.tools_fetching.lock().unwrap().insert(key.clone()) {
+            let shared = shared.clone();
+            let group = e.group.clone();
+            let url = url.to_string();
+            tokio::spawn(async move {
+                group_tools(&shared, &group, &url).await;
+                shared.tools_fetching.lock().unwrap().remove(&key);
+            });
+        }
+        let (tools, error) = match cached {
+            Some((_, Ok(t))) => (
+                json!(t
+                    .iter()
+                    .filter_map(|t| t["name"].as_str())
+                    .collect::<Vec<_>>()),
+                Value::Null,
+            ),
+            Some((_, Err(err))) => (Value::Null, json!(err)),
+            None => (Value::Null, Value::Null),
+        };
+        out.push(json!({"group": e.group, "tools": tools, "error": error}));
     }
-    tools
+    out
 }
 
 fn tool_err(rid: &Value, msg: String) -> Value {

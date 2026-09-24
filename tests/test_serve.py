@@ -371,6 +371,16 @@ def t02_no_actors_yet_admits_on_the_probe_and_merges_mcp():
     assert solo["properties"]["__group"]["enum"] == ["ga"], solo
     assert "required" not in solo, solo
 
+    # The status page lists each group's MCP endpoint by group name, with the
+    # tools it offers.
+    def page_mcp():
+        return {g["group"]: g["tools"] for g in serve_get("/stats.json")[1]["mcp"]}
+    wait_until(lambda: all(page_mcp().get(g) for g in ("ga", "gb")), 15,
+               "the status page never listed both groups' MCP tools")
+    rows = page_mcp()
+    assert {"tool_a", SHARED_TOOL} <= set(rows["ga"]), rows
+    assert {"tool_b", SHARED_TOOL} <= set(rows["gb"]), rows
+
 
 def t03_admit_on_running_actor():
     state["driver_a"], actor_pid = start_driver("ga")
@@ -875,6 +885,25 @@ def t12_an_unservable_group_is_retired_then_comes_back():
                "a retired group never came back after its endpoint returned")
 
 
+def t13_an_mcp_only_group_is_listed_under_mcp():
+    # A group with an MCP server and no engine serves no model. The status
+    # page lists it with the MCP servers and leaves it out of the models.
+    mX = FakeModel("model-x", "tool_x")
+    state["mcp_only"] = mX
+    cluster.start_agent("gx", container="cx", env_extra={
+        "MENTAT_MCP_API": f"http://127.0.0.1:{mX.port}/mcp",
+    })
+
+    def mcp_rows():
+        return {g["group"]: g["tools"] for g in serve_get("/stats.json")[1]["mcp"]}
+
+    wait_until(lambda: mcp_rows().get("gx"), 20,
+               "the status page never listed gx's MCP tools")
+    assert "tool_x" in mcp_rows()["gx"], mcp_rows()
+    models = serve_get("/stats.json")[1]["models"]
+    assert not [m for m in models if m["group"] == "gx"], models
+
+
 def main():
     tests = [
         t01_announcement_reaches_status,
@@ -894,6 +923,7 @@ def main():
         t10_udp_announce_replaces_the_seed_list,
         t11_a_registration_with_no_actors_is_served,
         t12_an_unservable_group_is_retired_then_comes_back,
+        t13_an_mcp_only_group_is_listed_under_mcp,
     ]
     try:
         for t in tests:

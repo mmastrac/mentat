@@ -211,7 +211,7 @@ list covers addresses the router derived for itself.
 | `POST /mcp` | The merged MCP endpoint. See "The MCP merge" |
 | any other `POST` | Forwarded by the request's `model`, for root-level engine endpoints such as `/tokenize` |
 | `GET /`, `/healthz`, `/status.json` | Route table, per-group health and endpoints, `uptime_s`, `verify` |
-| `GET /stats.json` | Per-model engine and router counters, for the status page |
+| `GET /stats.json` | Per-model engine and router counters and each group's MCP tools, for the status page |
 
 `GET /` with an `Accept` header that requests HTML, as from a browser,
 returns the status page.
@@ -244,6 +244,14 @@ running is an engine that accepted the request and stopped.
 
 A group that fails its probe keeps its row, dimmed, with the reason in place
 of the numbers.
+
+The MCP table lists each group that announces `mcp`, by group name, with the
+tools its server offers. A group that announces `mcp` and no `openai` serves
+no model, so only the MCP table lists it. Its caption is the merged endpoint's URL under the
+host name the page was loaded from. A group whose server has not answered
+shows `listing`, or `no answer` and the error, dimmed. The page reads the
+tools cache and lists a group in the background when its entry is missing,
+failed or older than `TOOLS_TTL_S`.
 
 ### Counting tokens
 

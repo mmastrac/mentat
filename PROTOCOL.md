@@ -720,7 +720,7 @@ Router, port 6381:
 | any other POST | Routed by request `model`, for root-level endpoints such as `/tokenize` |
 | `/mcp` | Merged MCP in a flat namespace. `__group` picks the group |
 | `/status.json`, `/healthz`, `/` | Route table, per-group health and selected endpoint, `uptime_s` |
-| `/stats.json` | Per-model engine and router counters |
+| `/stats.json` | Per-model engine and router counters, and each group's MCP tools |
 
 A `/v1` request for a known but ungated model returns 503 with the gate it
 failed. An unknown model name returns 404. Bodies over 128 MiB are refused.

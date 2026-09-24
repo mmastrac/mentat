@@ -294,8 +294,8 @@ async fn fetch_text(
     String::from_utf8(body.to_vec()).map_err(|e| e.to_string())
 }
 
-/// What the page polls: one row per served model, plus every request the
-/// router is holding.
+/// What the page polls: one row per served model, every request the router
+/// is holding, and each group's MCP endpoint.
 pub async fn stats(shared: &Arc<Shared>) -> Value {
     let mut rows = Vec::new();
     let mut counts: std::collections::HashMap<String, u64> = Default::default();
@@ -304,6 +304,11 @@ pub async fn stats(shared: &Arc<Shared>) -> Value {
     }
 
     for e in group_table(shared).values() {
+        // A group that announces an MCP server and no engine serves no
+        // model. The MCP table lists it.
+        if e.openai.is_none() && e.mcp.is_some() {
+            continue;
+        }
         let health = health_of(shared, e);
         let names = health.as_ref().map(|m| model_ids(m)).unwrap_or_default();
         let base = endpoint_url(shared, e).unwrap_or_default();
@@ -372,6 +377,7 @@ pub async fn stats(shared: &Arc<Shared>) -> Value {
         "uptime_s": shared.started.elapsed().as_secs(),
         "models": rows,
         "requests": requests,
+        "mcp": crate::mcp::page_view(shared),
     })
 }
 
@@ -408,10 +414,13 @@ tbody tr { cursor: pointer }
 tbody tr[aria-selected=true] { font-weight: bold }
 a { color: inherit }
 .dead { opacity: .6 }
+#mcp th, #mcp td { text-align: left }
+#mcp tbody tr { cursor: auto }
 </style>
 <h1>mentatd-serve</h1>
 <p id="head"></p>
 <div id="models"></div>
+<div id="mcp"></div>
 <div id="focus"></div>
 <script>
 let sel = new URLSearchParams(location.search).get("model");
@@ -463,6 +472,21 @@ function render(d) {
     ["model", "group", "proxied", "running", "waiting", "kv", "prompt tok", "gen tok", "ttft s", "queue s", "itl ms", "preempt"],
     rows,
     { key: r => r.model, selected: r => r.model === sel, dead: r => !r.healthy }));
+
+  // The merged endpoint, under the host name this page was loaded from.
+  const mcpUrl = new URL("mcp", location.href).href;
+  put("mcp", table(
+    "MCP at " + esc(mcpUrl),
+    ["group", "tools"],
+    (d.mcp || []).map(g => ({
+      tools: g.tools,
+      cells: [
+        esc(g.group),
+        g.tools ? esc(g.tools.join(", ") || "none")
+          : g.error ? "no answer: " + esc(g.error) : "listing",
+      ],
+    })),
+    { dead: g => !g.tools }));
 
   let h = "";
   if (sel) {
