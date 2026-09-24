@@ -459,9 +459,11 @@ def t09_the_router_watches_each_node_once():
     ids = {node_id(n) for n in daemons}
     wait_for(lambda: set(watched_nodes(port)) == ids, 40,
              "the router to discover every daemon from one seed")
-    # A box is polled on one address however many it announces.
+    # A box is polled on one address however many it announces. A second
+    # address for a node shows until its first poll merges it into the node.
+    wait_for(lambda: len(router_status(port)["daemons"]) == len(ids), 15,
+             "the router to merge each node's other addresses")
     st = router_status(port)
-    assert len(st["daemons"]) == len(ids), st["daemons"]
     n36 = st["daemons"][watched_nodes(port)[node_id("n36")]]
     assert n36["alternates"], n36
 
