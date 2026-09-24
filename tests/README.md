@@ -30,8 +30,8 @@ which pairs have a cable, which addresses are down, and what each node
 announces. Both binaries read it when set and dial as written otherwise.
 `rust/mentatd/src/testnet.rs` documents the file.
 
-`test_vllm_shape.py` replays `RayExecutorV2` call for call. A shim that no
-longer matches vLLM's calls fails there, before it reaches a model container.
+`test_vllm_shape.py` replays `RayExecutorV2` call for call. A shim that
+differs from those calls fails there, before it reaches a model container.
 
 The audit command for a base-image change: `grep -rn 'ray\.'
 <site-packages>/vllm/v1/executor/`. The audit holds only for the vLLM it
