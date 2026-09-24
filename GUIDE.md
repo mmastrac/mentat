@@ -303,11 +303,11 @@ and raises on a plain function.
 The wheel replaces Ray. It installs as `ray` and claims the import name:
 
 ```dockerfile
-COPY --from=mmastrac/mentat-artifacts:0.12.0 /out/mentatd /usr/local/bin/mentatd
-COPY --from=mmastrac/mentat-artifacts:0.12.0 /out/mentatd-0.12.0-py3-none-any.whl /tmp/
+COPY --from=mmastrac/mentat-artifacts:0.13.0 /out/mentatd /usr/local/bin/mentatd
+COPY --from=mmastrac/mentat-artifacts:0.13.0 /out/mentatd-0.13.0-py3-none-any.whl /tmp/
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
- && pip install --no-deps /tmp/mentatd-0.12.0-py3-none-any.whl
+ && pip install --no-deps /tmp/mentatd-0.13.0-py3-none-any.whl
 ```
 
 `--no-deps` keeps pip from resolving Ray's dependencies. The shim has none.

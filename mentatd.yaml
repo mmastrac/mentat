@@ -21,7 +21,7 @@
 # head, so a container never needs another daemon's address.
 services:
   mentatd:
-    image: ${IMAGE:-mentatd:0.12.0}
+    image: ${IMAGE:-mentatd:0.13.0}
     container_name: mentatd
     # The control port must listen on 127.0.0.1:6379 for agents in
     # host-network model containers and on the cluster subnets for remote
