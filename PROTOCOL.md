@@ -188,9 +188,10 @@ group is refused. An `actor`, `thread` or `cli` connection sets it false.
 
 The session's EOF starts a reap. The daemon drops the client id at once.
 `MENTAT_SESSION_REAP_GRACE_MS` after the client id's latest EOF, it kills
-the driver's actors, removes its placement groups and drops its claims. If the same client id has
-reopened its session by then, the daemon skips the reap. A non-head daemon
-skips the reap and leaves the session to the new head.
+the driver's actors, removes its placement groups and drops its claims. If
+the same client id has reopened its session by then, the daemon skips the
+reap. A non-head daemon skips the reap and leaves the session to the new
+head.
 
 An actor holds its GPUs until its process exits. The agent's `actor_exit`
 frees them, and the daemon then places any pending group. When a driver
@@ -284,12 +285,12 @@ driver that restarts inside that window under the same name gets the view
 it had.
 
 A head change ends every claim. With `MENTAT_CLAIM` set, the shim sends
-`claim` before each `pg_create`, so the next one reaches the new head, which
-solves the shape.
+`claim` before each `pg_create`. After a head change, the next `claim`
+reaches the new head, which solves the shape again.
 
 `pg_create` with `claim` set places among the nodes the claim chose. A
 placement group that requests more than its claim holds stays pending.
-Spilling outside the claim would split ranks that agreed on one view.
+Placing outside the claim would split ranks that agreed on one view.
 
 ## Agent link
 
@@ -369,7 +370,7 @@ every status push.
 
 `peer_hello` and every snapshot row split an address and a port into
 `node_ip` and `control_port`. The announcement joins them, sending `control`
-and `http` as strings, a form spark-agent's mesh discovery fixes. `hello_ok`
+and `http` as strings, the form spark-agent's mesh discovery reads. `hello_ok`
 joins them too, in `control_addr`, which is the address a client dials.
 
 ### The snapshot as a mesh message
@@ -406,10 +407,9 @@ intended node sent it. Binding the local address makes the result describe
 the cabling. An unbound probe reports the routing table's preference.
 
 Each daemon probes every address pair (own address, peer address) once per
-`MENTAT_PROBE_INTERVAL_MS`. A probe times out at
-`MENTAT_PROBE_TIMEOUT_MS`. Peers are probed in parallel. Results appear per
-peer under `probes` in the snapshot. An entry exists once the pair has been
-tried. A row whose local
+`MENTAT_PROBE_INTERVAL_MS`. A probe times out at `MENTAT_PROBE_TIMEOUT_MS`.
+Peers are probed in parallel. Results appear per peer under `probes` in the
+snapshot. An entry exists once the pair has been tried. A row whose local
 address the daemon has lost, or whose remote address the peer stopped
 listing, is dropped after the round.
 
@@ -535,11 +535,11 @@ uses the first vendor that fits.
 
 A placement group of more than one bundle goes inside one fabric island. An
 island is a set of nodes that all reach each other over addresses tagged
-`rdma`, with a successful probe behind every pair. Each daemon derives
+`rdma`, with a successful probe for every pair. Each daemon derives
 islands from its own probe table and the tables peers publish in
 `peer_status`. It prunes each connected component, least-connected node
 first, until every member reaches every other. Soft consistency is enough,
-because the daemon a driver reached decides its placement groups. Membership
+because the head decides every placement group. Membership
 commits after `MENTAT_ISLAND_HOLD_DOWN_MS` of stability, so a cable that
 flaps cannot send consecutive placements to different islands. The vertices
 are addresses, because a rank binds one address that every other rank must
@@ -670,9 +670,9 @@ that applies events and one that re-reads the snapshot hold the same tables.
 
 A consumer applies events in `seq` order per originating `node`. On a gap it
 re-reads the snapshot, because a missed event leaves the view wrong.
-Counters move without events, so a consumer that reads them re-reads on an
-interval too. The first `/events` frame is a snapshot registered under the
-subscription's lock. Nothing falls between it and the first event.
+Counters change without events, so a consumer that reads them re-reads on
+an interval too. The first `/events` frame is a snapshot taken under the
+subscription's lock, so every later event reaches the consumer.
 
 Every snapshot holds the `seq` it reflects. A consumer that re-reads one
 resumes the stream from that `seq`. An event at or below it is already in
