@@ -1283,7 +1283,7 @@ fn handle_client_msg(
             )
         }
         Msg::ActorStop { group, all } => {
-            if group.is_empty() == !all {
+            if group.is_empty() != all {
                 // A request sets exactly one of `group` and `all`. The binary
                 // is also installed as `ray`, where an inherited `ray stop` in
                 // an entrypoint would reach every group on the cluster.
