@@ -353,9 +353,13 @@ pub struct State {
     /// Agent ids already logged as misfiled. A container retries every few
     /// seconds, and this logs it once. The refusal repeats each time.
     pub misfiled_warned: std::collections::BTreeSet<String>,
-    /// Clients whose reap waits out MENTAT_SESSION_REAP_GRACE_MS. Their
-    /// actors stay up for the grace, and a new driver session leaves them.
-    pub reap_pending: std::collections::BTreeSet<ClientId>,
+    /// Clients whose reap waits out MENTAT_SESSION_REAP_GRACE_MS, each with
+    /// the token of its latest disconnect. Their actors stay up for the
+    /// grace, and a new driver session leaves them. A timer reaps only if its
+    /// token is still the one stored, so the grace runs from the latest
+    /// disconnect.
+    pub reap_pending: std::collections::BTreeMap<ClientId, u64>,
+    pub next_reap: u64,
     pub next_seq: u64,
     pub next_ref: u64,
     pub counters: Counters,
@@ -404,7 +408,8 @@ impl State {
             claims: std::collections::BTreeMap::new(),
             claim_generation: 0,
             misfiled_warned: std::collections::BTreeSet::new(),
-            reap_pending: std::collections::BTreeSet::new(),
+            reap_pending: std::collections::BTreeMap::new(),
+            next_reap: 1,
             next_seq: 1,
             next_ref: 1,
             counters: Counters::default(),

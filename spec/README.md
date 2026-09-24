@@ -21,7 +21,7 @@ scripts/tlc -config spec/HeadDaemon.cfg spec/HeadDaemon.tla
 | --- | --- | --- |
 | `NoDoubleAlloc` | Invariant | A device has at most one live holder, counting a group and its own actor as one |
 | `NoStall` | Liveness | A pending group that its expected devices fit is placed |
-| `GraceHoldsActors` | Action | During a driver's reap grace, only that reap kills its actors |
+| `GraceHoldsActors` | Action | During a driver's reap grace, only the reap of its latest disconnect kills its actors |
 | `SessionKeepsActors` | Action | A driver that holds the session keeps its actors |
 
 ## Bug constants
@@ -37,10 +37,12 @@ to find that defect.
 | `BugNoOrphanReap` | A new session leaves a gone driver's actors running | `NoStall` |
 | `BugKillDuringGrace` | A new session kills actors inside a reap grace | `GraceHoldsActors` |
 | `BugReapReconnected` | A deferred reap kills a driver that reopened its session | `SessionKeepsActors` |
+| `BugStaleTimer` | The timer of a superseded disconnect reaps | `GraceHoldsActors` |
 
 ## Scope
 
 The model covers one group on the head. It leaves out the mesh, election,
 claims, the event stream and byte-level formats. TLC checks every
-behaviour up to 3 devices, 3 placement groups, 2 drivers and 1 daemon
-restart. A pass means the model holds at that size.
+behaviour up to 3 devices, 3 placement groups, 2 drivers, 1 daemon
+restart and 1 superseded reap timer per driver. A pass means the model
+holds at that size.

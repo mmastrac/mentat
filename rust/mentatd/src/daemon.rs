@@ -785,7 +785,7 @@ fn orphans_of(st: &State, group: &str, client_id: &str) -> Vec<String> {
         .filter(|a| a.group == group && a.owner != client_id)
         .filter(|a| !matches!(a.state, ActorState::Dead { .. }))
         .filter(|a| !st.clients.get(&a.owner).is_some_and(|c| c.has_session))
-        .filter(|a| !st.reap_pending.contains(&a.owner))
+        .filter(|a| !st.reap_pending.contains_key(&a.owner))
         .map(|a| a.id.clone())
         .collect()
 }
@@ -1933,14 +1933,15 @@ fn reap_client(shared: &SharedRef, client_id: &str) {
 
     let grace = cfg().session_reap_grace_ms;
     if grace == 0 {
-        reap_client_resources(shared, client_id, &group);
+        reap_client_resources(shared, client_id, &group, None);
     } else {
-        shared
-            .st
-            .lock()
-            .unwrap()
-            .reap_pending
-            .insert(client_id.to_string());
+        let token = {
+            let mut st = shared.st.lock().unwrap();
+            let token = st.next_reap;
+            st.next_reap += 1;
+            st.reap_pending.insert(client_id.to_string(), token);
+            token
+        };
         log(
             "session_reap_deferred",
             &[
@@ -1952,16 +1953,24 @@ fn reap_client(shared: &SharedRef, client_id: &str) {
         let client_id = client_id.to_string();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(grace));
-            reap_client_resources(&shared, &client_id, &group);
+            reap_client_resources(&shared, &client_id, &group, Some(token));
         });
     }
 }
 
 /// Kill a dead driver's actors, remove its placement groups and refs. Split
 /// from reap_client so MENTAT_SESSION_REAP_GRACE_MS can defer just this part.
-fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str) {
+///
+/// `token` is the deferred reap's disconnect token. If a later disconnect
+/// replaced it, this returns and leaves the reap to that disconnect's timer.
+fn reap_client_resources(shared: &SharedRef, client_id: &str, group: &str, token: Option<u64>) {
     let actor_ids: Vec<String> = {
         let mut st = shared.st.lock().unwrap();
+        if let Some(token) = token {
+            if st.reap_pending.get(client_id) != Some(&token) {
+                return;
+            }
+        }
         st.reap_pending.remove(client_id);
         // The driver reopened its session inside the grace, so its actors,
         // groups and claims belong to a live driver.
@@ -2984,7 +2993,7 @@ mod tests {
         assert_eq!(orphans_of(&st, "g", "new"), vec!["a1".to_string()]);
 
         // A pending reap keeps the actor up for the grace.
-        st.reap_pending.insert("gone".into());
+        st.reap_pending.insert("gone".into(), 1);
         assert!(orphans_of(&st, "g", "new").is_empty());
         st.reap_pending.clear();
 

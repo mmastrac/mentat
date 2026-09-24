@@ -187,8 +187,8 @@ group is refused. An `actor`, `thread` or `cli` connection sets it false.
 `node_ip` is empty from the client.
 
 The session's EOF starts a reap. The daemon drops the client id at once.
-After `MENTAT_SESSION_REAP_GRACE_MS` it kills the driver's actors, removes
-its placement groups and drops its claims. If the same client id has
+`MENTAT_SESSION_REAP_GRACE_MS` after the client id's latest EOF, it kills
+the driver's actors, removes its placement groups and drops its claims. If the same client id has
 reopened its session by then, the daemon skips the reap. A non-head daemon
 skips the reap and leaves the session to the new head.
 

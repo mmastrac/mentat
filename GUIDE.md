@@ -625,7 +625,7 @@ once. The call is queued behind a blocking method or the worker is stuck.
 - `MENTAT_SESSION_REAP_GRACE_MS` (default 0)
 
 Delay between a driver session ending and the reap of its actors and
-placement groups. The actors stay up for the grace, and a new driver for the
+placement groups. The delay runs from the session's latest end. The actors stay up for the grace, and a new driver for the
 group waits for the reap to place. A driver that reopens its session inside
 the grace keeps its actors. Use a grace to inspect workers after a driver
 crash.

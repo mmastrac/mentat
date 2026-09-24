@@ -30,17 +30,21 @@ CONSTANTS
     \* A new session kills the actors of a driver inside its reap grace.
     BugKillDuringGrace,
     \* A deferred reap kills a driver that reopened its session.
-    BugReapReconnected
+    BugReapReconnected,
+    \* The timer of a superseded disconnect reaps, so a driver that
+    \* disconnects twice gets the grace of its first disconnect.
+    BugStaleTimer
 
 VARIABLES
     session,      \* [Clients -> BOOLEAN]: the client holds the driver session
     reapPending,  \* clients whose reap waits out the grace
+    stale,        \* [Clients -> 0..1]: timers of superseded disconnects
     pg,           \* [PgIds -> record]: placement group slots
     actor,        \* [PgIds -> record]: the actor placed in each group
     nextPg,       \* the next unused slot
     restarts
 
-vars == <<session, reapPending, pg, actor, nextPg, restarts>>
+vars == <<session, reapPending, stale, pg, actor, nextPg, restarts>>
 
 PgIds == 1..MaxPgs
 
@@ -51,6 +55,7 @@ Live == {"running", "killing"}
 TypeOK ==
     /\ session \in [Clients -> BOOLEAN]
     /\ reapPending \subseteq Clients
+    /\ stale \in [Clients -> 0..1]
     /\ pg \in [PgIds -> [st : {"none", "pending", "created", "removed"},
                          owner : Clients \cup {NoClient},
                          need : 0..Cardinality(Gpus),
@@ -64,6 +69,7 @@ TypeOK ==
 Init ==
     /\ session = [c \in Clients |-> FALSE]
     /\ reapPending = {}
+    /\ stale = [c \in Clients |-> 0]
     /\ pg = [i \in PgIds |-> [st |-> "none", owner |-> NoClient,
                               need |-> 0, gpus |-> {}]]
     /\ actor = [i \in PgIds |-> [st |-> "none", owner |-> NoClient, gpus |-> {}]]
@@ -125,17 +131,22 @@ Connect(c) ==
                       /\ BugKillDuringGrace \/ actor[i].owner \notin reapPending
                    THEN [actor[i] EXCEPT !.st = "killing"]
                    ELSE actor[i]]
-    /\ UNCHANGED <<reapPending, pg, nextPg, restarts>>
+    /\ UNCHANGED <<reapPending, stale, pg, nextPg, restarts>>
 
 \* The session closes. With a grace the reap waits. Without one it runs now.
+\* A disconnect inside a pending grace supersedes that grace's timer. The
+\* model holds one superseded timer per client.
 Disconnect(c) ==
     /\ session[c]
     /\ session' = [session EXCEPT ![c] = FALSE]
     /\ IF GraceDeferred
-       THEN /\ reapPending' = reapPending \cup {c}
+       THEN /\ c \in reapPending => stale[c] = 0
+            /\ stale' = IF c \in reapPending
+                        THEN [stale EXCEPT ![c] = 1] ELSE stale
+            /\ reapPending' = reapPending \cup {c}
             /\ UNCHANGED <<pg, actor>>
        ELSE /\ Reap(c)
-            /\ UNCHANGED reapPending
+            /\ UNCHANGED <<reapPending, stale>>
     /\ UNCHANGED <<nextPg, restarts>>
 
 \* The grace ends. A driver that reopened its session keeps its groups and
@@ -146,6 +157,16 @@ ReapFires(c) ==
     /\ IF session[c] /\ ~BugReapReconnected
        THEN UNCHANGED <<pg, actor>>
        ELSE Reap(c)
+    /\ UNCHANGED <<session, stale, nextPg, restarts>>
+
+\* A superseded timer ends. Its token no longer matches, so it does nothing.
+StaleFires(c) ==
+    /\ stale[c] > 0
+    /\ stale' = [stale EXCEPT ![c] = stale[c] - 1]
+    /\ IF BugStaleTimer
+       THEN /\ reapPending' = reapPending \ {c}
+            /\ IF session[c] THEN UNCHANGED <<pg, actor>> ELSE Reap(c)
+       ELSE UNCHANGED <<reapPending, pg, actor>>
     /\ UNCHANGED <<session, nextPg, restarts>>
 
 PgCreate(c, n) ==
@@ -155,7 +176,7 @@ PgCreate(c, n) ==
                                               need |-> n, gpus |-> {}]],
                       actor)
     /\ nextPg' = nextPg + 1
-    /\ UNCHANGED <<session, reapPending, actor, restarts>>
+    /\ UNCHANGED <<session, reapPending, stale, actor, restarts>>
 
 \* An actor holds the devices of the group it is placed in.
 ActorCreate(i) ==
@@ -164,14 +185,14 @@ ActorCreate(i) ==
     /\ session[pg[i].owner]
     /\ actor' = [actor EXCEPT ![i] = [st |-> "running", owner |-> pg[i].owner,
                                       gpus |-> pg[i].gpus]]
-    /\ UNCHANGED <<session, reapPending, pg, nextPg, restarts>>
+    /\ UNCHANGED <<session, reapPending, stale, pg, nextPg, restarts>>
 
 \* mark_actor_dead: the agent reports the process gone, which frees its
 \* devices.
 Dies(i) ==
     /\ actor' = [actor EXCEPT ![i].st = "dead"]
     /\ pg' = IF BugNoPlaceOnExit THEN pg ELSE TryPlace(pg, actor')
-    /\ UNCHANGED <<session, reapPending, nextPg, restarts>>
+    /\ UNCHANGED <<session, reapPending, stale, nextPg, restarts>>
 
 \* A killed process exits. Fairness guarantees this step.
 KilledExits(i) == actor[i].st = "killing" /\ Dies(i)
@@ -186,13 +207,14 @@ Restart ==
     /\ restarts' = restarts + 1
     /\ session' = [c \in Clients |-> FALSE]
     /\ reapPending' = {}
+    /\ stale' = [c \in Clients |-> 0]
     /\ pg' = [i \in PgIds |->
                 IF pg[i].st \in {"pending", "created"}
                 THEN [pg[i] EXCEPT !.st = "removed"] ELSE pg[i]]
     /\ UNCHANGED <<actor, nextPg>>
 
 Next ==
-    \/ \E c \in Clients : Connect(c) \/ Disconnect(c) \/ ReapFires(c)
+    \/ \E c \in Clients : Connect(c) \/ Disconnect(c) \/ ReapFires(c) \/ StaleFires(c)
     \/ \E c \in Clients, n \in 1..Cardinality(Gpus) : PgCreate(c, n)
     \/ \E i \in PgIds : ActorCreate(i) \/ KilledExits(i) \/ Crashes(i)
     \/ Restart
@@ -200,7 +222,7 @@ Next ==
 \* A killed process exits, and a grace ends.
 Fairness ==
     /\ \A i \in PgIds : WF_vars(KilledExits(i))
-    /\ \A c \in Clients : WF_vars(ReapFires(c))
+    /\ \A c \in Clients : WF_vars(ReapFires(c)) /\ WF_vars(StaleFires(c))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -246,13 +268,15 @@ NoStall ==
         (pg[i].st = "pending" /\ Cardinality(Expected) >= pg[i].need)
             ~> (pg[i].st # "pending" \/ Cardinality(Expected) < pg[i].need)
 
-\* The grace keeps a gone driver's actors up. Only its own reap kills them.
+\* The grace keeps a gone driver's actors up. Only the reap of its latest
+\* disconnect kills them.
 GraceHoldsActors ==
     [][\A i \in PgIds :
           (/\ actor[i].st = "running"
            /\ actor'[i].st = "killing"
            /\ actor[i].owner \in reapPending)
-              => actor[i].owner \notin reapPending']_vars
+              => /\ actor[i].owner \notin reapPending'
+                 /\ stale'[actor[i].owner] = stale[actor[i].owner]]_vars
 
 \* A driver that holds the session keeps its actors.
 SessionKeepsActors ==

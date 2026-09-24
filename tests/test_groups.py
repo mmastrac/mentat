@@ -6,9 +6,12 @@ group-scoped resource views. Run with:
     python3 tests/test_groups.py
 """
 
+import json
 import os
 import subprocess
 import sys
+import time
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -153,8 +156,6 @@ def t05_a_claim_fences_placement():
     claim holds waits rather than spilling onto a node the claim did not
     choose.
     """
-    import json
-
     driver = """
 import os, sys, json
 sys.path[:0] = os.environ["PYTHONPATH"].split(os.pathsep)
@@ -275,6 +276,78 @@ print("PLACED_AFTER %.1f" % (time.time() - t0), flush=True)
         c.cleanup()
 
 
+def t07_the_grace_runs_from_the_latest_disconnect():
+    """Each disconnect started its own grace timer, and the first timer to
+    end reaped the driver. A driver that disconnected, reconnected and
+    disconnected again lost its actors one grace after the first disconnect.
+    """
+    c = tl.Cluster(daemon_env={"MENTAT_SESSION_REAP_GRACE_MS": "4000"})
+    try:
+        c.start_agent("regrace", gpus=1, container="rg", node_ip="127.0.0.1")
+        c.wait_group_gpus("regrace", 1)
+        env = {
+            **os.environ,
+            "RAY_ADDRESS": c.address,
+            "MENTAT_GROUP": "regrace",
+            "PYTHONPATH": os.pathsep.join([tl.PYTHON_PKG, HERE]),
+        }
+        driver = """
+import os, sys
+sys.path[:0] = os.environ["PYTHONPATH"].split(os.pathsep)
+import ray
+from ray import _client
+from ray.util.placement_group import placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from fake_worker import FakeWorker
+ray.init()
+pg = placement_group([{"GPU": 1.0}])
+assert ray.wait([pg.ready()], timeout=15)[0]
+a = ray.remote(FakeWorker).options(
+    name="w0", num_gpus=1,
+    scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg,
+                                                         placement_group_bundle_index=0),
+).remote()
+ray.get(a.pid.remote(), timeout=30)
+print("READY", flush=True)
+s = _client.GLOBAL.session
+for line in sys.stdin:
+    getattr(s, "_" + line.strip())()
+    print("DONE", flush=True)
+"""
+        p = subprocess.Popen([sys.executable, "-c", driver], env=env, text=True,
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=1)
+        tl._children.append(p)
+        assert p.stdout.readline().startswith("READY")
+
+        def send(cmd):
+            p.stdin.write(cmd + "\n")
+            p.stdin.flush()
+            assert p.stdout.readline().startswith("DONE")
+
+        def states():
+            with urllib.request.urlopen(f"http://127.0.0.1:{c.http_port}/status",
+                                        timeout=10) as r:
+                g = (json.load(r).get("groups") or {}).get("regrace") or {}
+            return [a["state"] for a in (g.get("actors") or {}).values()]
+
+        t0 = time.time()
+        send("drop")
+        time.sleep(0.5)
+        send("dial")
+        time.sleep(1.5)
+        send("drop")
+        # The first disconnect's grace ended at t0+4. The latest one ends at t0+6.
+        time.sleep(t0 + 5.0 - time.time())
+        assert states() == ["running"], states()
+        deadline = t0 + 12.0
+        while states() != ["dead"]:
+            assert time.time() < deadline, states()
+            time.sleep(0.2)
+        p.kill()
+    finally:
+        c.cleanup()
+
+
 def main():
     tests = [
         t01_tp4_placement_and_serving,
@@ -283,6 +356,7 @@ def main():
         t04_metrics_per_group,
         t05_a_claim_fences_placement,
         t06_a_new_driver_places_once_the_old_actors_exit,
+        t07_the_grace_runs_from_the_latest_disconnect,
     ]
     try:
         for t in tests:

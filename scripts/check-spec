@@ -62,5 +62,8 @@ check bug-kill-during-grace "Action property GraceHoldsActors is violated" \
 check bug-reap-reconnected "Action property SessionKeepsActors is violated" \
     -e 's/BugReapReconnected = FALSE/BugReapReconnected = TRUE/' \
     -e 's/^INVARIANTS.*/INVARIANTS TypeOK/' -e 's/^PROPERTIES.*/PROPERTIES SessionKeepsActors/'
+check bug-stale-timer "Action property GraceHoldsActors is violated" \
+    -e 's/BugStaleTimer = FALSE/BugStaleTimer = TRUE/' \
+    -e 's/^INVARIANTS.*/INVARIANTS TypeOK/' -e 's/^PROPERTIES.*/PROPERTIES GraceHoldsActors/'
 
 exit $failed
