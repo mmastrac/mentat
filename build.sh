@@ -5,10 +5,10 @@ set -euo pipefail
 #
 #   VERSION=0.19.0 ./build.sh
 #   DOCKER=docker ./build.sh          # if your daemon runs without sudo
-#   REGISTRY=ghcr.io/mmastrac ./build.sh   # also tag for a registry
+#   REGISTRY=ghcr.io/kindlingai ./build.sh   # also tag for a registry
 #
 # Model images COPY --from mentat-artifacts:<ver>. Run this before those
-# builds, or point them at mmastrac/mentat-artifacts:<ver> and skip it.
+# builds, or point them at ghcr.io/kindlingai/mentat-artifacts:<ver> and skip it.
 cd "$(dirname "$0")"
 VERSION="${VERSION:-0.19.0}"
 DOCKER="${DOCKER:-sudo docker}"

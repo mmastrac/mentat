@@ -1,22 +1,25 @@
 name: image
 
-# Every push builds the images on x86_64 and arm64. A v* tag also publishes
-# them to Docker Hub as one multi-arch tag per image. `latest` moves only by
-# hand: run this workflow with the version to promote. That run also deletes
-# the version's per-architecture tags if any are left.
+# Every push and pull request builds the images on x86_64 and arm64.
+# release.yml calls this with publish set. Each architecture then pushes its
+# images to ghcr and hands on their digests, a tarball of the binaries and,
+# from amd64, the shim wheel.
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      latest:
-        description: "Version to point latest at, such as 0.14.0"
+      ref:
+        description: "Tag to build, such as v0.19.0"
+        type: string
         required: true
+      publish:
+        type: boolean
+        default: false
 
 env:
-  HUB: mmastrac
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
   IMAGES: mentat-artifacts mentatd mentatd-serve mentat
 
 jobs:
@@ -24,7 +27,6 @@ jobs:
   # architecture builds on a runner of that architecture.
   build:
     name: ${{ matrix.arch }}
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -32,14 +34,18 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: blacksmith-4vcpu-ubuntu-2404
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
       - name: Pick the image tag
+        env:
+          REF: ${{ inputs.ref }}
         run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then v=${GITHUB_REF_NAME#v}; else v=ci; fi
+          case "$REF" in v*) v=${REF#v} ;; *) v=ci ;; esac
           echo "VERSION=$v" >> "$GITHUB_ENV"
       - run: DOCKER=docker ./build.sh
       - name: Check the image architecture
@@ -49,104 +55,54 @@ jobs:
           echo "runner $want, image $got"
           [ "$want" = "$got" ]
       - name: Check the tag matches the binaries
-        if: github.ref_type == 'tag'
+        if: inputs.ref != ''
         run: |
           got=$(docker run --rm "mentat-artifacts:$VERSION" /out/mentatd --version)
           echo "tag $VERSION, binary $got"
           [ "$got" = "mentatd $VERSION" ]
-      - uses: docker/login-action@v4
-        if: github.ref_type == 'tag'
+      - name: Pack the binaries
+        if: inputs.publish
+        run: |
+          name=mentat_${VERSION}_linux_${{ matrix.arch }}
+          mkdir -p "build/$name" dist
+          c=$(docker create "mentat-artifacts:$VERSION")
+          docker cp "$c:/out/." build/out
+          docker rm "$c" > /dev/null
+          cp build/out/mentatd build/out/mentatd-serve build/out/mentatd-probe-machine \
+            README.md "build/$name/"
+          tar -C build -czf "dist/$name.tar.gz" "$name"
+          # The wheel is pure Python, so one architecture ships it.
+          if [ ${{ matrix.arch }} = amd64 ]; then
+            cp build/out/mentatd-*-py3-none-any.whl dist/
+          fi
+          ls -l dist
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: inputs.publish
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      # Each architecture pushes under its own tag. The publish job joins
-      # them into the version tag.
-      - name: Push the architecture tags
-        if: github.ref_type == 'tag'
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # ghcr cannot drop a tag without deleting the image under it, and the
+      # multi-arch tag refers to that image. So each architecture pushes under
+      # a staging tag the next release reuses, and release.yml joins the
+      # images by digest.
+      - name: Push the images
+        if: inputs.publish
         run: |
+          mkdir -p digests
           for i in $IMAGES; do
-            docker tag "$i:$VERSION" "$HUB/$i:$VERSION-${{ matrix.arch }}"
-            docker push -q "$HUB/$i:$VERSION-${{ matrix.arch }}"
+            ref=$REGISTRY/$i:staging-${{ matrix.arch }}
+            docker tag "$i:$VERSION" "$ref"
+            docker push -q "$ref"
+            d=$(docker buildx imagetools inspect --raw "$ref" | sha256sum | cut -d' ' -f1)
+            echo "$REGISTRY/$i@sha256:$d" > "digests/$i"
           done
-
-  publish:
-    name: publish
-    if: github.ref_type == 'tag'
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: docker/login-action@v4
+          cat digests/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: inputs.publish
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v4
-      - name: Join the architectures under the version tag
-        run: |
-          v=${GITHUB_REF_NAME#v}
-          for i in $IMAGES; do
-            docker buildx imagetools create -t "$HUB/$i:$v" \
-              "$HUB/$i:$v-amd64" "$HUB/$i:$v-arm64"
-            docker buildx imagetools inspect "$HUB/$i:$v" | grep Platform
-          done
-      # Needs a token with the Delete scope. Without one the tags stay.
-      - name: Drop the architecture tags
-        continue-on-error: true
-        env:
-          HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          v=${GITHUB_REF_NAME#v}
-          scripts/hub-drop-tags "$HUB" "$v-amd64" $IMAGES
-          scripts/hub-drop-tags "$HUB" "$v-arm64" $IMAGES
-      - name: Check each image still resolves
-        run: |
-          v=${GITHUB_REF_NAME#v}
-          for i in $IMAGES; do
-            for d in $(docker buildx imagetools inspect --raw "$HUB/$i:$v" | jq -r '.manifests[].digest'); do
-              docker buildx imagetools inspect "$HUB/$i@$d" > /dev/null
-            done
-          done
-
-  latest:
-    name: latest
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v4
-      - name: Point latest at the version
-        env:
-          V: ${{ inputs.latest }}
-        run: |
-          case "$V" in
-            *[!0-9.]* | "") echo "not a version: $V" >&2; exit 1 ;;
-          esac
-          for i in $IMAGES; do
-            docker buildx imagetools create -t "$HUB/$i:latest" "$HUB/$i:$V"
-          done
-      # Needs a token with the Delete scope. Without one the tags stay.
-      - name: Drop the architecture tags
-        continue-on-error: true
-        env:
-          V: ${{ inputs.latest }}
-          HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          scripts/hub-drop-tags "$HUB" "$V-amd64" $IMAGES
-          scripts/hub-drop-tags "$HUB" "$V-arm64" $IMAGES
-      - name: Check each image still resolves
-        env:
-          V: ${{ inputs.latest }}
-        run: |
-          for i in $IMAGES; do
-            for t in "$V" latest; do
-              for d in $(docker buildx imagetools inspect --raw "$HUB/$i:$t" | jq -r '.manifests[].digest'); do
-                docker buildx imagetools inspect "$HUB/$i@$d" > /dev/null
-              done
-            done
-          done
+          name: build-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            dist/
+            digests/

@@ -16,8 +16,8 @@
 #   --target all        ->  mentat:<ver>
 #       Both binaries in one image, so `mentatd serve` resolves.
 #
-# Build all with ./build.sh, or pull mmastrac/mentat-artifacts:<ver> from
-# Docker Hub. A model image referencing a local tag needs build.sh to have run
+# Build all with ./build.sh, or pull ghcr.io/kindlingai/mentat-artifacts:<ver>.
+# A model image referencing a local tag needs build.sh to have run
 # on that host first; one referencing the published tag does not.
 
 # Both binaries link statically against musl. The artifacts image is COPY'd
@@ -52,6 +52,10 @@ RUN pip wheel --no-deps -w /dist . \
     && ls /dist/mentatd-*-py3-none-any.whl
 
 FROM ${RUNTIME_IMAGE} AS artifacts
+LABEL org.opencontainers.image.title="mentat-artifacts" \
+      org.opencontainers.image.description="mentatd, mentatd-serve and the ray shim wheel, for COPY --from" \
+      org.opencontainers.image.source="https://github.com/kindlingai/mentat" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=build /src/target/release/mentatd /out/mentatd
 COPY --from=build /src/target/release/mentatd-serve /out/mentatd-serve
 COPY scripts/mentatd-probe-machine /out/mentatd-probe-machine
@@ -63,7 +67,7 @@ RUN /out/mentatd --version && /out/mentatd-serve --version \
 FROM ${RUNTIME_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="mentatd" \
       org.opencontainers.image.description="Minimal Ray replacement for vLLM multi-node serving" \
-      org.opencontainers.image.source="https://github.com/mmastrac/mentat" \
+      org.opencontainers.image.source="https://github.com/kindlingai/mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=build /src/target/release/mentatd /usr/local/bin/mentatd
 # The agent runs this to report what the box is. It sits beside the binary,
@@ -82,7 +86,7 @@ CMD ["daemon"]
 FROM ${RUNTIME_IMAGE} AS serve
 LABEL org.opencontainers.image.title="mentatd-serve" \
       org.opencontainers.image.description="OpenAI-compatible router and merged MCP for a mentat cluster" \
-      org.opencontainers.image.source="https://github.com/mmastrac/mentat" \
+      org.opencontainers.image.source="https://github.com/kindlingai/mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=build /src/target/release/mentatd-serve /usr/local/bin/mentatd-serve
 RUN mentatd-serve --version
@@ -97,7 +101,7 @@ ENTRYPOINT ["mentatd-serve"]
 FROM ${RUNTIME_IMAGE} AS all
 LABEL org.opencontainers.image.title="mentat" \
       org.opencontainers.image.description="mentatd and mentatd-serve in one image" \
-      org.opencontainers.image.source="https://github.com/mmastrac/mentat" \
+      org.opencontainers.image.source="https://github.com/kindlingai/mentat" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=build /src/target/release/mentatd /usr/local/bin/mentatd
 COPY --from=build /src/target/release/mentatd-serve /usr/local/bin/mentatd-serve

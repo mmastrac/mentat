@@ -6,7 +6,7 @@ resolver = "2"
 version = "0.19.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/mmastrac/mentat"
+repository = "https://github.com/kindlingai/mentat"
 
 [workspace.dependencies]
 mentat-common = { path = "common", version = "0.19.0" }

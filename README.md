@@ -55,10 +55,12 @@ The wheel is not on PyPI. The published artifacts image has both binaries
 and the wheel:
 
 ```
-docker pull mmastrac/mentat-artifacts:0.19.0
+docker pull ghcr.io/kindlingai/mentat-artifacts:0.19.0
 ```
 
-Each published image covers linux/amd64 and linux/arm64.
+Each published image covers linux/amd64 and linux/arm64. Each
+[GitHub release](https://github.com/kindlingai/mentat/releases) also carries
+the static binaries for both, the wheel and their SHA256SUMS.
 
 Building every image locally:
 
@@ -81,8 +83,8 @@ MENTAT_NODE_IP=10.0.0.1 MENTAT_PEERS=10.0.0.2:6379 mentatd daemon
 The model image replaces Ray with the shim:
 
 ```dockerfile
-COPY --from=mmastrac/mentat-artifacts:0.19.0 /out/mentatd /usr/local/bin/mentatd
-COPY --from=mmastrac/mentat-artifacts:0.19.0 /out/mentatd-0.19.0-py3-none-any.whl /tmp/
+COPY --from=ghcr.io/kindlingai/mentat-artifacts:0.19.0 /out/mentatd /usr/local/bin/mentatd
+COPY --from=ghcr.io/kindlingai/mentat-artifacts:0.19.0 /out/mentatd-0.19.0-py3-none-any.whl /tmp/
 RUN ln -s /usr/local/bin/mentatd /usr/local/bin/ray \
  && pip uninstall -y ray \
  && pip install --no-deps /tmp/mentatd-0.19.0-py3-none-any.whl

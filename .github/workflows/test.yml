@@ -4,21 +4,30 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml runs the tests against the tag it publishes.
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
 
 jobs:
   rust:
     name: Rust
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     defaults:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: rust
           shared-key: debug
@@ -33,7 +42,7 @@ jobs:
   suites:
     name: ${{ matrix.suite }}
     needs: rust
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -49,14 +58,35 @@ jobs:
           - topology
           - vllm_shape
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: rust
           shared-key: debug
           save-if: false
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+      # Blacksmith's VMs give eth0 an address with no broadcast address, so
+      # an announcement sent to the interface broadcast goes nowhere. A LAN
+      # has one, and autoconfig and serve test that path. The kernel cannot
+      # add a broadcast to an address in place, so the address goes and comes
+      # back with one, and its routes are put back, in one ip call.
+      - name: Give each interface a broadcast address
+        run: |
+          ip -4 -o addr show scope global | { grep -v ' brd ' || true; } | while read -r _ dev _ addr _; do
+            routes=$(ip -4 route show dev "$dev" | { grep -v 'proto kernel' || true; })
+            {
+              echo "addr del $addr dev $dev"
+              echo "addr add $addr brd + dev $dev"
+              [ -z "$routes" ] || echo "$routes" | sed "s/\$/ dev $dev/; s/^/route replace /"
+            } | tee /dev/stderr | sudo ip -batch -
+          done
+          ip -4 -o addr show scope global
+          ip -4 route
       - run: python3 tests/test_${{ matrix.suite }}.py
